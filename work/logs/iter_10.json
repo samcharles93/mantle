@@ -1,0 +1,4 @@
+{
+  "reasoning_for_change": "Slicing per-row/per-k into bounded views reduces repeated address arithmetic and enables better bounds-check elimination in the hot inner loops, improving throughput without allocations.",
+  "summary_of_changes": "Refactored the inner block update kernels to operate on row slices (cRow/aRow/bRow) instead of repeated base+index addressing. This reduces bounds checks and index arithmetic in the tight loops while preserving behavior and API."
+}

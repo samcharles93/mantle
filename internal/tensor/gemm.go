@@ -1,183 +1,252 @@
 package tensor
 
-import (
-    "runtime"
-)
+import "runtime"
 
-// Tile sizes for blocked matrix multiplication.  These values were chosen
-// empirically to provide a reasonable starting point for cache utilisation on
-// modern CPUs.  They can be tuned per architecture for higher performance.
+// Tuned for the benchmark shape (256^3) and typical L1/L2 sizes.
+// tileN is kept moderate to reduce register pressure in the inner loop.
 const (
-    tileM = 64
-    tileN = 64
-    tileK = 32
+	tileM = 64
+	tileN = 64
+	tileK = 32
 )
 
 type gemmTask struct {
-    C, A, B       *Mat
-    alpha, beta   float32
-    rs, re        int
-    done          chan struct{}
+	C, A, B     *Mat
+	alpha, beta float32
+	rs, re      int
+	done        chan struct{}
 }
 
 type gemmPool struct {
-    size      int
-    tasks     chan gemmTask
-    doneSlots chan chan struct{}
+	size      int
+	tasks     chan gemmTask
+	doneSlots chan chan struct{}
 }
 
 func newGemmPool() *gemmPool {
-    size := runtime.GOMAXPROCS(0)
-    if size < 1 {
-        size = 1
-    }
-    p := &gemmPool{
-        size:      size,
-        tasks:     make(chan gemmTask),
-        doneSlots: make(chan chan struct{}, size),
-    }
-    for i := 0; i < size; i++ {
-        p.doneSlots <- make(chan struct{}, size)
-    }
-    for w := 0; w < size; w++ {
-        go func() {
-            for task := range p.tasks {
-                gemmRangeRows(task.C, task.A, task.B, task.alpha, task.beta, task.rs, task.re)
-                task.done <- struct{}{}
-            }
-        }()
-    }
-    return p
+	size := runtime.GOMAXPROCS(0)
+	if size < 1 {
+		size = 1
+	}
+	p := &gemmPool{
+		size: size,
+		// Buffered to reduce per-call synchronization on task dispatch.
+		tasks:     make(chan gemmTask, size*2),
+		doneSlots: make(chan chan struct{}, size),
+	}
+	for i := 0; i < size; i++ {
+		// Buffered so workers can signal completion without blocking.
+		p.doneSlots <- make(chan struct{}, size)
+	}
+	for w := 0; w < size; w++ {
+		go func() {
+			for task := range p.tasks {
+				gemmRangeRows(task.C, task.A, task.B, task.alpha, task.beta, task.rs, task.re)
+				task.done <- struct{}{}
+			}
+		}()
+	}
+	return p
 }
 
 var gemmWorkPool = newGemmPool()
 
 // GemmPar computes the matrix product C = alpha*A*B + beta*C using a
-// blocked algorithm and parallelising across ranges of output rows.  All
-// matrices must be stored in row‑major order.  If workers <= 0 then the
-// number of logical CPUs (GOMAXPROCS) is used.  When beta == 0 the
-// destination matrix C is overwritten; when beta == 1 the result is added
-// to the existing contents of C; other values scale the original C.
+// blocked algorithm and parallelising across ranges of output rows.
 //
-// This routine panics if the matrix dimensions do not conform to the
-// multiplication (A.C == B.R, C.R == A.R, C.C == B.C).
+// Panics if dimensions do not conform (A.C==B.R, C.R==A.R, C.C==B.C).
 func GemmPar(C, A, B *Mat, alpha, beta float32, workers int) {
-    if A.C != B.R || C.R != A.R || C.C != B.C {
-        panic("gemm: dimension mismatch")
-    }
-    if C.R == 0 || C.C == 0 {
-        return
-    }
-    if workers <= 0 {
-        workers = runtime.GOMAXPROCS(0)
-    }
-    if workers > C.R {
-        workers = C.R
-    }
-    if workers <= 1 {
-        gemmRangeRows(C, A, B, alpha, beta, 0, C.R)
-        return
-    }
-    if workers > gemmWorkPool.size {
-        workers = gemmWorkPool.size
-    }
+	if A.C != B.R || C.R != A.R || C.C != B.C {
+		panic("gemm: dimension mismatch")
+	}
+	if C.R == 0 || C.C == 0 {
+		return
+	}
 
-    // Determine chunk size per worker; distribute rows as evenly as possible.
-    chunk := (C.R + workers - 1) / workers
+	if workers <= 0 {
+		workers = runtime.GOMAXPROCS(0)
+	}
+	if workers > C.R {
+		workers = C.R
+	}
+	if workers <= 1 {
+		gemmRangeRows(C, A, B, alpha, beta, 0, C.R)
+		return
+	}
+	if workers > gemmWorkPool.size {
+		workers = gemmWorkPool.size
+	}
 
-    done := <-gemmWorkPool.doneSlots
-    for w := 0; w < workers; w++ {
-        rs := w * chunk
-        re := rs + chunk
-        if re > C.R {
-            re = C.R
-        }
-        gemmWorkPool.tasks <- gemmTask{
-            C:     C,
-            A:     A,
-            B:     B,
-            alpha: alpha,
-            beta:  beta,
-            rs:    rs,
-            re:    re,
-            done:  done,
-        }
-    }
-    for i := 0; i < workers; i++ {
-        <-done
-    }
-    gemmWorkPool.doneSlots <- done
+	// Even row partitioning.
+	chunk := (C.R + workers - 1) / workers
+
+	done := <-gemmWorkPool.doneSlots
+	for w := 0; w < workers; w++ {
+		rs := w * chunk
+		re := rs + chunk
+		if re > C.R {
+			re = C.R
+		}
+		gemmWorkPool.tasks <- gemmTask{
+			C:     C,
+			A:     A,
+			B:     B,
+			alpha: alpha,
+			beta:  beta,
+			rs:    rs,
+			re:    re,
+			done:  done,
+		}
+	}
+	for i := 0; i < workers; i++ {
+		<-done
+	}
+	gemmWorkPool.doneSlots <- done
 }
 
 // gemmRangeRows performs a blocked GEMM on a contiguous range of rows of C.
-// It updates rows [rs, re) of C using the corresponding rows of A.  The
-// blocking parameters tileM, tileN and tileK divide the loops into cache‑
-// friendly chunks.
+// It updates rows [rs, re) of C using the corresponding rows of A.
 func gemmRangeRows(C, A, B *Mat, alpha, beta float32, rs, re int) {
-    // Scale or zero the portion of C according to beta.  This ensures we do
-    // not accumulate stale data when beta==0.
-    if beta == 0 {
-        for i := rs; i < re; i++ {
-            row := C.Row(i)
-            for j := range row {
-                row[j] = 0
-            }
-        }
-    } else if beta != 1 {
-        for i := rs; i < re; i++ {
-            row := C.Row(i)
-            for j := range row {
-                row[j] *= beta
-            }
-        }
-    }
+	// Fast path: common inference case alpha=1, beta=0.
+	if alpha == 1 && beta == 0 {
+		gemmRangeRowsAlpha1Beta0(C, A, B, rs, re)
+		return
+	}
 
-    m, n, k := A.R, B.C, A.C
-    _ = m
-    // Blocked loops over i (rows), k (inner dimension) and j (columns).
-    for i0 := rs; i0 < re; i0 += tileM {
-        iMax := i0 + tileM
-        if iMax > re {
-            iMax = re
-        }
-        for k0 := 0; k0 < k; k0 += tileK {
-            kMax := k0 + tileK
-            if kMax > k {
-                kMax = k
-            }
-            for j0 := 0; j0 < n; j0 += tileN {
-                jMax := j0 + tileN
-                if jMax > n {
-                    jMax = n
-                }
-                blockUpdate(C, A, B, alpha, i0, iMax, j0, jMax, k0, kMax)
-            }
-        }
-    }
+	// Scale/zero C range according to beta.
+	if beta == 0 {
+		cStride := C.Stride
+		n := C.C
+		for i := rs; i < re; i++ {
+			base := i * cStride
+			row := C.Data[base : base+n]
+			for j := range row {
+				row[j] = 0
+			}
+		}
+	} else if beta != 1 {
+		cStride := C.Stride
+		n := C.C
+		for i := rs; i < re; i++ {
+			base := i * cStride
+			row := C.Data[base : base+n]
+			for j := range row {
+				row[j] *= beta
+			}
+		}
+	}
+
+	// m := A.R
+	// _ = m
+	n := B.C
+	k := A.C
+
+	aStride := A.Stride
+	bStride := B.Stride
+	cStride := C.Stride
+
+	// Blocked loops.
+	for i0 := rs; i0 < re; i0 += tileM {
+		iMax := min(i0+tileM, re)
+		for k0 := 0; k0 < k; k0 += tileK {
+			kMax := min(k0+tileK, k)
+			for j0 := 0; j0 < n; j0 += tileN {
+				jMax := min(j0+tileN, n)
+				blockUpdateGeneric(C.Data, A.Data, B.Data, cStride, aStride, bStride, alpha, i0, iMax, j0, jMax, k0, kMax)
+			}
+		}
+	}
 }
 
-// blockUpdate multiplies a block of A and B and accumulates into C.  It
-// iterates over rows i in [i0, iMax), the shared dimension k in [k0, kMax)
-// and columns j in [j0, jMax).  The loop order is chosen to minimise
-// redundant loads and leverage cache locality.
-func blockUpdate(C, A, B *Mat, alpha float32, i0, iMax, j0, jMax, k0, kMax int) {
-    for i := i0; i < iMax; i++ {
-        cRow := C.Row(i)
-        aRow := A.Row(i)
-        for kk := k0; kk < kMax; kk++ {
-            aik := aRow[kk] * alpha
-            bRow := B.Row(kk)
-            // Unroll the inner j loop in multiples of 4 for marginal speed up
-            j := j0
-            for ; j+3 < jMax; j += 4 {
-                cRow[j+0] += aik * bRow[j+0]
-                cRow[j+1] += aik * bRow[j+1]
-                cRow[j+2] += aik * bRow[j+2]
-                cRow[j+3] += aik * bRow[j+3]
-            }
-            for ; j < jMax; j++ {
-                cRow[j] += aik * bRow[j]
-            }
-        }
-    }
+func gemmRangeRowsAlpha1Beta0(C, A, B *Mat, rs, re int) {
+	// beta==0: clear C range once, then accumulate.
+	cStride := C.Stride
+	n := C.C
+	cData := C.Data
+
+	for i := rs; i < re; i++ {
+		base := i * cStride
+		row := cData[base : base+n]
+		for j := range row {
+			row[j] = 0
+		}
+	}
+
+	k := A.C
+	aStride := A.Stride
+	bStride := B.Stride
+	aData := A.Data
+	bData := B.Data
+
+	// Blocked loops.
+	for i0 := rs; i0 < re; i0 += tileM {
+		iMax := min(i0+tileM, re)
+		for k0 := 0; k0 < k; k0 += tileK {
+			kMax := min(k0+tileK, k)
+			for j0 := 0; j0 < n; j0 += tileN {
+				jMax := min(j0+tileN, n)
+				blockUpdateAlpha1(cData, aData, bData, cStride, aStride, bStride, i0, iMax, j0, jMax, k0, kMax)
+			}
+		}
+	}
+}
+
+func blockUpdateGeneric(cData, aData, bData []float32, cStride, aStride, bStride int, alpha float32, i0, iMax, j0, jMax, k0, kMax int) {
+	width := jMax - j0
+	for i := i0; i < iMax; i++ {
+		aRow := aData[i*aStride:]
+		cOff := i*cStride + j0
+		cRow := cData[cOff : cOff+width]
+
+		for kk := k0; kk < kMax; kk++ {
+			aik := aRow[kk] * alpha
+			bOff := kk*bStride + j0
+			bRow := bData[bOff : bOff+width]
+
+			j := 0
+			for ; j+7 < width; j += 8 {
+				cRow[j+0] += aik * bRow[j+0]
+				cRow[j+1] += aik * bRow[j+1]
+				cRow[j+2] += aik * bRow[j+2]
+				cRow[j+3] += aik * bRow[j+3]
+				cRow[j+4] += aik * bRow[j+4]
+				cRow[j+5] += aik * bRow[j+5]
+				cRow[j+6] += aik * bRow[j+6]
+				cRow[j+7] += aik * bRow[j+7]
+			}
+			for ; j < width; j++ {
+				cRow[j] += aik * bRow[j]
+			}
+		}
+	}
+}
+
+func blockUpdateAlpha1(cData, aData, bData []float32, cStride, aStride, bStride int, i0, iMax, j0, jMax, k0, kMax int) {
+	width := jMax - j0
+	for i := i0; i < iMax; i++ {
+		aRow := aData[i*aStride:]
+		cOff := i*cStride + j0
+		cRow := cData[cOff : cOff+width]
+
+		for kk := k0; kk < kMax; kk++ {
+			aik := aRow[kk]
+			bOff := kk*bStride + j0
+			bRow := bData[bOff : bOff+width]
+
+			j := 0
+			for ; j+7 < width; j += 8 {
+				cRow[j+0] += aik * bRow[j+0]
+				cRow[j+1] += aik * bRow[j+1]
+				cRow[j+2] += aik * bRow[j+2]
+				cRow[j+3] += aik * bRow[j+3]
+				cRow[j+4] += aik * bRow[j+4]
+				cRow[j+5] += aik * bRow[j+5]
+				cRow[j+6] += aik * bRow[j+6]
+				cRow[j+7] += aik * bRow[j+7]
+			}
+			for ; j < width; j++ {
+				cRow[j] += aik * bRow[j]
+			}
+		}
+	}
 }

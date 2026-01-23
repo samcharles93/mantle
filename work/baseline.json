@@ -1,0 +1,13 @@
+{
+  "bench_ns": {
+    "BenchmarkGemmPar-16": 1197
+  },
+  "bench_stats": {
+    "BenchmarkGemmPar-16": {
+      "n": 7,
+      "mean": 1038.7142857142858,
+      "median": 1197,
+      "stddev": 278.6686887600365
+    }
+  }
+}
