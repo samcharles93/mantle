@@ -164,12 +164,10 @@ func gemmRangeRowsAlpha1Beta0(C, A, B *Mat, rs, re int) {
 	n := C.C
 	cData := C.Data
 
+	// Zero contiguous segments with the built-in clear for better codegen.
 	for i := rs; i < re; i++ {
 		base := i * cStride
-		row := cData[base : base+n]
-		for j := range row {
-			row[j] = 0
-		}
+		clear(cData[base : base+n])
 	}
 
 	k := A.C
@@ -233,16 +231,13 @@ func blockUpdateAlpha1(cData, aData, bData []float32, cStride, aStride, bStride 
 			bOff := kk*bStride + j0
 			bRow := bData[bOff : bOff+width]
 
+			// Unroll by 4: reduces loop overhead while keeping register pressure lower than x8.
 			j := 0
-			for ; j+7 < width; j += 8 {
+			for ; j+3 < width; j += 4 {
 				cRow[j+0] += aik * bRow[j+0]
 				cRow[j+1] += aik * bRow[j+1]
 				cRow[j+2] += aik * bRow[j+2]
 				cRow[j+3] += aik * bRow[j+3]
-				cRow[j+4] += aik * bRow[j+4]
-				cRow[j+5] += aik * bRow[j+5]
-				cRow[j+6] += aik * bRow[j+6]
-				cRow[j+7] += aik * bRow[j+7]
 			}
 			for ; j < width; j++ {
 				cRow[j] += aik * bRow[j]
