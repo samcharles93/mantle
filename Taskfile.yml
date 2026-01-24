@@ -1,0 +1,20 @@
+version: "3"
+
+tasks:
+  gguf_inspect:build:
+    cmds:
+      - go build ./cmd/gguf_inspect
+      - ./gguf_inspect --help
+
+  infer:build:
+    cmds:
+      - go build -ldflags="-w -s" -trimpath -o bin/infer ./cmd/infer
+      - ./infer --help
+
+  run_gguf:
+    cmds:
+      - ./bin/infer --model /models/gguf/LFM2.5-1.2B-Instruct-GGUF_LFM2.5-1.2B-Instruct-Q4_K_M.gguf --steps 128 --max-context 4096 --prompt "Hello"
+  
+  run_safetensors:
+    cmds:
+      - ./bin/infer --model work/models/LFM2.5-1.2B-Thinking/ --steps 128 --max-context 4096 --prompt "Hello"
