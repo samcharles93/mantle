@@ -8,13 +8,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/urfave/cli/v3"
 )
 
 const (
-	defaultModel   = "gpt-5.2" // or gpt-4o
+	defaultModel   = "gpt-5.2-codex" // or gpt-5.2
 	defaultBaseURL = "https://api.openai.com/v1"
 	planFileName   = "PLAN.md"
 )
@@ -171,6 +172,8 @@ func runIterate(ctx context.Context, cmd *cli.Command) error {
 				"reasoning_for_change": change.Reasoning,
 				"diff":                 change.Diff,
 				"file":                 change.File,
+				"old":                  change.Old,
+				"new":                  change.New,
 			}
 			if data, err := json.MarshalIndent(logEntry, "", "  "); err == nil {
 				logPath := filepath.Join(logDir, fmt.Sprintf("iter_%02d_response%s.json", i, suffix))
@@ -190,6 +193,19 @@ func runIterate(ctx context.Context, cmd *cli.Command) error {
 			payload := change.Diff
 			if payload == "" {
 				payload = change.File
+			}
+			if payload == "" && change.Old != "" && change.New != "" {
+				updated, err := applyReplacement(rootDir, targetRel, change.Old, change.New)
+				if err != nil {
+					if attempt+1 < retries {
+						fmt.Printf(">> Retry requested: %v\n", err)
+						lastReject = err.Error()
+						continue
+					}
+					fmt.Printf("!! Verification process error: %v\n", err)
+					break
+				}
+				payload = updated
 			}
 			accepted, patchContent, err := verifyCandidate(cmd, rootDir, targetRel, payload, base, workDir)
 			if err != nil {
@@ -217,8 +233,14 @@ func runIterate(ctx context.Context, cmd *cli.Command) error {
 
 			fmt.Println(">> Promoting changes to main repo...")
 			// Apply the winning patch to main repo
-			if err := applyDiff(rootDir, patchContent); err != nil {
-				return fmt.Errorf("failed to promote patch: %w", err)
+			var promoteErr error
+			if isApplyPatch(patchContent) {
+				promoteErr = applyPatchFormat(rootDir, patchContent)
+			} else {
+				promoteErr = applyDiff(rootDir, patchContent)
+			}
+			if promoteErr != nil {
+				return fmt.Errorf("failed to promote patch: %w", promoteErr)
 			}
 
 			newBench, err := runBench(rootDir, cmd.String("bench"), int(cmd.Int("bench-runs")))
@@ -261,6 +283,26 @@ func buildRetryPrompt(base string, attempt int, reason string) string {
 	return fmt.Sprintf("%s\n\nPrevious attempt failed (%s). Retry %d: return a valid unified diff or complete file via propose_change.", base, reason, attempt)
 }
 
+func applyReplacement(rootDir, targetRel, oldSnippet, newSnippet string) (string, error) {
+	if oldSnippet == "" || newSnippet == "" {
+		return "", fmt.Errorf("old/new snippet missing")
+	}
+	path := filepath.Join(rootDir, targetRel)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	text := string(data)
+	count := strings.Count(text, oldSnippet)
+	if count == 0 {
+		return "", fmt.Errorf("old snippet not found in target file")
+	}
+	if count > 1 {
+		return "", fmt.Errorf("old snippet matched multiple times (%d)", count)
+	}
+	return strings.Replace(text, oldSnippet, newSnippet, 1), nil
+}
+
 // verifyCandidate creates a temp environment, applies the change, and runs tests.
 // It returns (accepted, normalized_patch, error).
 func verifyCandidate(cmd *cli.Command, rootDir, targetRel, llmOutput string, base *Baseline, workDir string) (bool, string, error) {
@@ -271,7 +313,9 @@ func verifyCandidate(cmd *cli.Command, rootDir, targetRel, llmOutput string, bas
 
 	defer func() {
 		if !cmd.Bool("keep-rejects") {
-			os.RemoveAll(tempDir)
+			if err := os.RemoveAll(tempDir); err != nil {
+				fmt.Printf("warning: remove temp dir failed: %v\n", err)
+			}
 		} else {
 			rejectsDir := filepath.Join(workDir, "rejects")
 			_ = os.MkdirAll(rejectsDir, 0755)

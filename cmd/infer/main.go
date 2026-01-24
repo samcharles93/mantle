@@ -45,11 +45,11 @@ func main() {
 
 		// Debug flags
 		showConfig  bool
-		        showTokens  bool
-				showKV      bool
-				showTensors int64
-		
-				// Profiling
+		showTokens  bool
+		showKV      bool
+		showTensors int64
+
+		// Profiling
 				cpuProfile string
 				memProfile string
 			)
@@ -400,22 +400,6 @@ func main() {
 		}
 
 		if isGGUF && showKV && ggufFile != nil {
-			fmt.Fprintf(os.Stderr, "Tokenizer Model: %s\n", tokConfig.Model)
-			fmt.Fprintf(os.Stderr, "Tokenizer Pre: %s\n", tokConfig.Pre)
-			fmt.Fprintf(os.Stderr, "Tokenizer Tokens: %d\n", len(tokConfig.Tokens))
-			fmt.Fprintf(os.Stderr, "Tokenizer Merges: %d\n", len(tokConfig.Merges))
-			fmt.Fprintf(os.Stderr, "Tokenizer Types: %d\n", len(tokConfig.TokenTypes))
-
-			// Debug: find reserved token
-			for i, t := range tokConfig.Tokens {
-				if t == "<|reserved_29|>" {
-					fmt.Fprintf(os.Stderr, "Debug: <|reserved_29|> is ID %d\n", i)
-				}
-				if i < 10 {
-					fmt.Fprintf(os.Stderr, "Token[%d] = %q\n", i, t)
-				}
-			}
-
 			fmt.Fprintln(os.Stderr, "\nAll metadata:")
 			keys := make([]string, 0, len(ggufFile.KV))
 			for k := range ggufFile.KV {
@@ -548,18 +532,6 @@ func main() {
 
 			if showTokens {
 				fmt.Fprintf(os.Stderr, "\nInput tokens (%d): %s\n", len(ids), joinInts(ids))
-				if len(ids) > 0 {
-					fmt.Fprint(os.Stderr, "Decoded input: ")
-					for i, id := range ids {
-						if i >= 5 {
-							fmt.Fprint(os.Stderr, " ...")
-							break
-						}
-						s, _ := tok.Decode([]int{id})
-							fmt.Fprintf(os.Stderr, "%q ", s)
-						}
-					fmt.Fprintln(os.Stderr)
-				}
 			}
 
 			// Run generation

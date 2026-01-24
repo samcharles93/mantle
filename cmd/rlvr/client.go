@@ -25,6 +25,7 @@ var (
 	ErrNoToolCall   = errors.New("model did not call tool propose_change")
 	ErrBadToolArgs  = errors.New("tool args missing diff or file")
 	ErrBadToolParse = errors.New("failed to parse tool args")
+	ErrBadDiffFmt   = errors.New("diff must be apply_patch format")
 )
 
 func NewClient(key, url, model string, temp float64, reasoning string, tokens int) *Client {
@@ -97,6 +98,8 @@ type ProposedChange struct {
 	Diff      string   `json:"diff,omitempty"`
 	File      string   `json:"file,omitempty"`
 	DiffLines []string `json:"diff_lines,omitempty"`
+	Old       string   `json:"old,omitempty"`
+	New       string   `json:"new,omitempty"`
 }
 
 func (c *Client) Call(prompt string) (ProposedChange, string, error) {
@@ -123,6 +126,14 @@ func (c *Client) Call(prompt string) (ProposedChange, string, error) {
 					"file": map[string]any{
 						"type":        "string",
 						"description": "Complete updated file content.",
+					},
+					"old": map[string]any{
+						"type":        "string",
+						"description": "Exact snippet from the current file to be replaced (must match exactly once).",
+					},
+					"new": map[string]any{
+						"type":        "string",
+						"description": "Replacement snippet for the 'old' snippet.",
 					},
 				},
 				"required": []string{
@@ -159,7 +170,7 @@ func (c *Client) Call(prompt string) (ProposedChange, string, error) {
 	if err != nil {
 		return ProposedChange{}, string(jsonBody), err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
@@ -197,8 +208,15 @@ func (c *Client) Call(prompt string) (ProposedChange, string, error) {
 	// Clean up non-standard diff markers
 	change.Diff = cleanDiff(change.Diff)
 
-	if change.Diff == "" && change.File == "" {
+	if change.Diff == "" && change.File == "" && (change.Old == "" || change.New == "") {
 		return ProposedChange{}, string(jsonBody), ErrBadToolArgs
+	}
+
+	if change.Diff != "" {
+		diff := strings.TrimSpace(change.Diff)
+		if !strings.Contains(diff, "*** Begin Patch") || !strings.Contains(diff, "*** End Patch") {
+			return ProposedChange{}, string(jsonBody), ErrBadDiffFmt
+		}
 	}
 
 	return change, string(jsonBody), nil
@@ -207,6 +225,9 @@ func (c *Client) Call(prompt string) (ProposedChange, string, error) {
 func cleanDiff(diff string) string {
 	if diff == "" {
 		return diff
+	}
+	if strings.Contains(diff, "*** Begin Patch") {
+		return strings.TrimSpace(diff)
 	}
 
 	lines := strings.Split(diff, "\n")
@@ -257,13 +278,17 @@ func buildPrompt(ctx map[string]string, target, benchSpec string) string {
 	var sb strings.Builder
 	sb.WriteString("You are optimizing a Go LLM inference kernel.\n")
 	sb.WriteString("TASK: Propose a change to make the Target File faster while passing all tests.\n")
-	sb.WriteString("Use the propose_change tool to return a unified diff (preferred) or full file content.\n")
-	sb.WriteString("\nIMPORTANT: If providing a diff, use standard git unified diff format:\n")
-	sb.WriteString("  diff --git a/path/to/file b/path/to/file\n")
-	sb.WriteString("  --- a/path/to/file\n")
-	sb.WriteString("  +++ b/path/to/file\n")
-	sb.WriteString("  @@ -start,count +start,count @@\n")
-	sb.WriteString("Do NOT use markers like '*** Begin Patch' or '*** Update File:'.\n")
+	sb.WriteString("Use the propose_change tool to return one of:\n")
+	sb.WriteString("- file: complete updated file (preferred), OR\n")
+	sb.WriteString("- old/new: exact snippet replacement (preferred if change is local), OR\n")
+	sb.WriteString("- diff: apply_patch format ONLY.\n")
+	sb.WriteString("\nIf using apply_patch format, follow this envelope exactly:\n")
+	sb.WriteString("*** Begin Patch\n")
+	sb.WriteString("*** Update File: path/to/file.go\n")
+	sb.WriteString("@@ optional header\n")
+	sb.WriteString("-old line\n")
+	sb.WriteString("+new line\n")
+	sb.WriteString("*** End Patch\n")
 	sb.WriteString("Do NOT include markdown, backticks, or commentary outside the tool call.\n")
 	sb.WriteString("\nConstraints:\n")
 	sb.WriteString("- Pure Go only (no CGO).\n")

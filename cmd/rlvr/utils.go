@@ -24,7 +24,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 
 	// Create destination directory if it doesn't exist
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
@@ -35,7 +35,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer dest.Close()
+	defer func() { _ = dest.Close() }()
 
 	// Use buffered copy for efficiency
 	buf := bufio.NewReader(source)
@@ -59,28 +59,8 @@ func removeOldTempDirs() {
 			}
 			// Remove temp dirs older than 1 hour
 			if time.Since(info.ModTime()) > time.Hour {
-				os.RemoveAll(path)
+				_ = os.RemoveAll(path)
 			}
 		}
 	}
-}
-
-func initGitRepo(dir string) error {
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-		return nil // Already a git repo
-	}
-
-	// Initialize git repo
-	if err := runCmd(dir, "git", "init"); err != nil {
-		return err
-	}
-	// Configure user for commits
-	_ = runCmd(dir, "git", "config", "user.email", "rlvr@bot")
-	_ = runCmd(dir, "git", "config", "user.name", "rlvr")
-
-	// Add all files and commit
-	if err := runCmd(dir, "git", "add", "-A"); err != nil {
-		return err
-	}
-	return runCmd(dir, "git", "commit", "-m", "init", "--allow-empty")
 }

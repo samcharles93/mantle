@@ -98,7 +98,7 @@ func collectContext(root, targetRel string) (map[string]string, error) {
 		if err != nil {
 			return "", err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		// Use a buffer to read efficiently
 		reader := bufio.NewReader(f)
