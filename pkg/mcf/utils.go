@@ -36,7 +36,7 @@ func alignFile(f *os.File, n int64) error {
 	if n <= 1 {
 		return nil
 	}
-	pos, err := f.Seek(0, 1) // io.SeekCurrent without importing io
+	pos, err := f.Seek(0, 1)
 	if err != nil {
 		return err
 	}
