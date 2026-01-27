@@ -1,10 +1,12 @@
 package mcf
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"math"
 	"os"
@@ -34,6 +36,12 @@ type PackOptions struct {
 
 	// Cast controls float casting: "keep" (default), "f16", "bf16".
 	Cast string
+
+	// Dedup enables safe, behaviour-preserving deduplication by aliasing
+	// byte-identical tensor payloads (after any cast). If enabled, duplicates
+	// do not take extra space in SectionTensorData; their TensorIndex entries
+	// point at the canonical payload.
+	Dedup bool
 
 	// IncludeResources packs config/tokenizer/vocab/merges sections if present.
 	IncludeResources bool
@@ -159,6 +167,12 @@ func Pack(opts PackOptions) error {
 	copyBuf := make([]byte, 1<<20)
 	outBuf := make([]byte, len(copyBuf))
 
+	var deduper *tensorDeduper
+	if opts.Dedup {
+		// buffer also used for file-range comparisons; 1 MiB is plenty
+		deduper = newTensorDeduper(outF, make([]byte, 1<<20))
+	}
+
 	names := st.SortedTensorNames()
 	recs := make([]TensorIndexRecord, 0, len(names))
 
@@ -190,7 +204,7 @@ func Pack(opts PackOptions) error {
 			}
 		}
 
-		off, err := td.CurrentAbsOffset()
+		startOff, err := td.CurrentAbsOffset()
 		if err != nil {
 			return err
 		}
@@ -203,36 +217,84 @@ func Pack(opts PackOptions) error {
 		outDT := inDT
 		var written uint64
 
+		// Optional hash-on-write for dedup.
+		var h io.Writer
+		var sumHash *hash.Hash
+		_ = sumHash
+
+		var hasher = sha256.New()
+		var dst io.Writer = td
+		if deduper != nil {
+			dst = io.MultiWriter(td, hasher)
+		}
+
+		_ = h
+
 		switch opts.Cast {
 		case "keep":
-			n, err := copyExact(td, r, inBytes, copyBuf)
+			n, err := copyExact(dst, r, inBytes, copyBuf)
 			if err != nil {
 				return fmt.Errorf("mcf: tensor %q: copy: %w", name, err)
 			}
 			written = n
+			if written != inBytes {
+				return fmt.Errorf("mcf: tensor %q: short write (wrote %d, want %d)", name, written, inBytes)
+			}
 
 		case "bf16":
-			outDT, written, err = castToBF16(td, r, ref.Info.DType, nElem, copyBuf, outBuf)
+			outDT, written, err = castToBF16(dst, r, ref.Info.DType, nElem, copyBuf, outBuf)
 			if err != nil {
 				return fmt.Errorf("mcf: tensor %q: cast bf16: %w", name, err)
 			}
+			wantOut := nElem * 2
+			if written != wantOut {
+				return fmt.Errorf("mcf: tensor %q: short write (wrote %d, want %d)", name, written, wantOut)
+			}
 
 		case "f16":
-			outDT, written, err = castToF16(td, r, ref.Info.DType, nElem, copyBuf, outBuf)
+			outDT, written, err = castToF16(dst, r, ref.Info.DType, nElem, copyBuf, outBuf)
 			if err != nil {
 				return fmt.Errorf("mcf: tensor %q: cast f16: %w", name, err)
+			}
+			wantOut := nElem * 2
+			if written != wantOut {
+				return fmt.Errorf("mcf: tensor %q: short write (wrote %d, want %d)", name, written, wantOut)
 			}
 
 		default:
 			return fmt.Errorf("mcf: unsupported --cast %q (use keep|f16|bf16)", opts.Cast)
 		}
 
+		dataOff := startOff
+		dataSize := written
+
+		if deduper != nil {
+			sum32, err := hashOfBytesWritten(hasher.Sum(nil))
+			if err != nil {
+				return err
+			}
+
+			existingOff, ok, err := deduper.FindMatch(startOff, outDT, shapeU64, dataSize, sum32)
+			if err != nil {
+				return err
+			}
+			if ok {
+				// Roll back the just-written duplicate payload.
+				if err := td.TruncateAbs(startOff); err != nil {
+					return err
+				}
+				dataOff = existingOff
+			} else {
+				deduper.Add(startOff, outDT, shapeU64, dataSize, sum32)
+			}
+		}
+
 		recs = append(recs, TensorIndexRecord{
 			Name:     name,
 			DType:    outDT,
 			Shape:    shapeU64,
-			DataOff:  off,
-			DataSize: written,
+			DataOff:  dataOff,
+			DataSize: dataSize,
 		})
 	}
 
