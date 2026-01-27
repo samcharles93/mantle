@@ -1,4 +1,4 @@
-module infer
+module github.com/samcharles93/mantle
 
 go 1.25
 
