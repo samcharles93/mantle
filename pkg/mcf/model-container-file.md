@@ -9,7 +9,8 @@ MCF is a single-file, memory-mappable container for machine learning models, des
 1. All references in the container use absolute file offsets. No in-memory pointers or relocations are implid.
 2. All multi-byte numeric fields are encoded in little-endian byte order
 3. No section is implicitely required, consumers must explicitely declare which sections are dependent and tolerate absence of others.
-4. The container describes data and structure only, runtime behaviour is never inferred from container contents.
+4. The container describes data and structure only; runtime behaviour must remain explicit. Runtimes may consult explicit
+   configuration fields (for example HF `config.json`) but should gate behaviour on clearly defined keys.
 5. Performance critical data must be stored contiguously and separately from descriptive or infrequently accessed metadata.
 
 ## Non-Goals
@@ -35,4 +36,3 @@ Optional future sections may include:
     <!-- [ Tokenizer ] -->
     <!-- [ Chat Template ] -->
     <!-- [ Vocab ] -->
-

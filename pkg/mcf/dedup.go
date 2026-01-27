@@ -18,6 +18,7 @@ type dedupKey struct {
 type dedupEntry struct {
 	Off   uint64
 	Shape []uint64
+	Name  string
 }
 
 type tensorDeduper struct {
@@ -52,7 +53,7 @@ func (d *tensorDeduper) key(dtype TensorDType, shape []uint64, size uint64, sum 
 //
 // The verification is done by comparing bytes in the OUTPUT file:
 // [existingOff, existingOff+size) vs [newOff, newOff+size).
-func (d *tensorDeduper) FindMatch(newOff uint64, dtype TensorDType, shape []uint64, size uint64, sum [32]byte) (uint64, bool, error) {
+func (d *tensorDeduper) FindMatch(newOff uint64, dtype TensorDType, shape []uint64, size uint64, sum [32]byte) (existingOff uint64, existingName string, ok bool, err error) {
 	k := d.key(dtype, shape, size, sum)
 	cands := d.seen[k]
 	for i := range cands {
@@ -61,22 +62,23 @@ func (d *tensorDeduper) FindMatch(newOff uint64, dtype TensorDType, shape []uint
 		}
 		eq, err := compareFileRanges(d.out, cands[i].Off, newOff, size, d.buf)
 		if err != nil {
-			return 0, false, err
+			return 0, "", false, err
 		}
 		if eq {
-			return cands[i].Off, true, nil
+			return cands[i].Off, cands[i].Name, true, nil
 		}
 	}
-	return 0, false, nil
+	return 0, "", false, nil
 }
 
-func (d *tensorDeduper) Add(off uint64, dtype TensorDType, shape []uint64, size uint64, sum [32]byte) {
+func (d *tensorDeduper) Add(off uint64, name string, dtype TensorDType, shape []uint64, size uint64, sum [32]byte) {
 	k := d.key(dtype, shape, size, sum)
 	shapeCopy := make([]uint64, len(shape))
 	copy(shapeCopy, shape)
 	d.seen[k] = append(d.seen[k], dedupEntry{
 		Off:   off,
 		Shape: shapeCopy,
+		Name:  name,
 	})
 }
 

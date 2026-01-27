@@ -49,7 +49,7 @@ func main() {
 	printKey(f, "tokenizer.ggml.pad_token_id")
 	printKey(f, "tokenizer.ggml.unk_token_id")
 
-	if cfg, err := model.LoadConfig(f); err == nil {
+	if cfg, err := loadLFM2Config(f); err == nil {
 		fmt.Println()
 		fmt.Println("LFM2 params:")
 		fmt.Printf("  blocks:          %d\n", cfg.Config.BlockCount)

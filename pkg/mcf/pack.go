@@ -46,6 +46,13 @@ type PackOptions struct {
 	// IncludeResources packs config/tokenizer/vocab/merges sections if present.
 	IncludeResources bool
 
+	// Logf is optional. If nil, Pack is silent.
+	Logf func(format string, args ...any)
+
+	// ProgressEvery logs a progress line every N tensors if Logf != nil.
+	// If 0, defaults to 50.
+	ProgressEvery int
+
 	// Optional explicit resource overrides. If empty, defaults to InputDir/<filename>.
 	ConfigJSONPath           string
 	GenerationConfigJSONPath string
@@ -95,6 +102,14 @@ func Pack(opts PackOptions) error {
 		return err
 	}
 
+	logf := opts.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	if opts.ProgressEvery <= 0 {
+		opts.ProgressEvery = 50
+	}
+
 	// Resource sections (optional)
 	if opts.IncludeResources {
 		if opts.ConfigJSONPath == "" {
@@ -125,11 +140,18 @@ func Pack(opts PackOptions) error {
 		if err := writeOptionalFileSection(w, SectionTokenizerJSON, resourceSectionVersion, opts.TokenizerJSONPath); err != nil {
 			return err
 		}
-		if err := writeOptionalFileSection(w, SectionTokenizerConfigJSON, resourceSectionVersion, opts.TokenizerConfigJSONPath); err != nil {
-			return err
-		}
 		if err := writeOptionalFileSection(w, SectionVocabJSON, resourceSectionVersion, opts.VocabJSONPath); err != nil {
 			return err
+		}
+		chatTemplatePath := filepath.Join(opts.InputDir, "chat_template.jinja")
+		tokCfgBytes, err := loadTokenizerConfigWithTemplate(opts.TokenizerConfigJSONPath, chatTemplatePath, logf)
+		if err != nil {
+			return err
+		}
+		if len(tokCfgBytes) > 0 {
+			if err := w.WriteSection(SectionTokenizerConfigJSON, resourceSectionVersion, tokCfgBytes); err != nil {
+				return err
+			}
 		}
 		if err := writeOptionalFileSection(w, SectionMergesTXT, resourceSectionVersion, opts.MergesTXTPath); err != nil {
 			return err
@@ -175,8 +197,18 @@ func Pack(opts PackOptions) error {
 
 	names := st.SortedTensorNames()
 	recs := make([]TensorIndexRecord, 0, len(names))
+	total := len(names)
+
+	logf("pack: tensors=%d cast=%s dedup=%t align=%d", total, opts.Cast, opts.Dedup, align)
+
+	var (
+		processed      int
+		dedupCount     int
+		dedupSavedByte uint64
+	)
 
 	for _, name := range names {
+		processed++
 		ref, ok := st.Tensor(name)
 		if !ok {
 			return fmt.Errorf("mcf: safetensors tensor disappeared: %s", name)
@@ -274,7 +306,7 @@ func Pack(opts PackOptions) error {
 				return err
 			}
 
-			existingOff, ok, err := deduper.FindMatch(startOff, outDT, shapeU64, dataSize, sum32)
+			existingOff, existingName, ok, err := deduper.FindMatch(startOff, outDT, shapeU64, dataSize, sum32)
 			if err != nil {
 				return err
 			}
@@ -284,8 +316,11 @@ func Pack(opts PackOptions) error {
 					return err
 				}
 				dataOff = existingOff
+				dedupCount++
+				dedupSavedByte += dataSize
+				logf("dedup: %s -> %s (off=%d size=%d)", name, existingName, existingOff, dataSize)
 			} else {
-				deduper.Add(startOff, outDT, shapeU64, dataSize, sum32)
+				deduper.Add(startOff, name, outDT, shapeU64, dataSize, sum32)
 			}
 		}
 
@@ -296,6 +331,11 @@ func Pack(opts PackOptions) error {
 			DataOff:  dataOff,
 			DataSize: dataSize,
 		})
+
+		if processed%opts.ProgressEvery == 0 || processed == total {
+			pct := 100.0 * float64(processed) / float64(total)
+			logf("pack: %d/%d tensors (%.1f%%)", processed, total, pct)
+		}
 	}
 
 	if err := td.End(); err != nil {
@@ -309,6 +349,11 @@ func Pack(opts PackOptions) error {
 	if err := w.WriteSection(SectionTensorIndex, TensorIndexVersion, idxBytes); err != nil {
 		return err
 	}
+
+	if dedupCount > 0 {
+		logf("pack: deduped %d tensors, saved %.2f MiB", dedupCount, float64(dedupSavedByte)/(1<<20))
+	}
+	logf("pack: wrote tensor index with %d records", len(recs))
 
 	return w.Finalise()
 }
@@ -328,6 +373,61 @@ func writeOptionalFileSection(w *Writer, typ SectionType, version uint32, path s
 
 	_, err = w.WriteSectionFromReader(typ, version, f)
 	return err
+}
+
+func readFileIfExists(path string) ([]byte, bool, error) {
+	if path == "" {
+		return nil, false, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return b, true, nil
+}
+
+func loadTokenizerConfigWithTemplate(tokCfgPath, templatePath string, logf func(string, ...any)) ([]byte, error) {
+	cfgBytes, cfgExists, err := readFileIfExists(tokCfgPath)
+	if err != nil {
+		return nil, err
+	}
+	tplBytes, tplExists, err := readFileIfExists(templatePath)
+	if err != nil {
+		return nil, err
+	}
+	if !cfgExists && !tplExists {
+		return nil, nil
+	}
+
+	cfg := make(map[string]any)
+	if cfgExists && len(cfgBytes) > 0 {
+		if err := json.Unmarshal(cfgBytes, &cfg); err != nil {
+			return nil, fmt.Errorf("mcf: tokenizer_config.json: %w", err)
+		}
+	}
+
+	tpl := strings.TrimSpace(string(tplBytes))
+	if tplExists && tpl != "" {
+		existing, _ := cfg["chat_template"].(string)
+		if strings.TrimSpace(existing) == "" {
+			cfg["chat_template"] = tpl
+			if logf != nil {
+				logf("pack: embedded chat template from %s", templatePath)
+			}
+		}
+	}
+
+	if len(cfg) == 0 {
+		return cfgBytes, nil
+	}
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func safetensorsDTypeInfo(dt string) (TensorDType, int, error) {

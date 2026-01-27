@@ -1,20 +1,59 @@
 version: "3"
 
+vars:
+  GO: go1.26rc2
+
 tasks:
+  default:
+    cmds:
+      - task: build
+
   gguf_inspect:build:
+    desc: Build the GGUF inspection tool
     cmds:
-      - go build ./cmd/gguf_inspect
-      - ./gguf_inspect --help
+      - "{{.GO}} build -o bin/gguf_inspect ./cmd/gguf_inspect"
+      - bin/gguf_inspect --help
 
-  infer:build:
+  installGoRC:
+    desc: Install Go 1.26rc2
     cmds:
-      - go build -ldflags="-w -s" -trimpath -o bin/infer ./cmd/infer
-      - ./infer --help
+      - go install golang.org/dl/go1.26rc2@latest
+      - go1.26rc2 download
+      - go1.26rc2 version
 
-  run_gguf:
+  build:
+    env:
+      GOEXPERIMENT: simd
+    desc: Build the app using the latest Go 1.26 RC and output the help text.
     cmds:
-      - ./bin/infer --model /models/gguf/LFM2.5-1.2B-Instruct-GGUF_LFM2.5-1.2B-Instruct-Q4_K_M.gguf --steps 128 --max-context 4096 --prompt "Hello"
-  
-  run_safetensors:
+      - "{{.GO}} build -ldflags=\"-w -s\" -trimpath -o bin/mantle ./cmd/mantle"
+      - bin/mantle --help
+    generates:
+      - bin/mantle
+
+  pack:
+    env:
+      MANTLE_PACK_OUT_DIR: /work/models/mcf
+    desc: Pack a model into the model container format.
     cmds:
-      - ./bin/infer --model work/models/LFM2.5-1.2B-Thinking/ --steps 128 --max-context 4096 --prompt "Hello"
+      - bin/mantle pack -in /work/models/raw/Ministral-3-3B-Instruct-2512-BF16 -out /work/models/mcf/Ministral-3-3B-Instruct-2512-BF16.mcf --dedup --cast keep
+
+  run:
+    env:
+      MANTLE_MODELS_DIR: /work/models/mcf
+    desc: Run a small test prompt against an MCF model.
+    cmds:
+      - |
+        bin/mantle run -m "$MANTLE_MODELS_DIR/Ministral-3-3B-Instruct-2512-BF16.mcf" \
+          --steps 128 \
+          --show-config \
+          --show-tokens \
+          --system "You are an all-knowing Artificial Intelligence" \
+          --prompt "Hello, this is a test prompt. In 100 words, tell me about you."
+
+  run-interactive:
+    env:
+      MANTLE_MODELS_DIR: /work/models/mcf
+    desc: Run in interactive mode
+    cmds:
+      - bin/mantle run --system "You are an all-knowing Artificial Intelligence"

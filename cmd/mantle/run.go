@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime/pprof"
@@ -56,9 +57,8 @@ func runCmd() *cli.Command {
 			&cli.StringFlag{
 				Name:        "model",
 				Aliases:     []string{"m"},
-				Usage:       "path to .mcf file",
+				Usage:       "path to .mcf file (or set $MANTLE_MODELS_DIR to select interactively)",
 				Destination: &modelPath,
-				Required:    true,
 			},
 			&cli.StringFlag{
 				Name:        "prompt",
@@ -83,13 +83,15 @@ func runCmd() *cli.Command {
 				Destination: &temp,
 			},
 			&cli.Int64Flag{
-				Name:        "topk",
+				Name:        "top_k",
+				Aliases:     []string{"topk"},
 				Usage:       "top-k sampling parameter",
 				Value:       40,
 				Destination: &topK,
 			},
 			&cli.Float64Flag{
-				Name:        "topp",
+				Name:        "top_p",
+				Aliases:     []string{"topp"},
 				Usage:       "top-p sampling parameter",
 				Value:       0.95,
 				Destination: &topP,
@@ -201,6 +203,12 @@ func runCmd() *cli.Command {
 				}()
 			}
 
+			resolvedModelPath, err := resolveRunModelPath(modelPath, os.Stdin, os.Stderr)
+			if err != nil {
+				return cli.Exit(fmt.Sprintf("error: resolve model: %v", err), 1)
+			}
+			modelPath = resolvedModelPath
+
 			stat, err := os.Stat(modelPath)
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: stat model path %q: %v", modelPath, err), 1)
@@ -208,6 +216,7 @@ func runCmd() *cli.Command {
 
 			var (
 				m         *model.Model
+				hfTok     *tokenizer.HFTokenizer
 				tok       tokenizer.Tokenizer
 				tokConfig tokenizer.TokenizerConfig
 				genConfig *model.Config
@@ -246,16 +255,73 @@ func runCmd() *cli.Command {
 			}
 			genConfig = &m.Config.Config
 
+			// Apply generation_config.json defaults when the user did not override flags.
+			type hfGenerationConfig struct {
+				Temperature       *float64 `json:"temperature"`
+				TopK              *int     `json:"top_k"`
+				TopP              *float64 `json:"top_p"`
+				RepetitionPenalty *float64 `json:"repetition_penalty"`
+			}
+			var (
+				tempFromGen   bool
+				topKFromGen   bool
+				topPFromGen   bool
+				repeatFromGen bool
+			)
+			isSet := func(names ...string) bool {
+				for _, n := range names {
+					if c.IsSet(n) {
+						return true
+					}
+				}
+				return false
+			}
+			if genBytes := mcfFile.SectionData(mcf.SectionHFGenerationConfigJSON); len(genBytes) > 0 {
+				var hfGen hfGenerationConfig
+				if err := json.Unmarshal(genBytes, &hfGen); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: parse generation_config.json: %v\n", err)
+				} else {
+					if !isSet("temp") && hfGen.Temperature != nil && *hfGen.Temperature > 0 {
+						temp = *hfGen.Temperature
+						tempFromGen = true
+					}
+					if !isSet("top_k", "topk") && hfGen.TopK != nil && *hfGen.TopK > 0 {
+						topK = int64(*hfGen.TopK)
+						topKFromGen = true
+					}
+					if !isSet("top_p", "topp") && hfGen.TopP != nil && *hfGen.TopP > 0 && *hfGen.TopP <= 1 {
+						topP = *hfGen.TopP
+						topPFromGen = true
+					}
+					if !isSet("repeat-penalty") && hfGen.RepetitionPenalty != nil && *hfGen.RepetitionPenalty > 0 {
+						repeatPenalty = *hfGen.RepetitionPenalty
+						repeatFromGen = true
+					}
+				}
+			}
+
 			// Load Tokenizer (Required for MCF)
 			if tokenizerJSON != "" && fileExists(tokenizerJSON) {
-				hfTok, err := tokenizer.LoadHFTokenizer(tokenizerJSON, tokenizerConfig)
+				tokJSONBytes, err := os.ReadFile(tokenizerJSON)
+				if err != nil {
+					return cli.Exit(fmt.Sprintf("error: read tokenizer.json: %v", err), 1)
+				}
+				var tokCfgBytes []byte
+				if tokenizerConfig != "" && fileExists(tokenizerConfig) {
+					tokCfgBytes, err = os.ReadFile(tokenizerConfig)
+					if err != nil {
+						return cli.Exit(fmt.Sprintf("error: load tokenizer_config.json: %v", err), 1)
+					}
+				}
+				hfTok, err = tokenizer.LoadHFTokenizerBytes(tokJSONBytes, tokCfgBytes)
 				if err != nil {
 					return cli.Exit(fmt.Sprintf("error: load tokenizer.json: %v", err), 1)
 				}
-				tok = hfTok
-				tokConfig.BOSTokenID = hfTok.BOSID()
-				tokConfig.AddBOS = hfTok.AddBOS()
-				tokConfig.EOSTokenID = hfTok.EOSID()
+				if parsedCfg, err := tokenizer.ParseHFTokenizerConfigBytes(tokJSONBytes, tokCfgBytes); err == nil {
+					tokConfig = parsedCfg
+				} else {
+					fmt.Fprintf(os.Stderr, "warning: parse tokenizer_config.json: %v\n", err)
+				}
 			} else {
 				tokJSON := mcfFile.SectionData(mcf.SectionTokenizerJSON)
 				if len(tokJSON) == 0 {
@@ -271,14 +337,34 @@ func runCmd() *cli.Command {
 					tokCfg = mcfFile.SectionData(mcf.SectionTokenizerConfigJSON)
 				}
 
-				hfTok, err := tokenizer.LoadHFTokenizerBytes(tokJSON, tokCfg)
+				hfTok, err = tokenizer.LoadHFTokenizerBytes(tokJSON, tokCfg)
 				if err != nil {
 					return cli.Exit(fmt.Sprintf("error: load tokenizer.json: %v", err), 1)
 				}
-				tok = hfTok
-				tokConfig.BOSTokenID = hfTok.BOSID()
-				tokConfig.AddBOS = hfTok.AddBOS()
-				tokConfig.EOSTokenID = hfTok.EOSID()
+				if parsedCfg, err := tokenizer.ParseHFTokenizerConfigBytes(tokJSON, tokCfg); err == nil {
+					tokConfig = parsedCfg
+				} else {
+					fmt.Fprintf(os.Stderr, "warning: parse tokenizer_config.json: %v\n", err)
+				}
+			}
+
+			tok = hfTok
+
+			// Prefer tokenizer-derived IDs and add-bos behavior; preserve chat_template.
+			tokConfig.BOSTokenID = hfTok.BOSID()
+			tokConfig.AddBOS = hfTok.AddBOS()
+			tokConfig.EOSTokenID = hfTok.EOSID()
+
+			// Resolve effective chat template once for show-config and rendering.
+			effectiveTemplate, templateSource := resolveChatTemplate(chatTemplate, tokConfig, m.Config.Arch, cfgBytes)
+			samplingSource := func(flagSet bool, fromGen bool) string {
+				if flagSet {
+					return "flag"
+				}
+				if fromGen {
+					return "generation_config"
+				}
+				return "default"
 			}
 
 			loadDuration := time.Since(loadStart)
@@ -287,16 +373,43 @@ func runCmd() *cli.Command {
 			if showConfig {
 				fmt.Fprintf(os.Stderr, "MCF | arch=%s\n", m.Config.Arch)
 
-				fmt.Fprintf(os.Stderr, "blocks=%d embd=%d ffn=%d heads=%d vocab=%d ctx=%d\n",
+				fmt.Fprintf(os.Stderr, "blocks=%d embd=%d ffn=%d heads=%d head_dim=%d vocab=%d ctx=%d\n",
 					genConfig.BlockCount,
 					genConfig.EmbeddingLength,
 					genConfig.FFNLength,
 					genConfig.HeadCount,
+					genConfig.HeadDim,
 					genConfig.VocabSize,
 					genConfig.ContextLength)
+				if genConfig.RopeScaling != nil {
+					fmt.Fprintf(
+						os.Stderr,
+						"rope: base=%g scaling=%s factor=%g orig_ctx=%d low=%g high=%g\n",
+						genConfig.RopeFreqBase,
+						genConfig.RopeScaling.Type,
+						genConfig.RopeScaling.Factor,
+						genConfig.RopeScaling.OrigMaxCtx,
+						genConfig.RopeScaling.LowFactor,
+						genConfig.RopeScaling.HighFactor,
+					)
+				} else {
+					fmt.Fprintf(os.Stderr, "rope: base=%g scaling=none\n", genConfig.RopeFreqBase)
+				}
 
 				if len(genConfig.HeadCountKV) > 0 {
 					fmt.Fprintf(os.Stderr, "HeadCountKV: %v\n", genConfig.HeadCountKV)
+				}
+
+				fmt.Fprintf(os.Stderr, "sampling: temp=%.3g (%s) top_k=%d (%s) top_p=%.3g (%s) repeat_penalty=%.3g (%s)\n",
+					temp, samplingSource(c.IsSet("temp"), tempFromGen),
+					topK, samplingSource(c.IsSet("top_k") || c.IsSet("topk"), topKFromGen),
+					topP, samplingSource(c.IsSet("top_p") || c.IsSet("topp"), topPFromGen),
+					repeatPenalty, samplingSource(c.IsSet("repeat-penalty"), repeatFromGen),
+				)
+				if effectiveTemplate == "" {
+					fmt.Fprintln(os.Stderr, "chat_template: none")
+				} else {
+					fmt.Fprintf(os.Stderr, "chat_template: %s\n", templateSource)
 				}
 			}
 
@@ -314,8 +427,20 @@ func runCmd() *cli.Command {
 			})
 
 			stopTokens := []int{tokConfig.EOSTokenID}
-			if tokConfig.EOSTokenID != 2 {
-				stopTokens = append(stopTokens, 2) // <|endoftext|> fallback
+			if tokConfig.EOSTokenID < 0 {
+				stopTokens = stopTokens[:0]
+			}
+			// Only add the legacy id=2 fallback when it is actually an end-of-text token
+			// for this tokenizer.
+			if t, ok := tok.(interface{ TokenString(int) string }); ok {
+				token2 := strings.ToLower(strings.TrimSpace(t.TokenString(2)))
+				if token2 == "<|endoftext|>" || token2 == "<|end_of_text|>" || token2 == "</s>" {
+					if tokConfig.EOSTokenID != 2 && tokConfig.EOSTokenID >= 0 {
+						stopTokens = append(stopTokens, 2)
+					} else if tokConfig.EOSTokenID < 0 {
+						stopTokens = append(stopTokens, 2)
+					}
+				}
 			}
 
 			generator := &inference.Generator{
@@ -360,30 +485,13 @@ func runCmd() *cli.Command {
 
 				// Render prompt
 				var rendered string
-				if !noTemplate {
-					// Prefer explicitly provided template, then GGUF embedded/extracted
-					template := chatTemplate
-					if template == "" {
-						template = tokConfig.ChatTemplate
-					}
-
-					// Load from file if it looks like a path and exists
-					if len(template) < 256 && fileExists(template) {
-						if raw, err := os.ReadFile(template); err == nil {
-							template = string(raw)
-						}
-					}
-
+				if !noTemplate && effectiveTemplate != "" {
 					// Get info from tokenizer interface if possible
 					bosToken := ""
-					addBOS := false
-
 					if t, ok := tok.(interface{ TokenString(int) string }); ok {
 						bosToken = t.TokenString(tokConfig.BOSTokenID)
 					}
-					addBOS = tokConfig.AddBOS
-
-					if s, ok := tokenizer.RenderPromptTemplate(template, bosToken, addBOS, msgs, true); ok {
+					if s, ok := tokenizer.RenderPromptTemplate(effectiveTemplate, bosToken, tokConfig.AddBOS, msgs, true); ok {
 						rendered = s
 					}
 				}
@@ -447,6 +555,34 @@ func joinInts(ids []int) string {
 	}
 	b.WriteByte(']')
 	return b.String()
+}
+
+func resolveChatTemplate(override string, cfg tokenizer.TokenizerConfig, arch string, hfConfig []byte) (string, string) {
+	template := strings.TrimSpace(override)
+	source := ""
+	switch {
+	case template != "":
+		source = "flag"
+	case strings.TrimSpace(cfg.ChatTemplate) != "":
+		template = cfg.ChatTemplate
+		source = "tokenizer_config"
+	default:
+		if inferred, ok := model.InferChatTemplate(arch, hfConfig); ok {
+			template = inferred
+			source = "model-default"
+		} else {
+			return "", "none"
+		}
+	}
+
+	// If the template looks like a path, load its contents.
+	if len(template) < 256 && fileExists(template) {
+		if raw, err := os.ReadFile(template); err == nil && len(raw) > 0 {
+			template = string(raw)
+			source += ":file"
+		}
+	}
+	return template, source
 }
 
 func fileExists(path string) bool {

@@ -59,9 +59,29 @@ func Softmax(x []float32) {
 	}
 }
 
+// Sigmoid computes the logistic sigmoid activation.
+func Sigmoid(x float32) float32 {
+	return float32(1.0 / (1.0 + math.Exp(float64(-x))))
+}
+
 // Silu computes the Sigmoid Linear Unit (SiLU) activation.
 func Silu(x float32) float32 {
-	return x / (1 + float32(math.Exp(float64(-x))))
+	return x * Sigmoid(x)
+}
+
+// SiluAndMul computes dst[i] = Silu(x[i]) * x[d+i] where d = len(x)/2.
+// dst must have length d and x must have even length.
+func SiluAndMul(dst, x []float32) {
+	if len(x)%2 != 0 {
+		panic("SiluAndMul requires even-length input")
+	}
+	d := len(x) / 2
+	if len(dst) < d {
+		panic("SiluAndMul dst too small")
+	}
+	for i := range d {
+		dst[i] = Silu(x[i]) * x[d+i]
+	}
 }
 
 // ApplyRoPE applies Rotary Positional Embeddings to x.

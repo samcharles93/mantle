@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/urfave/cli/v3"
@@ -22,10 +23,9 @@ func packCmd() *cli.Command {
 				Required: true,
 			},
 			&cli.StringFlag{
-				Name:     "output",
-				Aliases:  []string{"out"},
-				Usage:    "Output .mcf path",
-				Required: true,
+				Name:    "output",
+				Aliases: []string{"out"},
+				Usage:   "Output .mcf path (default: ./out/<input-dir-name>.mcf or $MANTLE_PACK_OUT_DIR)",
 			},
 			&cli.BoolFlag{
 				Name:  "dedup",
@@ -50,6 +50,11 @@ func packCmd() *cli.Command {
 				Name:  "no-resources",
 				Usage: "Do not embed config/tokenizer/vocab/merges sections",
 			},
+			&cli.IntFlag{
+				Name:  "progress-every",
+				Usage: "Log packing progress every N tensors (0 uses default)",
+				Value: 50,
+			},
 
 			// Optional explicit resource overrides (otherwise auto: <input>/<filename>)
 			&cli.StringFlag{Name: "config-json", Usage: "Override config.json path"},
@@ -61,7 +66,13 @@ func packCmd() *cli.Command {
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			inDir := cmd.String("input")
-			outPath := cmd.String("output")
+			outPath, defaulted, err := resolvePackOut(inDir, cmd.String("output"))
+			if err != nil {
+				return fmt.Errorf("pack: resolve output: %w", err)
+			}
+			if defaulted {
+				_, _ = fmt.Fprintf(os.Stderr, "pack: output not specified; using %s\n", outPath)
+			}
 
 			modelST := cmd.String("model-safetensors")
 			if modelST != "" && !filepath.IsAbs(modelST) {
@@ -77,6 +88,10 @@ func packCmd() *cli.Command {
 				TensorAlign:      cmd.Int("tensor-align"),
 				Cast:             cmd.String("cast"),
 				IncludeResources: !cmd.Bool("no-resources"),
+				ProgressEvery:    cmd.Int("progress-every"),
+				Logf: func(format string, args ...any) {
+					_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
+				},
 
 				ConfigJSONPath:           cmd.String("config-json"),
 				GenerationConfigJSONPath: cmd.String("generation-config-json"),

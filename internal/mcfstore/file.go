@@ -103,7 +103,8 @@ func (f *File) Tensor(name string) (TensorInfo, error) {
 	}, nil
 }
 
-func (f *File) ReadTensorF32(name string) ([]float32, TensorInfo, error) {
+// ReadTensorRaw returns a validated, zero-copy view of a tensor's raw bytes.
+func (f *File) ReadTensorRaw(name string) ([]byte, TensorInfo, error) {
 	info, err := f.Tensor(name)
 	if err != nil {
 		return nil, TensorInfo{}, err
@@ -120,6 +121,43 @@ func (f *File) ReadTensorF32(name string) ([]float32, TensorInfo, error) {
 		return nil, TensorInfo{}, err
 	}
 
+	n, err := numElementsU64(info.Shape)
+	if err != nil {
+		return nil, TensorInfo{}, fmt.Errorf("tensor %s: %w", name, err)
+	}
+	elemSize, err := dtypeElemSize(info.DType)
+	if err != nil {
+		return nil, TensorInfo{}, fmt.Errorf("tensor %s: %w", name, err)
+	}
+	wantSize, ok := mulUint64(n, uint64(elemSize))
+	if !ok {
+		return nil, TensorInfo{}, fmt.Errorf("tensor %s: tensor too large", name)
+	}
+	if wantSize != info.DataSize {
+		return nil, TensorInfo{}, fmt.Errorf(
+			"tensor %s: data size mismatch (want %d, have %d)",
+			name,
+			wantSize,
+			info.DataSize,
+		)
+	}
+	if uint64(len(raw)) != info.DataSize {
+		return nil, TensorInfo{}, fmt.Errorf(
+			"tensor %s: raw length mismatch (want %d, have %d)",
+			name,
+			info.DataSize,
+			len(raw),
+		)
+	}
+	return raw, info, nil
+}
+
+func (f *File) ReadTensorF32(name string) ([]float32, TensorInfo, error) {
+	raw, info, err := f.ReadTensorRaw(name)
+	if err != nil {
+		return nil, TensorInfo{}, err
+	}
+
 	n, err := numElements(info.Shape)
 	if err != nil {
 		return nil, TensorInfo{}, fmt.Errorf("tensor %s: %w", name, err)
@@ -127,18 +165,12 @@ func (f *File) ReadTensorF32(name string) ([]float32, TensorInfo, error) {
 
 	switch info.DType {
 	case mcf.DTypeF32:
-		if len(raw) != n*4 {
-			return nil, TensorInfo{}, fmt.Errorf("tensor %s: invalid f32 data size", name)
-		}
 		out := make([]float32, n)
 		for i := 0; i < n; i++ {
 			out[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[i*4:]))
 		}
 		return out, info, nil
 	case mcf.DTypeBF16:
-		if len(raw) != n*2 {
-			return nil, TensorInfo{}, fmt.Errorf("tensor %s: invalid bf16 data size", name)
-		}
 		out := make([]float32, n)
 		for i := 0; i < n; i++ {
 			u := binary.LittleEndian.Uint16(raw[i*2:])
@@ -146,9 +178,6 @@ func (f *File) ReadTensorF32(name string) ([]float32, TensorInfo, error) {
 		}
 		return out, info, nil
 	case mcf.DTypeF16:
-		if len(raw) != n*2 {
-			return nil, TensorInfo{}, fmt.Errorf("tensor %s: invalid f16 data size", name)
-		}
 		out := make([]float32, n)
 		for i := 0; i < n; i++ {
 			u := binary.LittleEndian.Uint16(raw[i*2:])
@@ -207,6 +236,49 @@ func numElements(shape []int) (int, error) {
 		n *= d
 	}
 	return n, nil
+}
+
+func numElementsU64(shape []int) (uint64, error) {
+	if len(shape) == 0 {
+		return 0, errors.New("empty shape")
+	}
+	var n uint64 = 1
+	for _, d := range shape {
+		if d <= 0 {
+			return 0, fmt.Errorf("invalid dim %d", d)
+		}
+		next, ok := mulUint64(n, uint64(d))
+		if !ok {
+			return 0, errors.New("tensor too large")
+		}
+		n = next
+	}
+	return n, nil
+}
+
+func mulUint64(a, b uint64) (uint64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if a > ^uint64(0)/b {
+		return 0, false
+	}
+	return a * b, true
+}
+
+func dtypeElemSize(dt mcf.TensorDType) (int, error) {
+	switch dt {
+	case mcf.DTypeF32, mcf.DTypeI32, mcf.DTypeU32:
+		return 4, nil
+	case mcf.DTypeF16, mcf.DTypeBF16, mcf.DTypeI16, mcf.DTypeU16:
+		return 2, nil
+	case mcf.DTypeF64, mcf.DTypeI64, mcf.DTypeU64:
+		return 8, nil
+	case mcf.DTypeI8, mcf.DTypeU8:
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("unsupported dtype %d", dt)
+	}
 }
 
 func bf16ToF32(u uint16) float32 {

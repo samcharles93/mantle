@@ -59,10 +59,17 @@ type hfTokenizerJSON struct {
 }
 
 type hfTokenizerConfig struct {
-	AddBOS bool   `json:"add_bos_token"`
-	AddEOS bool   `json:"add_eos_token"`
-	BOS    string `json:"bos_token"`
-	EOS    string `json:"eos_token"`
+	AddBOS       bool   `json:"add_bos_token"`
+	AddEOS       bool   `json:"add_eos_token"`
+	BOS          string `json:"bos_token"`
+	EOS          string `json:"eos_token"`
+	PAD          string `json:"pad_token"`
+	UNK          string `json:"unk_token"`
+	BOSID        *int   `json:"bos_token_id"`
+	EOSID        *int   `json:"eos_token_id"`
+	PADID        *int   `json:"pad_token_id"`
+	UNKID        *int   `json:"unk_token_id"`
+	ChatTemplate string `json:"chat_template"`
 }
 
 func LoadHFTokenizer(tokJSON, tokConfig string) (*HFTokenizer, error) {
@@ -79,34 +86,62 @@ func LoadHFTokenizer(tokJSON, tokConfig string) (*HFTokenizer, error) {
 	return LoadHFTokenizerBytes(data, cfg)
 }
 
-func LoadHFTokenizerBytes(tokJSON []byte, tokConfig []byte) (*HFTokenizer, error) {
+func parseHFTokenizerJSON(tokJSON []byte) (hfTokenizerJSON, map[string]int, error) {
 	var tj hfTokenizerJSON
 	if err := json.Unmarshal(tokJSON, &tj); err != nil {
+		return hfTokenizerJSON{}, nil, err
+	}
+
+	encoder := make(map[string]int, len(tj.Model.Vocab)+len(tj.AddedTokens))
+	for tok, id := range tj.Model.Vocab {
+		encoder[tok] = id
+	}
+	for _, at := range tj.AddedTokens {
+		encoder[at.Content] = at.ID
+	}
+	return tj, encoder, nil
+}
+
+func bosIDFromTemplateProcessing(tj hfTokenizerJSON) int {
+	best := -1
+	for _, proc := range tj.PostProcessor.Processors {
+		if proc.Type != "TemplateProcessing" {
+			continue
+		}
+		for _, spec := range proc.SpecialTokens {
+			if len(spec.IDs) == 0 {
+				continue
+			}
+			id := spec.IDs[0]
+			if id < 0 {
+				continue
+			}
+			if best < 0 || id < best {
+				best = id
+			}
+		}
+	}
+	return best
+}
+
+func LoadHFTokenizerBytes(tokJSON []byte, tokConfig []byte) (*HFTokenizer, error) {
+	tj, encoder, err := parseHFTokenizerJSON(tokJSON)
+	if err != nil {
 		return nil, err
 	}
 	if strings.ToUpper(tj.Model.Type) != "BPE" {
 		return nil, fmt.Errorf("unsupported tokenizer model: %s", tj.Model.Type)
 	}
 
-	encoder := make(map[string]int, len(tj.Model.Vocab))
 	maxID := -1
-	for tok, id := range tj.Model.Vocab {
-		encoder[tok] = id
+	for _, id := range encoder {
 		if id > maxID {
 			maxID = id
 		}
 	}
-	for _, at := range tj.AddedTokens {
-		if at.ID > maxID {
-			maxID = at.ID
-		}
-	}
 	decoder := make([]string, maxID+1)
-	for tok, id := range tj.Model.Vocab {
+	for tok, id := range encoder {
 		decoder[id] = tok
-	}
-	for _, at := range tj.AddedTokens {
-		decoder[at.ID] = at.Content
 	}
 
 	bpeRanks := make(map[Pair]int, len(tj.Model.Merges))
@@ -162,17 +197,16 @@ func LoadHFTokenizerBytes(tokJSON []byte, tokConfig []byte) (*HFTokenizer, error
 			eosID = id
 		}
 	}
-	// If TemplateProcessing defines a BOS token, use it.
-	for _, proc := range tj.PostProcessor.Processors {
-		if proc.Type == "TemplateProcessing" {
-			for _, spec := range proc.SpecialTokens {
-				if len(spec.IDs) > 0 {
-					bosID = spec.IDs[0]
-					addBOS = true
-					break
-				}
-			}
-		}
+	if cfg.BOSID != nil && *cfg.BOSID >= 0 {
+		bosID = *cfg.BOSID
+	}
+	if cfg.EOSID != nil && *cfg.EOSID >= 0 {
+		eosID = *cfg.EOSID
+	}
+	// If TemplateProcessing defines a BOS token, use it deterministically.
+	if ppBosID := bosIDFromTemplateProcessing(tj); ppBosID >= 0 {
+		bosID = ppBosID
+		addBOS = true
 	}
 
 	unkID := -1
@@ -199,6 +233,57 @@ func LoadHFTokenizerBytes(tokJSON []byte, tokConfig []byte) (*HFTokenizer, error
 		special:      collectSpecials(decoder),
 	}
 	return tok, nil
+}
+
+// ParseHFTokenizerConfigBytes extracts useful runtime settings (like chat_template)
+// from tokenizer_config.json and tokenizer.json.
+func ParseHFTokenizerConfigBytes(tokJSON []byte, tokConfig []byte) (TokenizerConfig, error) {
+	tj, encoder, err := parseHFTokenizerJSON(tokJSON)
+	if err != nil {
+		return TokenizerConfig{}, err
+	}
+	if strings.ToUpper(tj.Model.Type) != "BPE" {
+		return TokenizerConfig{}, fmt.Errorf("unsupported tokenizer model: %s", tj.Model.Type)
+	}
+
+	var cfg hfTokenizerConfig
+	if len(tokConfig) > 0 {
+		_ = json.Unmarshal(tokConfig, &cfg)
+	}
+
+	out := TokenizerConfig{
+		AddBOS:       cfg.AddBOS,
+		AddEOS:       cfg.AddEOS,
+		ChatTemplate: cfg.ChatTemplate,
+		BOSTokenID:   -1,
+		EOSTokenID:   -1,
+		PADTokenID:   -1,
+		UNKTokenID:   -1,
+	}
+
+	resolveID := func(tok string, idPtr *int) int {
+		if tok != "" {
+			if id, ok := encoder[tok]; ok {
+				return id
+			}
+		}
+		if idPtr != nil && *idPtr >= 0 {
+			return *idPtr
+		}
+		return -1
+	}
+
+	out.BOSTokenID = resolveID(cfg.BOS, cfg.BOSID)
+	out.EOSTokenID = resolveID(cfg.EOS, cfg.EOSID)
+	out.PADTokenID = resolveID(cfg.PAD, cfg.PADID)
+	out.UNKTokenID = resolveID(cfg.UNK, cfg.UNKID)
+
+	if ppBosID := bosIDFromTemplateProcessing(tj); ppBosID >= 0 {
+		out.BOSTokenID = ppBosID
+		out.AddBOS = true
+	}
+
+	return out, nil
 }
 
 func (t *HFTokenizer) Encode(text string) ([]int, error) {
@@ -337,8 +422,17 @@ func buildHFPattern(pre struct {
 			}
 		}
 	}
-	// LFM2 uses a Llama3-style regex with lookahead not supported by Go. Replace with llama.cpp variant.
-	if strings.Contains(pat, "(?!\\S)") || strings.Contains(pat, "(?i:") {
+	// Some HF tokenizers ship PCRE-style regexes (lookahead, atomic groups,
+	// anchors like \A/\G/\z) that Go's regexp package does not support.
+	// Replace with a llama.cpp-compatible variant when we detect them.
+	if strings.Contains(pat, "(?!\\S)") ||
+		strings.Contains(pat, "(?i:") ||
+		strings.Contains(pat, "(?=") ||
+		strings.Contains(pat, "(?<") ||
+		strings.Contains(pat, "(?>") ||
+		strings.Contains(pat, `\G`) ||
+		strings.Contains(pat, `\A`) ||
+		strings.Contains(pat, `\z`) {
 		pat = `(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+`
 	}
 	return regexp.MustCompile(pat)

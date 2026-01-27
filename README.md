@@ -30,7 +30,12 @@ The CLI is organised around simple verbs.
 mantle run -m Qwen3/Qwen3-3B-Instruct
 # or with an explicit file
 mantle run -m /work/models/Qwen3-3B-Instruct.mcf
+# or select from a models directory
+MANTLE_MODELS_DIR=/work/models mantle run
 ```
+
+If `--model/-m` is not provided, `mantle run` requires `MANTLE_MODELS_DIR`. It selects the only
+`.mcf` in that directory automatically, or prompts you to choose when multiple models are present.
 
 ### Serve a model directory
 
@@ -48,7 +53,12 @@ mantle inspect -m /work/models/Qwen3-3B-Instruct.mcf
 
 ```bash
 mantle pack --in /path/to/model --out /work/models/MyModel.mcf
+# or rely on defaults
+mantle pack --in /path/to/model
 ```
+
+When `--out/--output` is omitted, the default output path is `./out/<input-dir-name>.mcf`. Set
+`MANTLE_PACK_OUT_DIR` to override the output directory. The `--out` flag always takes precedence.
 
 > Note: Exact flags may evolve. Keep verbs stable (`run`, `serve`, `inspect`, `pack`).
 
@@ -65,6 +75,8 @@ mantle pack --in /path/to/model --out /work/models/MyModel.mcf
 * Single-file container with **absolute offsets**
 * **Little-endian** on-disk fields
 * **Optional sections**: readers tolerate unknown sections and tolerate missing optional ones
+* Runtime behavior remains explicit, but may consult explicit config fields. For example, sliding attention is only
+  enabled when `layer_types` includes `sliding_attention` and `sliding_window > 0` in the model config.
 * Designed for **random access**:
 
   * buffered I/O (`ReadAt`) as a baseline

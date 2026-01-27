@@ -1,6 +1,11 @@
 package tensor
 
-import "runtime"
+import (
+	"runtime"
+	"sync"
+
+	"github.com/samcharles93/mantle/pkg/mcf"
+)
 
 type matVecTask struct {
 	dst    []float32
@@ -18,8 +23,13 @@ type matVecPool struct {
 
 var matVecWorkPool *matVecPool
 
-func init() {
-	matVecWorkPool = newMatVecPool()
+var matVecPoolOnce sync.Once
+
+func getMatVecPool() *matVecPool {
+	matVecPoolOnce.Do(func() {
+		matVecWorkPool = newMatVecPool()
+	})
+	return matVecWorkPool
 }
 
 func newMatVecPool() *matVecPool {
@@ -52,8 +62,12 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 	if w.R == 0 || w.C == 0 {
 		return
 	}
+	if len(dst) < w.R || len(x) < w.C {
+		panic("matvec shape mismatch")
+	}
 
-	workers := matVecWorkPool.size
+	pool := getMatVecPool()
+	workers := pool.size
 	if workers > w.R {
 		workers = w.R
 	}
@@ -64,7 +78,7 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 	}
 
 	chunk := (w.R + workers - 1) / workers
-	done := <-matVecWorkPool.doneSlots
+	done := <-pool.doneSlots
 
 	activeWorkers := 0
 	for i := 0; i < workers; i++ {
@@ -77,7 +91,7 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 			break
 		}
 		activeWorkers++
-		matVecWorkPool.tasks <- matVecTask{
+		pool.tasks <- matVecTask{
 			dst:  dst,
 			w:    w,
 			x:    x,
@@ -90,10 +104,22 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 	for i := 0; i < activeWorkers; i++ {
 		<-done
 	}
-	matVecWorkPool.doneSlots <- done
+	pool.doneSlots <- done
 }
 
 func matVecRange(dst []float32, w *Mat, x []float32, rs, re int) {
+	if w.Raw != nil && w.DType != mcf.DTypeF32 {
+		switch w.DType {
+		case mcf.DTypeBF16:
+			matVecRangeBF16(dst, w, x, rs, re)
+			return
+		case mcf.DTypeF16:
+			matVecRangeF16(dst, w, x, rs, re)
+			return
+		default:
+			panic("unsupported dtype for matvec")
+		}
+	}
 	for i := rs; i < re; i++ {
 		row := w.Data[i*w.Stride : i*w.Stride+w.C]
 		var sum float32
@@ -103,6 +129,140 @@ func matVecRange(dst []float32, w *Mat, x []float32, rs, re int) {
 		}
 		for ; j < w.C; j++ {
 			sum += row[j] * x[j]
+		}
+		dst[i] = sum
+	}
+}
+
+func matVecRangeBF16(dst []float32, w *Mat, x []float32, rs, re int) {
+	raw := w.Raw
+	if u16raw, ok := rawUint16LE(raw); ok {
+		for i := rs; i < re; i++ {
+			rowBase := i * w.Stride
+			row := u16raw[rowBase : rowBase+w.Stride]
+			if w.C > 0 {
+				// Help bounds-check elimination for the hot inner loop.
+				_ = row[w.C-1]
+			}
+			var sum float32
+			j := 0
+			for ; j+7 < w.C; j += 8 {
+				sum += bf16ToF32Table(row[j+0])*x[j+0] +
+					bf16ToF32Table(row[j+1])*x[j+1] +
+					bf16ToF32Table(row[j+2])*x[j+2] +
+					bf16ToF32Table(row[j+3])*x[j+3] +
+					bf16ToF32Table(row[j+4])*x[j+4] +
+					bf16ToF32Table(row[j+5])*x[j+5] +
+					bf16ToF32Table(row[j+6])*x[j+6] +
+					bf16ToF32Table(row[j+7])*x[j+7]
+			}
+			for ; j < w.C; j++ {
+				sum += bf16ToF32Table(row[j]) * x[j]
+			}
+			dst[i] = sum
+		}
+		return
+	}
+
+	rowBytes := w.Stride * 2
+	for i := rs; i < re; i++ {
+		off := i * rowBytes
+		if w.C > 0 {
+			// Help bounds-check elimination for the hot inner loop.
+			_ = raw[off+(w.C-1)*2+1]
+		}
+		var sum float32
+		j := 0
+		offj := off
+		for ; j+7 < w.C; j += 8 {
+			u0 := u16le(raw, offj+0)
+			u1 := u16le(raw, offj+2)
+			u2 := u16le(raw, offj+4)
+			u3 := u16le(raw, offj+6)
+			u4 := u16le(raw, offj+8)
+			u5 := u16le(raw, offj+10)
+			u6 := u16le(raw, offj+12)
+			u7 := u16le(raw, offj+14)
+			sum += bf16ToF32Table(u0)*x[j+0] +
+				bf16ToF32Table(u1)*x[j+1] +
+				bf16ToF32Table(u2)*x[j+2] +
+				bf16ToF32Table(u3)*x[j+3] +
+				bf16ToF32Table(u4)*x[j+4] +
+				bf16ToF32Table(u5)*x[j+5] +
+				bf16ToF32Table(u6)*x[j+6] +
+				bf16ToF32Table(u7)*x[j+7]
+			offj += 16
+		}
+		for ; j < w.C; j++ {
+			u := u16le(raw, offj)
+			sum += bf16ToF32Table(u) * x[j]
+			offj += 2
+		}
+		dst[i] = sum
+	}
+}
+
+func matVecRangeF16(dst []float32, w *Mat, x []float32, rs, re int) {
+	raw := w.Raw
+	if u16raw, ok := rawUint16LE(raw); ok {
+		for i := rs; i < re; i++ {
+			rowBase := i * w.Stride
+			row := u16raw[rowBase : rowBase+w.Stride]
+			if w.C > 0 {
+				_ = row[w.C-1]
+			}
+			var sum float32
+			j := 0
+			for ; j+7 < w.C; j += 8 {
+				sum += fp16ToF32Table(row[j+0])*x[j+0] +
+					fp16ToF32Table(row[j+1])*x[j+1] +
+					fp16ToF32Table(row[j+2])*x[j+2] +
+					fp16ToF32Table(row[j+3])*x[j+3] +
+					fp16ToF32Table(row[j+4])*x[j+4] +
+					fp16ToF32Table(row[j+5])*x[j+5] +
+					fp16ToF32Table(row[j+6])*x[j+6] +
+					fp16ToF32Table(row[j+7])*x[j+7]
+			}
+			for ; j < w.C; j++ {
+				sum += fp16ToF32Table(row[j]) * x[j]
+			}
+			dst[i] = sum
+		}
+		return
+	}
+
+	rowBytes := w.Stride * 2
+	for i := rs; i < re; i++ {
+		off := i * rowBytes
+		if w.C > 0 {
+			_ = raw[off+(w.C-1)*2+1]
+		}
+		var sum float32
+		j := 0
+		offj := off
+		for ; j+7 < w.C; j += 8 {
+			u0 := u16le(raw, offj+0)
+			u1 := u16le(raw, offj+2)
+			u2 := u16le(raw, offj+4)
+			u3 := u16le(raw, offj+6)
+			u4 := u16le(raw, offj+8)
+			u5 := u16le(raw, offj+10)
+			u6 := u16le(raw, offj+12)
+			u7 := u16le(raw, offj+14)
+			sum += fp16ToF32Table(u0)*x[j+0] +
+				fp16ToF32Table(u1)*x[j+1] +
+				fp16ToF32Table(u2)*x[j+2] +
+				fp16ToF32Table(u3)*x[j+3] +
+				fp16ToF32Table(u4)*x[j+4] +
+				fp16ToF32Table(u5)*x[j+5] +
+				fp16ToF32Table(u6)*x[j+6] +
+				fp16ToF32Table(u7)*x[j+7]
+			offj += 16
+		}
+		for ; j < w.C; j++ {
+			u := u16le(raw, offj)
+			sum += fp16ToF32Table(u) * x[j]
+			offj += 2
 		}
 		dst[i] = sum
 	}
