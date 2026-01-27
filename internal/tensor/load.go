@@ -2,8 +2,9 @@ package tensor
 
 import (
 	"fmt"
-	"infer/internal/gguf"
-	"infer/internal/safetensors"
+
+	"github.com/samcharles93/mantle/internal/gguf"
+	"github.com/samcharles93/mantle/internal/safetensors"
 )
 
 // LoadGGUFMat loads a 2D matrix from a GGUF file.

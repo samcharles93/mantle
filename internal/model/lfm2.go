@@ -6,10 +6,11 @@ import (
 	"math"
 	"os"
 
-	"infer/internal/gguf"
-	"infer/internal/safetensors"
-	"infer/internal/tensor"
-	"infer/internal/tokenizer"
+	"github.com/samcharles93/mantle/internal/gguf"
+	"github.com/samcharles93/mantle/internal/mcfstore"
+	"github.com/samcharles93/mantle/internal/safetensors"
+	"github.com/samcharles93/mantle/internal/tensor"
+	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
 type hfConfig struct {
@@ -24,6 +25,59 @@ type hfConfig struct {
 	NumKeyValueHeads  int      `json:"num_key_value_heads"`
 	VocabSize         int      `json:"vocab_size"`
 	RopeTheta         float64  `json:"rope_theta"`
+}
+
+type tensorSource interface {
+	ReadTensorF32(name string) ([]float32, []int, error)
+	TensorShape(name string) ([]int, bool)
+}
+
+type safetensorsSource struct {
+	st *safetensors.File
+}
+
+func (s safetensorsSource) ReadTensorF32(name string) ([]float32, []int, error) {
+	data, info, err := s.st.ReadTensorF32(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	shape := make([]int, len(info.Shape))
+	copy(shape, info.Shape)
+	return data, shape, nil
+}
+
+func (s safetensorsSource) TensorShape(name string) ([]int, bool) {
+	info, ok := s.st.Tensor(name)
+	if !ok {
+		return nil, false
+	}
+	shape := make([]int, len(info.Shape))
+	copy(shape, info.Shape)
+	return shape, true
+}
+
+type mcfSource struct {
+	mf *mcfstore.File
+}
+
+func (s mcfSource) ReadTensorF32(name string) ([]float32, []int, error) {
+	data, info, err := s.mf.ReadTensorF32(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	shape := make([]int, len(info.Shape))
+	copy(shape, info.Shape)
+	return data, shape, nil
+}
+
+func (s mcfSource) TensorShape(name string) ([]int, bool) {
+	info, err := s.mf.Tensor(name)
+	if err != nil {
+		return nil, false
+	}
+	shape := make([]int, len(info.Shape))
+	copy(shape, info.Shape)
+	return shape, true
 }
 
 func LoadModel(path string, maxContext int) (*Model, error) {
@@ -264,12 +318,57 @@ func LoadModelSafetensors(modelPath, configPath string, maxContext int) (*Model,
 	if err != nil {
 		return nil, err
 	}
+	return loadModelFromSource(cfg, safetensorsSource{st: st}, maxContext)
+}
 
-	emb, err := tensor.LoadSafetensorsMat(st, "model.embed_tokens.weight")
+func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int) (*Model, error) {
+	if mcfFile == nil {
+		return nil, fmt.Errorf("mcf: nil file")
+	}
+	cfg, err := loadHFConfigBytes(configJSON)
 	if err != nil {
 		return nil, err
 	}
-	outNorm, err := tensor.LoadSafetensorsVec(st, "model.embedding_norm.weight")
+	return loadModelFromSource(cfg, mcfSource{mf: mcfFile}, maxContext)
+}
+
+func loadHFConfig(path string) (*hfConfig, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return loadHFConfigBytes(raw)
+}
+
+func loadHFConfigBytes(raw []byte) (*hfConfig, error) {
+	var cfg hfConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, err
+	}
+	if cfg.HiddenSize == 0 && cfg.BlockDim > 0 {
+		cfg.HiddenSize = cfg.BlockDim
+	}
+	return &cfg, nil
+}
+
+func buildHeadKV(cfg *hfConfig) []int {
+	out := make([]int, len(cfg.LayerTypes))
+	for i, t := range cfg.LayerTypes {
+		if t == "full_attention" {
+			out[i] = cfg.NumKeyValueHeads
+		} else {
+			out[i] = 0
+		}
+	}
+	return out
+}
+
+func loadModelFromSource(cfg *hfConfig, src tensorSource, maxContext int) (*Model, error) {
+	emb, err := loadMat(src, "model.embed_tokens.weight")
+	if err != nil {
+		return nil, err
+	}
+	outNorm, err := loadVec(src, "model.embedding_norm.weight")
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +387,7 @@ func LoadModelSafetensors(modelPath, configPath string, maxContext int) (*Model,
 		Config: Config{
 			BlockCount:      blockCount,
 			EmbeddingLength: cfg.HiddenSize,
-			FFNLength:       inferFFNLength(st, 0),
+			FFNLength:       inferFFNLength(src, 0),
 			HeadCount:       cfg.NumAttentionHeads,
 			HeadCountKV:     buildHeadKV(cfg),
 			RMSEpsilon:      cfg.NormEps,
@@ -313,67 +412,70 @@ func LoadModelSafetensors(modelPath, configPath string, maxContext int) (*Model,
 		layer.HeadKV = headKVArr[i]
 		layer.IsRecurrent = layer.HeadKV == 0
 
-		layer.AttnNorm, err = tensor.LoadSafetensorsVec(st, fmt.Sprintf("model.layers.%d.operator_norm.weight", i))
+		layer.AttnNorm, err = loadVec(src, fmt.Sprintf("model.layers.%d.operator_norm.weight", i))
 		if err != nil {
 			return nil, err
 		}
-		layer.FfnNorm, err = tensor.LoadSafetensorsVec(st, fmt.Sprintf("model.layers.%d.ffn_norm.weight", i))
+		layer.FfnNorm, err = loadVec(src, fmt.Sprintf("model.layers.%d.ffn_norm.weight", i))
 		if err != nil {
 			return nil, err
 		}
-		layer.FfnGate, err = tensor.LoadSafetensorsMat(st, fmt.Sprintf("model.layers.%d.feed_forward.w1.weight", i))
+		layer.FfnGate, err = loadMat(src, fmt.Sprintf("model.layers.%d.feed_forward.w1.weight", i))
 		if err != nil {
 			return nil, err
 		}
-		layer.FfnDown, err = tensor.LoadSafetensorsMat(st, fmt.Sprintf("model.layers.%d.feed_forward.w2.weight", i))
+		layer.FfnDown, err = loadMat(src, fmt.Sprintf("model.layers.%d.feed_forward.w2.weight", i))
 		if err != nil {
 			return nil, err
 		}
-		layer.FfnUp, err = tensor.LoadSafetensorsMat(st, fmt.Sprintf("model.layers.%d.feed_forward.w3.weight", i))
+		layer.FfnUp, err = loadMat(src, fmt.Sprintf("model.layers.%d.feed_forward.w3.weight", i))
 		if err != nil {
 			return nil, err
 		}
 
 		if layer.IsRecurrent {
-			layer.ShortConvKernel, err = tensor.LoadSafetensorsConvKernel(st, fmt.Sprintf("model.layers.%d.conv.conv.weight", i))
+			layer.ShortConvKernel, err = loadConvKernel(src, fmt.Sprintf("model.layers.%d.conv.conv.weight", i))
 			if err != nil {
 				return nil, err
 			}
-			layer.ShortConvInProj, err = tensor.LoadSafetensorsMat(st, fmt.Sprintf("model.layers.%d.conv.in_proj.weight", i))
+			layer.ShortConvInProj, err = loadMat(src, fmt.Sprintf("model.layers.%d.conv.in_proj.weight", i))
 			if err != nil {
 				return nil, err
 			}
-			layer.ShortConvOutProj, err = tensor.LoadSafetensorsMat(st, fmt.Sprintf("model.layers.%d.conv.out_proj.weight", i))
+			layer.ShortConvOutProj, err = loadMat(src, fmt.Sprintf("model.layers.%d.conv.out_proj.weight", i))
 			if err != nil {
 				return nil, err
 			}
 			kernelLen := layer.ShortConvKernel.C
+			if kernelLen < 1 {
+				return nil, fmt.Errorf("invalid shortconv kernel length for layer %d", i)
+			}
 			layer.ShortConvState = shortConvState{
 				buf:       make([]float32, (kernelLen-1)*cfg.HiddenSize),
 				kernelLen: kernelLen,
 			}
 		} else {
-			layer.AttnQNorm, err = tensor.LoadSafetensorsVec(st, fmt.Sprintf("model.layers.%d.self_attn.q_layernorm.weight", i))
+			layer.AttnQNorm, err = loadVec(src, fmt.Sprintf("model.layers.%d.self_attn.q_layernorm.weight", i))
 			if err != nil {
 				return nil, err
 			}
-			layer.AttnKNorm, err = tensor.LoadSafetensorsVec(st, fmt.Sprintf("model.layers.%d.self_attn.k_layernorm.weight", i))
+			layer.AttnKNorm, err = loadVec(src, fmt.Sprintf("model.layers.%d.self_attn.k_layernorm.weight", i))
 			if err != nil {
 				return nil, err
 			}
-			layer.Wq, err = tensor.LoadSafetensorsMat(st, fmt.Sprintf("model.layers.%d.self_attn.q_proj.weight", i))
+			layer.Wq, err = loadMat(src, fmt.Sprintf("model.layers.%d.self_attn.q_proj.weight", i))
 			if err != nil {
 				return nil, err
 			}
-			layer.Wk, err = tensor.LoadSafetensorsMat(st, fmt.Sprintf("model.layers.%d.self_attn.k_proj.weight", i))
+			layer.Wk, err = loadMat(src, fmt.Sprintf("model.layers.%d.self_attn.k_proj.weight", i))
 			if err != nil {
 				return nil, err
 			}
-			layer.Wv, err = tensor.LoadSafetensorsMat(st, fmt.Sprintf("model.layers.%d.self_attn.v_proj.weight", i))
+			layer.Wv, err = loadMat(src, fmt.Sprintf("model.layers.%d.self_attn.v_proj.weight", i))
 			if err != nil {
 				return nil, err
 			}
-			layer.Wo, err = tensor.LoadSafetensorsMat(st, fmt.Sprintf("model.layers.%d.self_attn.out_proj.weight", i))
+			layer.Wo, err = loadMat(src, fmt.Sprintf("model.layers.%d.self_attn.out_proj.weight", i))
 			if err != nil {
 				return nil, err
 			}
@@ -405,37 +507,57 @@ func LoadModelSafetensors(modelPath, configPath string, maxContext int) (*Model,
 	return m, nil
 }
 
-func loadHFConfig(path string) (*hfConfig, error) {
-	raw, err := os.ReadFile(path)
+func loadMat(src tensorSource, name string) (*tensor.Mat, error) {
+	data, shape, err := src.ReadTensorF32(name)
 	if err != nil {
 		return nil, err
 	}
-	var cfg hfConfig
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	if len(shape) != 2 {
+		return nil, fmt.Errorf("%s: expected 2D tensor", name)
+	}
+	r := shape[0]
+	c := shape[1]
+	if r*c != len(data) {
+		return nil, fmt.Errorf("%s: size mismatch", name)
+	}
+	return &tensor.Mat{R: r, C: c, Stride: c, Data: data}, nil
+}
+
+func loadVec(src tensorSource, name string) ([]float32, error) {
+	data, shape, err := src.ReadTensorF32(name)
+	if err != nil {
 		return nil, err
 	}
-	if cfg.HiddenSize == 0 && cfg.BlockDim > 0 {
-		cfg.HiddenSize = cfg.BlockDim
+	if len(shape) != 1 {
+		return nil, fmt.Errorf("%s: expected 1D tensor", name)
 	}
-	return &cfg, nil
+	return data, nil
 }
 
-func buildHeadKV(cfg *hfConfig) []int {
-	out := make([]int, len(cfg.LayerTypes))
-	for i, t := range cfg.LayerTypes {
-		if t == "full_attention" {
-			out[i] = cfg.NumKeyValueHeads
-		} else {
-			out[i] = 0
-		}
+func loadConvKernel(src tensorSource, name string) (*tensor.Mat, error) {
+	data, shape, err := src.ReadTensorF32(name)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	if len(shape) != 3 {
+		return nil, fmt.Errorf("%s: expected 3D tensor", name)
+	}
+	out := shape[0]
+	in := shape[1]
+	k := shape[2]
+	if in != 1 {
+		return nil, fmt.Errorf("%s: expected in=1, got %d", name, in)
+	}
+	if out*k != len(data) {
+		return nil, fmt.Errorf("%s: size mismatch", name)
+	}
+	return &tensor.Mat{R: out, C: k, Stride: k, Data: data}, nil
 }
 
-func inferFFNLength(st *safetensors.File, layer int) int {
+func inferFFNLength(src tensorSource, layer int) int {
 	name := fmt.Sprintf("model.layers.%d.feed_forward.w1.weight", layer)
-	if info, ok := st.Tensor(name); ok && len(info.Shape) >= 1 {
-		return info.Shape[0]
+	if shape, ok := src.TensorShape(name); ok && len(shape) >= 1 {
+		return shape[0]
 	}
 	return 0
 }

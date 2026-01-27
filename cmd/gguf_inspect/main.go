@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"infer/internal/gguf"
-	"infer/internal/model"
+	"github.com/samcharles93/mantle/internal/gguf"
+	"github.com/samcharles93/mantle/internal/model"
 )
 
 func main() {

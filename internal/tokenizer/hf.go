@@ -70,8 +70,18 @@ func LoadHFTokenizer(tokJSON, tokConfig string) (*HFTokenizer, error) {
 	if err != nil {
 		return nil, err
 	}
+	var cfg []byte
+	if tokConfig != "" {
+		if raw, err := os.ReadFile(tokConfig); err == nil {
+			cfg = raw
+		}
+	}
+	return LoadHFTokenizerBytes(data, cfg)
+}
+
+func LoadHFTokenizerBytes(tokJSON []byte, tokConfig []byte) (*HFTokenizer, error) {
 	var tj hfTokenizerJSON
-	if err := json.Unmarshal(data, &tj); err != nil {
+	if err := json.Unmarshal(tokJSON, &tj); err != nil {
 		return nil, err
 	}
 	if strings.ToUpper(tj.Model.Type) != "BPE" {
@@ -134,10 +144,8 @@ func LoadHFTokenizer(tokJSON, tokConfig string) (*HFTokenizer, error) {
 	pat := buildHFPattern(tj.PreTokenizer)
 
 	var cfg hfTokenizerConfig
-	if tokConfig != "" {
-		if raw, err := os.ReadFile(tokConfig); err == nil {
-			_ = json.Unmarshal(raw, &cfg)
-		}
+	if len(tokConfig) > 0 {
+		_ = json.Unmarshal(tokConfig, &cfg)
 	}
 
 	addBOS := cfg.AddBOS

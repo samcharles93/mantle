@@ -1,8 +1,8 @@
 package model
 
 import (
-	"infer/internal/tensor"
-	"infer/internal/tokenizer"
+	"github.com/samcharles93/mantle/internal/tensor"
+	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
 type Config struct {
