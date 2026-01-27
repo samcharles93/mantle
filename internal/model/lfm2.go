@@ -85,7 +85,7 @@ func LoadModel(path string, maxContext int) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	cfg, err := LoadConfig(f)
 	if err != nil {
 		return nil, err

@@ -81,7 +81,7 @@ func GetArray[T any](kv map[string]Value, key string) ([]T, bool) {
 	if !ok {
 		return nil, false
 	}
-	
+
 	out := make([]T, 0, len(arr.Values))
 	for _, item := range arr.Values {
 		tItem, ok := item.(T)

@@ -70,7 +70,7 @@ func (s *Sampler) Sample(logits []float32, recent []int, excludePenalty []int) i
 				seen[id] = struct{}{}
 			}
 		}
-		
+
 		for _, id := range excludePenalty {
 			delete(seen, id)
 		}

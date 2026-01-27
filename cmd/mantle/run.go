@@ -5,15 +5,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime/pprof"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/samcharles93/mantle/internal/gguf"
 	"github.com/samcharles93/mantle/internal/inference"
 	"github.com/samcharles93/mantle/internal/logits"
 	"github.com/samcharles93/mantle/internal/mcfstore"
@@ -42,15 +39,11 @@ func runCmd() *cli.Command {
 		tokenizerJSON   string
 		tokenizerConfig string
 		chatTemplate    string
-		safetensorsFile string
 		hfConfigFile    string
 
 		// Debug flags
-		showConfig  bool
-		showTokens  bool
-		showKV      bool
-		showTensors int64
-
+		showConfig bool
+		showTokens bool
 		// Profiling
 		cpuProfile string
 		memProfile string
@@ -63,7 +56,7 @@ func runCmd() *cli.Command {
 			&cli.StringFlag{
 				Name:        "model",
 				Aliases:     []string{"m"},
-				Usage:       "path to .mcf, .gguf, or safetensors directory",
+				Usage:       "path to .mcf file",
 				Destination: &modelPath,
 				Required:    true,
 			},
@@ -152,11 +145,6 @@ func runCmd() *cli.Command {
 				Destination: &chatTemplate,
 			},
 			&cli.StringFlag{
-				Name:        "safetensors-file",
-				Usage:       "explicit path to .safetensors file",
-				Destination: &safetensorsFile,
-			},
-			&cli.StringFlag{
 				Name:        "hf-config",
 				Usage:       "explicit path to hf config.json",
 				Destination: &hfConfigFile,
@@ -173,17 +161,6 @@ func runCmd() *cli.Command {
 				Usage:       "print prompt token ids",
 				Value:       true,
 				Destination: &showTokens,
-			},
-			&cli.BoolFlag{
-				Name:        "show-kv",
-				Usage:       "print all GGUF metadata keys",
-				Destination: &showKV,
-			},
-			&cli.Int64Flag{
-				Name:        "show-tensors",
-				Usage:       "number of tensors to list (0 to skip, -1 for all)",
-				Value:       0,
-				Destination: &showTensors,
 			},
 			// Profiling flags
 			&cli.StringFlag{
@@ -203,7 +180,7 @@ func runCmd() *cli.Command {
 				if err != nil {
 					return cli.Exit(fmt.Sprintf("could not create CPU profile: %v", err), 1)
 				}
-				defer f.Close()
+				defer func() { _ = f.Close() }()
 				if err := pprof.StartCPUProfile(f); err != nil {
 					return cli.Exit(fmt.Sprintf("could not start CPU profile: %v", err), 1)
 				}
@@ -217,7 +194,7 @@ func runCmd() *cli.Command {
 						fmt.Fprintf(os.Stderr, "could not create memory profile: %v\n", err)
 						return
 					}
-					defer f.Close()
+					defer func() { _ = f.Close() }()
 					if err := pprof.WriteHeapProfile(f); err != nil {
 						fmt.Fprintf(os.Stderr, "could not write memory profile: %v\n", err)
 					}
@@ -233,223 +210,82 @@ func runCmd() *cli.Command {
 				m         *model.Model
 				tok       tokenizer.Tokenizer
 				tokConfig tokenizer.TokenizerConfig
-				isGGUF    bool
-				isMCF     bool
-				ggufFile  *gguf.File
 				genConfig *model.Config
 			)
 
-			// Mode detection
-			isSafeTensorsDir := stat.IsDir()
-			isSafeTensorsFile := !stat.IsDir() && strings.HasSuffix(strings.ToLower(modelPath), ".safetensors")
-			isMCF = !stat.IsDir() && strings.HasSuffix(strings.ToLower(modelPath), ".mcf")
-			isGGUF = !stat.IsDir() && !isSafeTensorsFile && !isMCF
+			if stat.IsDir() || !strings.HasSuffix(strings.ToLower(modelPath), ".mcf") {
+				return cli.Exit("error: mantle run only supports .mcf files", 1)
+			}
 
 			loadStart := time.Now()
 
-			switch {
-			case isMCF:
-				fmt.Printf("Loading MCF model: %s\n", modelPath)
+			fmt.Printf("Loading MCF model: %s\n", modelPath)
 
-				mcfFile, err := mcfstore.Open(modelPath)
+			mcfFile, err := mcfstore.Open(modelPath)
+			if err != nil {
+				return cli.Exit(fmt.Sprintf("error: open mcf: %v", err), 1)
+			}
+			defer func() { _ = mcfFile.Close() }()
+
+			cfgBytes := []byte(nil)
+			if hfConfigFile != "" {
+				cfgBytes, err = os.ReadFile(hfConfigFile)
 				if err != nil {
-					return cli.Exit(fmt.Sprintf("error: open mcf: %v", err), 1)
+					return cli.Exit(fmt.Sprintf("error: read hf config: %v", err), 1)
 				}
-				defer func() { _ = mcfFile.Close() }()
+			} else {
+				cfgBytes = mcfFile.SectionData(mcf.SectionHFConfigJSON)
+			}
+			if len(cfgBytes) == 0 {
+				return cli.Exit("error: config.json not found in MCF (use --hf-config to override)", 1)
+			}
 
-				cfgBytes := []byte(nil)
-				if hfConfigFile != "" {
-					cfgBytes, err = os.ReadFile(hfConfigFile)
-					if err != nil {
-						return cli.Exit(fmt.Sprintf("error: read hf config: %v", err), 1)
-					}
-				} else {
-					cfgBytes = mcfFile.SectionData(mcf.SectionHFConfigJSON)
-				}
-				if len(cfgBytes) == 0 {
-					return cli.Exit("error: config.json not found in MCF (use --hf-config to override)", 1)
-				}
+			m, err = model.LoadModelMCF(mcfFile, cfgBytes, int(maxContext))
+			if err != nil {
+				return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)
+			}
+			genConfig = &m.Config.Config
 
-				m, err = model.LoadModelMCF(mcfFile, cfgBytes, int(maxContext))
-				if err != nil {
-					return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)
-				}
-				genConfig = &m.Config.Config
-
-				// Load Tokenizer (Required for MCF)
-				if tokenizerJSON != "" && fileExists(tokenizerJSON) {
-					hfTok, err := tokenizer.LoadHFTokenizer(tokenizerJSON, tokenizerConfig)
-					if err != nil {
-						return cli.Exit(fmt.Sprintf("error: load tokenizer.json: %v", err), 1)
-					}
-					tok = hfTok
-					tokConfig.BOSTokenID = hfTok.BOSID()
-					tokConfig.AddBOS = hfTok.AddBOS()
-					tokConfig.EOSTokenID = hfTok.EOSID()
-				} else {
-					tokJSON := mcfFile.SectionData(mcf.SectionTokenizerJSON)
-					if len(tokJSON) == 0 {
-						return cli.Exit("error: tokenizer.json not found in MCF (use --tokenizer-json to override)", 1)
-					}
-					var tokCfg []byte
-					if tokenizerConfig != "" && fileExists(tokenizerConfig) {
-						tokCfg, err = os.ReadFile(tokenizerConfig)
-						if err != nil {
-							return cli.Exit(fmt.Sprintf("error: load tokenizer_config.json: %v", err), 1)
-						}
-					} else {
-						tokCfg = mcfFile.SectionData(mcf.SectionTokenizerConfigJSON)
-					}
-
-					hfTok, err := tokenizer.LoadHFTokenizerBytes(tokJSON, tokCfg)
-					if err != nil {
-						return cli.Exit(fmt.Sprintf("error: load tokenizer.json: %v", err), 1)
-					}
-					tok = hfTok
-					tokConfig.BOSTokenID = hfTok.BOSID()
-					tokConfig.AddBOS = hfTok.AddBOS()
-					tokConfig.EOSTokenID = hfTok.EOSID()
-				}
-
-			case isSafeTensorsDir || isSafeTensorsFile || safetensorsFile != "":
-				// --- SafeTensors Path ---
-				fmt.Println("Loading SafeTensors model...")
-
-				// Resolve paths
-				stPath := safetensorsFile
-				cfgPath := hfConfigFile
-				tokJSON := tokenizerJSON
-				tokCfgPath := tokenizerConfig
-				tplPath := chatTemplate
-
-				if isSafeTensorsDir {
-					if stPath == "" {
-						stPath = filepath.Join(modelPath, "model.safetensors")
-					}
-					if cfgPath == "" {
-						cfgPath = filepath.Join(modelPath, "config.json")
-					}
-					if tokJSON == "" {
-						tokJSON = filepath.Join(modelPath, "tokenizer.json")
-					}
-					if tokCfgPath == "" {
-						tokCfgPath = filepath.Join(modelPath, "tokenizer_config.json")
-					}
-					if tplPath == "" {
-						tplPath = filepath.Join(modelPath, "chat_template.jinja")
-					}
-				} else if isSafeTensorsFile {
-					if stPath == "" {
-						stPath = modelPath
-					}
-					dir := filepath.Dir(stPath)
-					if cfgPath == "" {
-						cfgPath = filepath.Join(dir, "config.json")
-					}
-					if tokJSON == "" {
-						tokJSON = filepath.Join(dir, "tokenizer.json")
-					}
-					if tokCfgPath == "" {
-						tokCfgPath = filepath.Join(dir, "tokenizer_config.json")
-					}
-					if tplPath == "" {
-						tplPath = filepath.Join(dir, "chat_template.jinja")
-					}
-				}
-
-				if !fileExists(stPath) {
-					return cli.Exit(fmt.Sprintf("error: safetensors file not found: %s", stPath), 1)
-				}
-				if !fileExists(cfgPath) {
-					return cli.Exit(fmt.Sprintf("error: config.json not found: %s", cfgPath), 1)
-				}
-
-				// Load Model
-				m, err = model.LoadModelSafetensors(stPath, cfgPath, int(maxContext))
-				if err != nil {
-					return cli.Exit(fmt.Sprintf("error: load safetensors: %v", err), 1)
-				}
-				genConfig = &m.Config.Config
-
-				// Load Tokenizer (Required for SafeTensors)
-				if !fileExists(tokJSON) {
-					return cli.Exit(fmt.Sprintf("error: tokenizer.json required for SafeTensors but not found: %s", tokJSON), 1)
-				}
-				hfTok, err := tokenizer.LoadHFTokenizer(tokJSON, tokCfgPath)
+			// Load Tokenizer (Required for MCF)
+			if tokenizerJSON != "" && fileExists(tokenizerJSON) {
+				hfTok, err := tokenizer.LoadHFTokenizer(tokenizerJSON, tokenizerConfig)
 				if err != nil {
 					return cli.Exit(fmt.Sprintf("error: load tokenizer.json: %v", err), 1)
 				}
 				tok = hfTok
-
-				// Attempt to load chat template if not provided
-				if tplPath != "" && fileExists(tplPath) {
-					if raw, err := os.ReadFile(tplPath); err == nil {
-						tokConfig.ChatTemplate = string(raw)
-					}
-				}
-
-				// Fill minimal TokenizerConfig for main loop
 				tokConfig.BOSTokenID = hfTok.BOSID()
 				tokConfig.AddBOS = hfTok.AddBOS()
 				tokConfig.EOSTokenID = hfTok.EOSID()
-
-			default:
-				// --- GGUF Path ---
-				fmt.Printf("Loading GGUF model: %s\n", modelPath)
-
-				f, err := gguf.Open(modelPath)
-				if err != nil {
-					return cli.Exit(fmt.Sprintf("error: open gguf: %v", err), 1)
+			} else {
+				tokJSON := mcfFile.SectionData(mcf.SectionTokenizerJSON)
+				if len(tokJSON) == 0 {
+					return cli.Exit("error: tokenizer.json not found in MCF (use --tokenizer-json to override)", 1)
 				}
-				ggufFile = f
-
-				cfg, err := model.LoadConfig(f)
-				if err != nil {
-					return cli.Exit(fmt.Sprintf("error: load model config: %v", err), 1)
-				}
-				genConfig = &cfg.Config
-				tokConfig = cfg.Tokenizer
-
-				// Load Tokenizer
-				// Priority: Explicit JSON > GGUF Embedded
-				if tokenizerJSON != "" && fileExists(tokenizerJSON) {
-					hfTok, err := tokenizer.LoadHFTokenizer(tokenizerJSON, tokenizerConfig)
+				var tokCfg []byte
+				if tokenizerConfig != "" && fileExists(tokenizerConfig) {
+					tokCfg, err = os.ReadFile(tokenizerConfig)
 					if err != nil {
-						return cli.Exit(fmt.Sprintf("error: load tokenizer.json: %v", err), 1)
+						return cli.Exit(fmt.Sprintf("error: load tokenizer_config.json: %v", err), 1)
 					}
-					tok = hfTok
 				} else {
-					// Build from GGUF
-					gptTok, err := cfg.Tokenizer.BuildGPT2()
-					if err != nil {
-						return cli.Exit(fmt.Sprintf("error: build tokenizer from GGUF: %v", err), 1)
-					}
-					tok = gptTok
+					tokCfg = mcfFile.SectionData(mcf.SectionTokenizerConfigJSON)
 				}
 
-				// Load Model
-				m, err = model.LoadModel(modelPath, int(maxContext))
+				hfTok, err := tokenizer.LoadHFTokenizerBytes(tokJSON, tokCfg)
 				if err != nil {
-					return cli.Exit(fmt.Sprintf("error: load gguf model: %v", err), 1)
+					return cli.Exit(fmt.Sprintf("error: load tokenizer.json: %v", err), 1)
 				}
+				tok = hfTok
+				tokConfig.BOSTokenID = hfTok.BOSID()
+				tokConfig.AddBOS = hfTok.AddBOS()
+				tokConfig.EOSTokenID = hfTok.EOSID()
 			}
 
 			loadDuration := time.Since(loadStart)
 			fmt.Printf("Model loaded in %s\n", loadDuration)
 
 			if showConfig {
-				if isGGUF && ggufFile != nil {
-					fmt.Fprintf(os.Stderr, "GGUF v%d | tensors=%d | kv=%d\n",
-						ggufFile.Header.Version, ggufFile.Header.TensorCount, ggufFile.Header.KVCount)
-					fmt.Fprintf(os.Stderr, "arch=%s name=%s quant=%s\n",
-						m.Config.Arch,
-						mustString(ggufFile.KV, "general.name"),
-						mustString(ggufFile.KV, "general.quantization"))
-				} else if isMCF {
-					fmt.Fprintf(os.Stderr, "MCF | arch=%s\n", m.Config.Arch)
-				} else {
-					fmt.Fprintf(os.Stderr, "SafeTensors | arch=%s\n", m.Config.Arch)
-				}
+				fmt.Fprintf(os.Stderr, "MCF | arch=%s\n", m.Config.Arch)
 
 				fmt.Fprintf(os.Stderr, "blocks=%d embd=%d ffn=%d heads=%d vocab=%d ctx=%d\n",
 					genConfig.BlockCount,
@@ -461,35 +297,6 @@ func runCmd() *cli.Command {
 
 				if len(genConfig.HeadCountKV) > 0 {
 					fmt.Fprintf(os.Stderr, "HeadCountKV: %v\n", genConfig.HeadCountKV)
-				}
-			}
-
-			if isGGUF && showKV && ggufFile != nil {
-				fmt.Fprintln(os.Stderr, "\nAll metadata:")
-				keys := make([]string, 0, len(ggufFile.KV))
-				for k := range ggufFile.KV {
-					keys = append(keys, k)
-				}
-				sort.Strings(keys)
-				for _, k := range keys {
-					fmt.Fprintf(os.Stderr, "  %s = %s\n", k, formatValue(ggufFile.KV[k]))
-				}
-			}
-
-			if showTensors != 0 && isGGUF && ggufFile != nil {
-				fmt.Fprintln(os.Stderr, "\nTensors:")
-				count := int64(len(ggufFile.Tensors))
-				max := showTensors
-				if max < 0 || max > count {
-					max = count
-				}
-				for i := int64(0); i < max; i++ {
-					t := ggufFile.Tensors[i]
-					fmt.Fprintf(os.Stderr, "  %-40s %-6s dims=%s off=%d\n",
-						t.Name, t.Type.String(), formatDims(t.Dims), t.Offset)
-				}
-				if max < count {
-					fmt.Fprintf(os.Stderr, "  ... (%d more)\n", count-max)
 				}
 			}
 
@@ -626,24 +433,6 @@ func runCmd() *cli.Command {
 	}
 }
 
-func mustString(kv map[string]gguf.Value, key string) string {
-	if s, ok := gguf.GetString(kv, key); ok {
-		return s
-	}
-	return "-"
-}
-
-func formatDims(dims []uint64) string {
-	if len(dims) == 0 {
-		return "[]"
-	}
-	parts := make([]string, len(dims))
-	for i, v := range dims {
-		parts[i] = fmt.Sprintf("%d", v)
-	}
-	return "[" + strings.Join(parts, "x") + "]"
-}
-
 func joinInts(ids []int) string {
 	if len(ids) == 0 {
 		return "[]"
@@ -658,22 +447,6 @@ func joinInts(ids []int) string {
 	}
 	b.WriteByte(']')
 	return b.String()
-}
-
-func formatValue(v gguf.Value) string {
-	switch val := v.Value.(type) {
-	case string:
-		return val
-	case bool:
-		if val {
-			return "true"
-		}
-		return "false"
-	case gguf.ArrayValue:
-		return fmt.Sprintf("array(%s) len=%d", val.ElemType.String(), len(val.Values))
-	default:
-		return fmt.Sprintf("%v", val)
-	}
 }
 
 func fileExists(path string) bool {

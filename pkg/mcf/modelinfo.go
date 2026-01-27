@@ -108,7 +108,7 @@ type modelInfoFixedV1 struct {
 	BaseModelOff uint64
 
 	KVCount uint32
-	_2      uint32 // padding
+	_       uint32 // padding
 	KVOff   uint64
 }
 

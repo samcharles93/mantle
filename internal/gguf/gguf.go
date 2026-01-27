@@ -179,7 +179,7 @@ func Open(path string) (*File, error) {
 
 	st, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	size := st.Size()
@@ -194,7 +194,7 @@ func Open(path string) (*File, error) {
 	var r *reader
 
 	if data != nil {
-		f.Close()
+		_ = f.Close()
 		r = newReader(bytes.NewReader(data), size)
 	} else {
 		r = newReader(f, size)
@@ -203,9 +203,9 @@ func Open(path string) (*File, error) {
 	// Helper to ensure proper cleanup on error
 	cleanup := func() {
 		if data != nil {
-			syscall.Munmap(data)
+			_ = syscall.Munmap(data)
 		} else {
-			f.Close()
+			_ = f.Close()
 		}
 	}
 
@@ -297,7 +297,7 @@ func Open(path string) (*File, error) {
 	}
 
 	if data == nil {
-		f.Close()
+		_ = f.Close()
 	}
 
 	alignment := uint64(32)

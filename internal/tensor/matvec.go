@@ -52,7 +52,7 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 	if w.R == 0 || w.C == 0 {
 		return
 	}
-	
+
 	workers := matVecWorkPool.size
 	if workers > w.R {
 		workers = w.R
