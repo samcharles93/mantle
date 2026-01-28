@@ -1,0 +1,6 @@
+{
+    "go.toolsEnvVars": {
+        "GOEXPERIMENT": "simd"
+    },
+    "go.toolsGopath": "/home/sam/go/bin/go1.26rc2"
+}
