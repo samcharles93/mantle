@@ -35,11 +35,18 @@ type Config struct {
 }
 
 type RopeScaling struct {
-	Type       string
-	Factor     float64
-	OrigMaxCtx int
-	LowFactor  float64
-	HighFactor float64
+	Type            string
+	Factor          float64
+	OrigMaxCtx      int
+	LowFactor       float64
+	HighFactor      float64
+	AttentionFactor float64
+	BetaFast        float64
+	BetaSlow        float64
+	MScale          float64
+	MScaleAllDim    float64
+	Truncate        bool
+	HasTruncate     bool
 }
 
 type ModelConfig struct {
@@ -61,6 +68,7 @@ type Model struct {
 	HeadCount     int
 	MaxHeadKV     int
 	ropeInvFreq   []float64
+	ropeAttnScale float32
 	muPScale      float32
 	ropeLocalOnly bool
 

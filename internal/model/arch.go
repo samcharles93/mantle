@@ -54,6 +54,12 @@ type ropeScaling struct {
 	OriginalMaxPositionEmbeddings int     `json:"original_max_position_embeddings"`
 	LowFreqFactor                 float64 `json:"low_freq_factor"`
 	HighFreqFactor                float64 `json:"high_freq_factor"`
+	AttentionFactor               float64 `json:"attention_factor"`
+	BetaFast                      float64 `json:"beta_fast"`
+	BetaSlow                      float64 `json:"beta_slow"`
+	MScale                        float64 `json:"mscale"`
+	MScaleAllDim                  float64 `json:"mscale_all_dim"`
+	Truncate                      *bool   `json:"truncate"`
 }
 
 // ropeParams captures the rope_parameters schema used by newer Mistral/Ministral
@@ -65,14 +71,16 @@ type ropeParams struct {
 	OriginalMaxPositionEmbeddings int     `json:"original_max_position_embeddings"`
 	RopeTheta                     float64 `json:"rope_theta"`
 
-	LowFreqFactor  float64 `json:"low_freq_factor"`
-	HighFreqFactor float64 `json:"high_freq_factor"`
+	LowFreqFactor   float64 `json:"low_freq_factor"`
+	HighFreqFactor  float64 `json:"high_freq_factor"`
+	AttentionFactor float64 `json:"attention_factor"`
+	BetaFast        float64 `json:"beta_fast"`
+	BetaSlow        float64 `json:"beta_slow"`
+	MScale          float64 `json:"mscale"`
+	MScaleAllDim    float64 `json:"mscale_all_dim"`
+	Truncate        *bool   `json:"truncate"`
 
 	// Additional rope/yarn fields we currently parse-but-do-not-use directly.
-	BetaFast          float64 `json:"beta_fast"`
-	BetaSlow          float64 `json:"beta_slow"`
-	MScale            float64 `json:"mscale"`
-	MScaleAllDim      float64 `json:"mscale_all_dim"`
 	Llama4ScalingBeta float64 `json:"llama_4_scaling_beta"`
 }
 

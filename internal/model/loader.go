@@ -932,8 +932,8 @@ func (m *Model) attention(layer *Layer, x []float32, pos int) []float32 {
 
 	applyRoPE := !m.ropeLocalOnly || layer.AttnType != "full_attention"
 	if applyRoPE {
-		tensor.ApplyRoPE(q, nHead, headDim, pos, m.ropeInvFreq)
-		tensor.ApplyRoPE(k, kvHeads, headDim, pos, m.ropeInvFreq)
+		tensor.ApplyRoPE(q, nHead, headDim, pos, m.ropeInvFreq, m.ropeAttnScale)
+		tensor.ApplyRoPE(k, kvHeads, headDim, pos, m.ropeInvFreq, m.ropeAttnScale)
 	}
 
 	cacheK := layer.AttnCache.k
@@ -1111,8 +1111,10 @@ func (m *Model) initRoPE() {
 		power := float64(2*i) / float64(headDim)
 		ropeInvFreq[i] = 1.0 / math.Pow(m.Config.Config.RopeFreqBase, power)
 	}
+	attnScale := 1.0
 	if rs := m.Config.Config.RopeScaling; rs != nil {
-		applyRopeScaling(ropeInvFreq, m.Config.Config.ContextLength, rs)
+		attnScale = applyRopeScaling(ropeInvFreq, m.Config.Config.RopeFreqBase, m.Config.Config.ContextLength, rs)
 	}
 	m.ropeInvFreq = ropeInvFreq
+	m.ropeAttnScale = float32(attnScale)
 }

@@ -149,8 +149,14 @@ func TestLoadHFConfigBytesTextConfig(t *testing.T) {
 		t.Fatalf("rope_parameters merge missing rope_theta: rope_theta=%f", cfg.RopeTheta)
 	}
 	rs := ropeScalingForConfig(cfg)
-	if rs != nil {
-		t.Fatalf("expected unsupported yarn rope scaling to be skipped, got: %+v", rs)
+	if rs == nil {
+		t.Fatalf("expected yarn rope scaling to be detected")
+	}
+	if rs.Type != "yarn" {
+		t.Fatalf("unexpected rope scaling type: %q", rs.Type)
+	}
+	if rs.Factor <= 0 {
+		t.Fatalf("expected positive rope scaling factor, got %g", rs.Factor)
 	}
 
 	spec, err := detectArch(cfg)
