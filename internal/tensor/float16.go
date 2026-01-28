@@ -13,7 +13,8 @@ func Float32ToFloat16(f float32) uint16 {
 	var outExp uint16
 	var outMant uint16
 
-	if exp == 0 {
+	switch exp {
+	case 0:
 		// Subnormal or zero
 		// We treat subnormals as zero for speed/simplicity in this context if acceptable,
 		// or implement proper handling. Llama.cpp usually flushes subnormals.
@@ -23,14 +24,14 @@ func Float32ToFloat16(f float32) uint16 {
 		}
 		// Denormal float32 to... zero? Let's just return 0 for now to keep it simple and safe.
 		// Proper conversion is complex. By standard:
-		return sign << 15 
-	} else if exp == 0xFF {
+		return sign << 15
+	case 0xFF:
 		// Inf or NaN
 		outExp = 0x1F
 		if mant != 0 {
 			outMant = 0x200 // Some non-zero mantissa
 		}
-	} else {
+	default:
 		// Normalized
 		newExp := exp - 127 + 15
 		if newExp >= 31 {
@@ -56,16 +57,17 @@ func Float16ToFloat32(h uint16) float32 {
 
 	var outBits uint32
 
-	if exp == 0 {
+	switch exp {
+	case 0:
 		// Subnormal or zero -> zero
 		outBits = sign << 31
-	} else if exp == 0x1F {
+	case 0x1F:
 		// Inf or NaN
 		outBits = (sign << 31) | 0x7F800000
 		if mant != 0 {
 			outBits |= (mant << 13) // Map NaN payload
 		}
-	} else {
+	default:
 		// Normalized
 		newExp := exp + 127 - 15
 		newMant := mant << 13

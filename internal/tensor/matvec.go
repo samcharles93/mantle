@@ -14,6 +14,7 @@ type matVecTask struct {
 	x      []float32
 	rs, re int
 	done   chan struct{}
+	qx     *quantVec
 }
 
 type matVecPool struct {
@@ -49,7 +50,7 @@ func newMatVecPool() *matVecPool {
 	for i := 0; i < size; i++ {
 		go func() {
 			for task := range p.tasks {
-				matVecRange(task.dst, task.w, task.x, task.rs, task.re)
+				matVecRange(task.dst, task.w, task.x, task.rs, task.re, task.qx)
 				task.done <- struct{}{}
 			}
 		}()
@@ -67,6 +68,13 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 		panic("matvec shape mismatch")
 	}
 
+	var qx *quantVec
+	if w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType) && cpu.HasAVX2 {
+		blocks := (w.C + 31) / 32
+		q, q16, scales := quantizeVecBlocks(x, blocks)
+		qx = &quantVec{q: q, q16: q16, scales: scales}
+	}
+
 	pool := getMatVecPool()
 	workers := pool.size
 	if workers > w.R {
@@ -74,7 +82,7 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 	}
 
 	if workers <= 1 {
-		matVecRange(dst, w, x, 0, w.R)
+		matVecRange(dst, w, x, 0, w.R, qx)
 		return
 	}
 
@@ -99,6 +107,7 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 			rs:   rs,
 			re:   re,
 			done: done,
+			qx:   qx,
 		}
 	}
 
@@ -108,8 +117,11 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 	pool.doneSlots <- done
 }
 
-func matVecRange(dst []float32, w *Mat, x []float32, rs, re int) {
+func matVecRange(dst []float32, w *Mat, x []float32, rs, re int, qx *quantVec) {
 	if w.Raw != nil && w.DType != mcf.DTypeF32 {
+		if matVecRangeQuant(dst, w, x, rs, re, qx) {
+			return
+		}
 		switch w.DType {
 		case mcf.DTypeBF16:
 			matVecRangeBF16(dst, w, x, rs, re)

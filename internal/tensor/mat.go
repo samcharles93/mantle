@@ -117,22 +117,32 @@ func (m *Mat) RowTo(dst []float32, i int) {
 		return
 	}
 
-	elemSize, ok := dtypeElemSize(m.DType)
-	if !ok || elemSize == 0 {
-		panic("unsupported dtype for row decode")
-	}
-	rowBytes := m.Stride * elemSize
-	off := i * rowBytes
 	switch m.DType {
 	case mcf.DTypeBF16:
+		elemSize, ok := dtypeElemSize(m.DType)
+		if !ok || elemSize == 0 {
+			panic("unsupported dtype for row decode")
+		}
+		rowBytes := m.Stride * elemSize
+		off := i * rowBytes
 		for j := 0; j < m.C; j++ {
 			u := u16le(m.Raw, off+j*2)
 			dst[j] = bf16ToF32(u)
 		}
 	case mcf.DTypeF16:
+		elemSize, ok := dtypeElemSize(m.DType)
+		if !ok || elemSize == 0 {
+			panic("unsupported dtype for row decode")
+		}
+		rowBytes := m.Stride * elemSize
+		off := i * rowBytes
 		for j := 0; j < m.C; j++ {
 			u := u16le(m.Raw, off+j*2)
 			dst[j] = fp16ToF32(u)
+		}
+	case mcf.DTypeQ8, mcf.DTypeQ4, mcf.DTypeK6, mcf.DTypeK4, mcf.DTypeK3, mcf.DTypeK2:
+		if err := rowToQuant(dst, m, i); err != nil {
+			panic(err)
 		}
 	default:
 		panic("unsupported dtype for row decode")
