@@ -57,53 +57,65 @@ func runCmd() *cli.Command {
 			&cli.StringFlag{
 				Name:        "model",
 				Aliases:     []string{"m"},
-				Usage:       "path to .mcf file (or set $MANTLE_MODELS_DIR to select interactively)",
+				Usage:       "path to .mcf file",
 				Destination: &modelPath,
 			},
 			&cli.StringFlag{
 				Name:        "prompt",
+				Aliases:     []string{"p"},
 				Usage:       "prompt text to tokenize",
 				Destination: &prompt,
 			},
 			&cli.StringFlag{
 				Name:        "system",
+				Aliases:     []string{"sys"},
 				Usage:       "optional system prompt",
 				Destination: &system,
 			},
 			&cli.Int64Flag{
 				Name:        "steps",
+				Aliases:     []string{"n", "num-tokens", "num_tokens"},
 				Usage:       "number of tokens to generate (default -1 = infinite)",
 				Value:       -1,
 				Destination: &steps,
 			},
 			&cli.Float64Flag{
 				Name:        "temp",
+				Aliases:     []string{"temperature", "t"},
 				Usage:       "sampling temperature",
 				Value:       0.8,
 				Destination: &temp,
 			},
 			&cli.Int64Flag{
-				Name:        "top_k",
-				Aliases:     []string{"topk"},
+				Name:        "top-k",
+				Aliases:     []string{"top_k", "topk"},
 				Usage:       "top-k sampling parameter",
 				Value:       40,
 				Destination: &topK,
 			},
 			&cli.Float64Flag{
-				Name:        "top_p",
-				Aliases:     []string{"topp"},
-				Usage:       "top-p sampling parameter",
+				Name:        "top-p",
+				Aliases:     []string{"top_p", "topp"},
+				Usage:       "top_p sampling parameter",
 				Value:       0.95,
 				Destination: &topP,
 			},
 			&cli.Float64Flag{
+				Name:        "min-p",
+				Aliases:     []string{"min_p", "minp"},
+				Usage:       "min_p sampling parameter (0.0 = disabled)",
+				Value:       0.05,
+			},
+			&cli.Float64Flag{
 				Name:        "repeat-penalty",
+				Aliases:     []string{"repeat_penalty"},
 				Usage:       "repetition penalty (1.0 = disabled)",
 				Value:       1.1,
 				Destination: &repeatPenalty,
 			},
 			&cli.Int64Flag{
 				Name:        "repeat-last-n",
+				Aliases:     []string{"repeat_last_n"},
 				Usage:       "last n tokens to penalize",
 				Value:       64,
 				Destination: &repeatLastN,
@@ -116,7 +128,8 @@ func runCmd() *cli.Command {
 			},
 			&cli.Int64Flag{
 				Name:        "max-context",
-				Usage:       "max context length (reduce to save memory)",
+				Aliases:     []string{"max-ctx", "ctx", "c"},
+				Usage:       "max context length",
 				Value:       4096,
 				Destination: &maxContext,
 			},
@@ -130,11 +143,63 @@ func runCmd() *cli.Command {
 				Usage:       "print prompt text before generation",
 				Destination: &echoPrompt,
 			},
+			&cli.StringFlag{
+				Name:        "cache-type-k",
+				Aliases:     []string{"cache_type_k", "ctk"},
+				Usage:       "KV cache data type for K (f32, f16)",
+				Value:       "f16",
+			},
+			&cli.StringFlag{
+				Name:        "cache-type-v",
+				Aliases:     []string{"cache_type_v", "ctv"},
+				Usage:       "KV cache data type for V (f32, f16)",
+				Value:       "f16",
+			},
 			// Optional overrides
 			&cli.StringFlag{
 				Name:        "tokenizer-json",
 				Usage:       "override path to tokenizer.json",
 				Destination: &tokenizerJSON,
+			},
+			&cli.StringFlag{
+				Name:        "rope-scaling",
+				Usage:       "RoPE scaling type (linear, yarn, none)",
+			},
+			&cli.Float64Flag{
+				Name:        "rope-scale",
+				Usage:       "RoPE scaling factor",
+			},
+			&cli.Float64Flag{
+				Name:        "rope-freq-base",
+				Usage:       "RoPE base frequency",
+			},
+			&cli.Float64Flag{
+				Name:        "rope-freq-scale",
+				Usage:       "RoPE frequency scaling factor",
+			},
+			&cli.Int64Flag{
+				Name:        "yarn-orig-ctx",
+				Usage:       "YaRN original context size",
+			},
+			&cli.Float64Flag{
+				Name:        "yarn-ext-factor",
+				Usage:       "YaRN extrapolation mix factor",
+				Value:       -1.0,
+			},
+			&cli.Float64Flag{
+				Name:        "yarn-attn-factor",
+				Usage:       "YaRN attention factor",
+				Value:       -1.0,
+			},
+			&cli.Float64Flag{
+				Name:        "yarn-beta-slow",
+				Usage:       "YaRN beta slow",
+				Value:       -1.0,
+			},
+			&cli.Float64Flag{
+				Name:        "yarn-beta-fast",
+				Usage:       "YaRN beta fast",
+				Value:       -1.0,
 			},
 			&cli.StringFlag{
 				Name:        "tokenizer-config",
@@ -253,6 +318,48 @@ func runCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)
 			}
+			m.Config.Config.CacheTypeK = c.String("cache-type-k")
+			m.Config.Config.CacheTypeV = c.String("cache-type-v")
+			
+			// RoPE Scaling Overrides
+			ropeOverride := false
+			if c.IsSet("rope-freq-base") {
+				m.Config.Config.RopeFreqBase = c.Float("rope-freq-base")
+				ropeOverride = true
+			}
+			if c.IsSet("rope-scaling") || c.IsSet("rope-scale") || c.IsSet("yarn-orig-ctx") {
+				if m.Config.Config.RopeScaling == nil {
+					m.Config.Config.RopeScaling = &model.RopeScaling{}
+				}
+				rs := m.Config.Config.RopeScaling
+				if c.IsSet("rope-scaling") {
+					rs.Type = c.String("rope-scaling")
+				}
+				if c.IsSet("rope-scale") {
+					rs.Factor = c.Float("rope-scale")
+				}
+				if c.IsSet("yarn-orig-ctx") {
+					rs.OrigMaxCtx = int(c.Int("yarn-orig-ctx"))
+				}
+				if c.IsSet("yarn-ext-factor") {
+					rs.LowFactor = c.Float("yarn-ext-factor")
+				}
+                                if c.IsSet("yarn-attn-factor") {
+                                    rs.AttentionFactor = c.Float("yarn-attn-factor")
+                                }
+                                if c.IsSet("yarn-beta-fast") {
+                                    rs.BetaFast = c.Float("yarn-beta-fast")
+                                }
+                                if c.IsSet("yarn-beta-slow") {
+                                    rs.BetaSlow = c.Float("yarn-beta-slow")
+                                }
+				ropeOverride = true
+			}
+			
+			if ropeOverride {
+				m.UpdateRoPE()
+			}
+
 			genConfig = &m.Config.Config
 
 			// Apply generation_config.json defaults when the user did not override flags.
@@ -423,6 +530,7 @@ func runCmd() *cli.Command {
 				Temperature:   float32(temp),
 				TopK:          int(topK),
 				TopP:          float32(topP),
+				MinP:          float32(c.Float("min-p")),
 				RepeatPenalty: float32(repeatPenalty),
 				RepeatLastN:   int(repeatLastN),
 			})

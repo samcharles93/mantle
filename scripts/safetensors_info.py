@@ -264,6 +264,16 @@ def main(argv: List[str]) -> int:
         print(f"  dtype_counts: {dtypes}")
     if ts["missing_from_headers"]:
         print(f"  missing_from_headers: {len(ts['missing_from_headers'])}")
+    
+    # Print list of all tensors for inspection
+    print("\ntensors:")
+    all_tensors = ts.get("shards", [])
+    headers = shard_headers(base_dir, all_tensors)
+    for shard, header in headers.items():
+        for name, info in header.items():
+            if name == "__metadata__": continue
+            shape = info.get("shape", [])
+            print(f"  {name}: {shape}")
 
     if not all(required.values()):
         print("\nwarning: required files missing for Mantle pack/run", file=sys.stderr)

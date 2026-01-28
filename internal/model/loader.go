@@ -400,6 +400,17 @@ func loadModelFromSource(cfg *hfConfig, spec *archSpec, src tensorSource, maxCon
 			if err != nil {
 				return nil, err
 			}
+
+			// Load optional biases.
+			if names.wqBias != nil {
+				layer.WqBias, _ = loadVec(src, names.wqBias(i))
+			}
+			if names.wkBias != nil {
+				layer.WkBias, _ = loadVec(src, names.wkBias(i))
+			}
+			if names.wvBias != nil {
+				layer.WvBias, _ = loadVec(src, names.wvBias(i))
+			}
 			hidden := cfg.HiddenSize
 			if layer.Wq.C != hidden || layer.Wq.R != qDim {
 				return nil, fmt.Errorf("layer %d: q_proj shape [%d %d] incompatible with hidden=%d head_dim=%d heads=%d", i, layer.Wq.R, layer.Wq.C, hidden, headDim, headCount)
@@ -434,11 +445,33 @@ func loadModelFromSource(cfg *hfConfig, spec *archSpec, src tensorSource, maxCon
 				layer.MoE = moe
 			}
 			kvStride := layer.HeadKV * headDim
-			layer.AttnCache = attnCache{
-				k:        make([]float32, maxContext*kvStride),
-				v:        make([]float32, maxContext*kvStride),
-				kvStride: kvStride,
+			
+			// Initialize cache based on type
+			cache := attnCache{kvStride: kvStride}
+			
+			// Key cache
+			kt := modelCfg.Config.CacheTypeK
+			if kt == "" { 
+				kt = CacheTypeF32 // Default for now, CLI will override
 			}
+			if kt == CacheTypeF16 {
+				cache.k16 = make([]uint16, maxContext*kvStride)
+			} else {
+				cache.k = make([]float32, maxContext*kvStride)
+			}
+
+			// Value cache
+			vt := modelCfg.Config.CacheTypeV
+			if vt == "" {
+				vt = CacheTypeF32
+			}
+			if vt == CacheTypeF16 {
+				cache.v16 = make([]uint16, maxContext*kvStride)
+			} else {
+				cache.v = make([]float32, maxContext*kvStride)
+			}
+			
+			layer.AttnCache = cache
 		}
 	}
 
@@ -463,7 +496,7 @@ func loadModelFromSource(cfg *hfConfig, spec *archSpec, src tensorSource, maxCon
 		ropeLocalOnly: spec.RopeLocalOnly,
 	}
 	m.initScratch()
-	m.initRoPE()
+	m.UpdateRoPE()
 	return m, nil
 }
 
@@ -919,6 +952,16 @@ func (m *Instance) attention(layer *Layer, x []float32, pos int) []float32 {
 	tensor.MatVec(k, layer.Wk, x)
 	tensor.MatVec(v, layer.Wv, x)
 
+	if len(layer.WqBias) > 0 {
+		tensor.Add(q, layer.WqBias)
+	}
+	if len(layer.WkBias) > 0 {
+		tensor.Add(k, layer.WkBias)
+	}
+	if len(layer.WvBias) > 0 {
+		tensor.Add(v, layer.WvBias)
+	}
+
 	if len(layer.AttnQNorm) > 0 {
 		for h := range nHead {
 			tensor.RMSNorm(q[h*headDim:(h+1)*headDim], q[h*headDim:(h+1)*headDim], layer.AttnQNorm, m.RMSEpsilon)
@@ -936,10 +979,18 @@ func (m *Instance) attention(layer *Layer, x []float32, pos int) []float32 {
 		tensor.ApplyRoPE(k, kvHeads, headDim, pos, m.ropeInvFreq, m.ropeAttnScale)
 	}
 
-	cacheK := layer.AttnCache.k
-	cacheV := layer.AttnCache.v
-	copy(cacheK[pos*kvStride:pos*kvStride+kvStride], k)
-	copy(cacheV[pos*kvStride:pos*kvStride+kvStride], v)
+	// Helper for F16 cache
+	storeCache := func(src []float32, f32Dest []float32, f16Dest []uint16, offset int) {
+		if f32Dest != nil {
+			copy(f32Dest[offset:], src)
+		} else if f16Dest != nil {
+			tensor.Float32ToFloat16Slice(src, f16Dest[offset:])
+		}
+	}
+	
+	offset := pos * kvStride
+	storeCache(k, layer.AttnCache.k, layer.AttnCache.k16, offset)
+	storeCache(v, layer.AttnCache.v, layer.AttnCache.v16, offset)
 
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 	start := 0
@@ -951,8 +1002,10 @@ func (m *Instance) attention(layer *Layer, x []float32, pos int) []float32 {
 	}
 	ctx := attnContext{
 		q:        q,
-		cacheK:   cacheK,
-		cacheV:   cacheV,
+		cacheK:   layer.AttnCache.k,
+		cacheV:   layer.AttnCache.v,
+		cacheK16: layer.AttnCache.k16,
+		cacheV16: layer.AttnCache.v16,
 		attnOut:  attnOut,
 		pos:      pos,
 		start:    start,
@@ -1098,7 +1151,7 @@ func (m *Instance) initScratch() {
 	m.initAttnPool()
 }
 
-func (m *Instance) initRoPE() {
+func (m *Instance) UpdateRoPE() {
 	headDim := m.HeadDim
 	if headDim == 0 {
 		headDim = m.Config.Config.HeadDim

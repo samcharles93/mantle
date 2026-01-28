@@ -32,7 +32,17 @@ type Config struct {
 	LayerTypes          []string
 	MuPEnabled          bool
 	AttentionBias       bool
+	CacheTypeK          string
+	CacheTypeV          string
 }
+
+const (
+	CacheTypeF32  = "f32"
+	CacheTypeF16  = "f16"
+	CacheTypeBF16 = "bf16" // Reserved/future
+	CacheTypeQ8_0 = "q8_0" // Reserved/future
+	CacheTypeQ4_0 = "q4_0" // Reserved/future
+)
 
 type RopeScaling struct {
 	Type            string
@@ -95,6 +105,11 @@ type Layer struct {
 	Wk *tensor.Mat
 	Wv *tensor.Mat
 	Wo *tensor.Mat
+
+	// Optional QKV biases.
+	WqBias []float32
+	WkBias []float32
+	WvBias []float32
 	// Optional attention gating (AFMoE).
 	AttnGate *tensor.Mat
 
@@ -114,6 +129,8 @@ type Layer struct {
 type attnCache struct {
 	k        []float32
 	v        []float32
+	k16      []uint16
+	v16      []uint16
 	kvStride int
 }
 

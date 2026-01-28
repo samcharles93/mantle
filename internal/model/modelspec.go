@@ -175,6 +175,15 @@ func qwen3Spec() *archSpec {
 			wo: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.self_attn.o_proj.weight", layer)
 			},
+			wqBias: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.self_attn.q_proj.bias", layer)
+			},
+			wkBias: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.self_attn.k_proj.bias", layer)
+			},
+			wvBias: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.self_attn.v_proj.bias", layer)
+			},
 			ffnUp: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.up_proj.weight", layer)
 			},

@@ -14,6 +14,7 @@ type attnTask struct {
 
 type attnContext struct {
 	q, cacheK, cacheV []float32
+	cacheK16, cacheV16 []uint16
 	attnOut           []float32
 
 	pos, start        int
@@ -105,16 +106,28 @@ func runAttnHeads(ctx *attnContext, scoresBuf []float32, rs, re int) {
 		qh := ctx.q[h*ctx.headDim : (h+1)*ctx.headDim]
 		for t := ctx.start; t <= ctx.pos; t++ {
 			koff := t*ctx.kvStride + kvHead*ctx.headDim
-			kv := ctx.cacheK[koff : koff+ctx.headDim]
-			scores[t-ctx.start] = tensor.Dot(qh, kv) * ctx.scale
+			if ctx.cacheK16 != nil {
+				kv := ctx.cacheK16[koff : koff+ctx.headDim]
+				scores[t-ctx.start] = tensor.DotF16(qh, kv) * ctx.scale
+			} else {
+				kv := ctx.cacheK[koff : koff+ctx.headDim]
+				scores[t-ctx.start] = tensor.Dot(qh, kv) * ctx.scale
+			}
 		}
 		tensor.Softmax(scores)
 		out := ctx.attnOut[h*ctx.headDim : (h+1)*ctx.headDim]
 		for d := range ctx.headDim {
 			var sum float32
-			for t := ctx.start; t <= ctx.pos; t++ {
-				voff := t*ctx.kvStride + kvHead*ctx.headDim + d
-				sum += scores[t-ctx.start] * ctx.cacheV[voff]
+			if ctx.cacheV16 != nil {
+				for t := ctx.start; t <= ctx.pos; t++ {
+					voff := t*ctx.kvStride + kvHead*ctx.headDim + d
+					sum += scores[t-ctx.start] * tensor.Float16ToFloat32(ctx.cacheV16[voff])
+				}
+			} else {
+				for t := ctx.start; t <= ctx.pos; t++ {
+					voff := t*ctx.kvStride + kvHead*ctx.headDim + d
+					sum += scores[t-ctx.start] * ctx.cacheV[voff]
+				}
 			}
 			out[d] = sum
 		}

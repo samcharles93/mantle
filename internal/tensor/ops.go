@@ -47,6 +47,19 @@ func Dot(a, b []float32) float32 {
 	return dotScalar(a, b)
 }
 
+func DotF16(a []float32, b []uint16) float32 {
+	// TODO: SIMD implementation for F16
+	return dotScalarF16(a, b)
+}
+
+func dotScalarF16(a []float32, b []uint16) float32 {
+	var sum float32
+	for i, v := range a {
+		sum += v * Float16ToFloat32(b[i])
+	}
+	return sum
+}
+
 // dotScalar computes the dot product using scalar operations.
 func dotScalar(a, b []float32) float32 {
 	var sum float32
@@ -213,14 +226,15 @@ func ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentio
 	if attentionFactor == 0 {
 		attentionFactor = 1
 	}
+	half := headDim / 2
 	for h := 0; h < nHead; h++ {
 		base := h * headDim
-		for i := 0; i < headDim/2; i++ {
+		for i := 0; i < half; i++ {
 			angle := float64(pos) * invFreq[i]
 			c := float32(math.Cos(angle)) * attentionFactor
 			s := float32(math.Sin(angle)) * attentionFactor
-			i0 := base + 2*i
-			i1 := i0 + 1
+			i0 := base + i
+			i1 := base + i + half
 			x0 := x[i0]
 			x1 := x[i1]
 			x[i0] = x0*c - x1*s

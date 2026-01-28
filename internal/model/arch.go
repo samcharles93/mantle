@@ -105,6 +105,11 @@ type archNames struct {
 	wo       func(layer int) string
 	attnGate func(layer int) string
 
+	// Optional bias tensor names.
+	wqBias func(layer int) string
+	wkBias func(layer int) string
+	wvBias func(layer int) string
+
 	ffnUp   func(layer int) string
 	ffnGate func(layer int) string
 	ffnDown func(layer int) string

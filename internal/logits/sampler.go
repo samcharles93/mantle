@@ -11,6 +11,7 @@ type SamplerConfig struct {
 	Temperature   float32
 	TopK          int
 	TopP          float32
+	MinP          float32
 	RepeatPenalty float32
 	RepeatLastN   int
 }
@@ -116,6 +117,39 @@ func (s *Sampler) Sample(logits []float32, recent []int, excludePenalty []int) i
 	invSum := 1.0 / sum
 	for i := range prob {
 		prob[i] *= invSum
+	}
+
+	// Min-P Sampling
+	if s.cfg.MinP > 0 {
+		maxProb := prob[0]
+		threshold := maxProb * float64(s.cfg.MinP)
+		
+		newLen := 0
+		var newSum float64
+		for i := 0; i < len(prob); i++ {
+			if prob[i] >= threshold {
+				prob[newLen] = prob[i]
+				topIdx[newLen] = topIdx[i]
+				newSum += prob[i]
+				newLen++
+			}
+		}
+		
+		// If we filtered anything, resize and modify sum for re-normalization implicit in TopP?
+		// Actually TopP logic iterates until cumulative sum triggers.
+		// If we removed items, sum is < 1.0.
+		// We should probably re-normalize or just let TopP handle it (TopP acts on cumulative).
+		// But probability distribution should sum to 1.0.
+		// Let's re-normalize.
+		if newLen < len(prob) {
+			prob = prob[:newLen]
+			if newSum > 0 {
+				scale := 1.0 / newSum
+				for i := range prob {
+					prob[i] *= scale
+				}
+			}
+		}
 	}
 
 	cut := len(prob)
