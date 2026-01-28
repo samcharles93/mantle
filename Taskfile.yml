@@ -35,13 +35,22 @@ tasks:
       - echo "Successfully Packed MCF file!"
       - echo "You can now run the model using 'bin/mantle run -m /work/models/mcf/{{.MODEL_NAME}}.mcf'"
 
+  quantize:
+    env:
+      MANTLE_QUANT_IN: /work/models/mcf/{{.MODEL_NAME}}.mcf
+      MANTLE_QUANT_OUT: /work/models/mcf/{{.MODEL_NAME}}.k4.mcf
+    desc: Quantize an existing MCF model (k4 by default).
+    cmds:
+      - bin/mantle quantize -in "$MANTLE_QUANT_IN" -out "$MANTLE_QUANT_OUT" --method k4
+      - echo "Successfully Quantized MCF file!"
+
   run:
     env:
       MANTLE_MODELS_DIR: /work/models/mcf
     desc: Run a small test prompt against an MCF model.
     cmds:
       - |
-        bin/mantle run -m "$MANTLE_MODELS_DIR/{{.MODEL_NAME}}.mcf" \
+        bin/mantle run -m "$MANTLE_MODELS_DIR/{{.MODEL_NAME}}.k4.mcf" \
           --steps 128 \
           --show-config \
           --show-tokens \
@@ -67,3 +76,21 @@ tasks:
     desc: Run SIMD vs scalar benchmark comparisons
     cmds:
       - "{{.GO}} test -bench='(SIMD|Scalar)$' -benchtime=3s ./internal/tensor/"
+
+  fmt:
+    env:
+      GOEXPERIMENT: simd
+    desc: Format all Go code
+    cmds:
+      - "{{.GO}} fmt ./..."
+
+  test:
+    env:
+      GOEXPERIMENT: simd
+    desc: Run all tests
+    cmds:
+      - "{{.GO}} test ./..."
+
+  lint:
+    cmds:
+      - "GOROOT=$(GOEXPERIMENT=simd go1.26rc2 env GOROOT) PATH=\"$GOROOT/bin:$PATH\" GOEXPERIMENT=simd golangci-lint run"

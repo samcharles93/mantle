@@ -445,13 +445,13 @@ func loadModelFromSource(cfg *hfConfig, spec *archSpec, src tensorSource, maxCon
 				layer.MoE = moe
 			}
 			kvStride := layer.HeadKV * headDim
-			
+
 			// Initialize cache based on type
 			cache := attnCache{kvStride: kvStride}
-			
+
 			// Key cache
 			kt := modelCfg.Config.CacheTypeK
-			if kt == "" { 
+			if kt == "" {
 				kt = CacheTypeF32 // Default for now, CLI will override
 			}
 			if kt == CacheTypeF16 {
@@ -470,7 +470,7 @@ func loadModelFromSource(cfg *hfConfig, spec *archSpec, src tensorSource, maxCon
 			} else {
 				cache.v = make([]float32, maxContext*kvStride)
 			}
-			
+
 			layer.AttnCache = cache
 		}
 	}
@@ -633,6 +633,21 @@ func loadMat(src tensorSource, name string) (*tensor.Mat, error) {
 		}
 		return &m, nil
 	default:
+		if mcf.DTypeRequiresAligned64(payload.DType) {
+			shapeU64 := make([]uint64, len(shape))
+			for i, v := range shape {
+				shapeU64[i] = uint64(v)
+			}
+			want, err := mcf.QuantPayloadSize(shapeU64, payload.DType)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", name, err)
+			}
+			if uint64(len(payload.Raw)) != want {
+				return nil, fmt.Errorf("%s: quant payload size mismatch", name)
+			}
+			m := tensor.Mat{R: r, C: c, Stride: c, DType: payload.DType, Raw: payload.Raw}
+			return &m, nil
+		}
 		data, err := decodeTensorF32(payload)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
@@ -987,7 +1002,7 @@ func (m *Instance) attention(layer *Layer, x []float32, pos int) []float32 {
 			tensor.Float32ToFloat16Slice(src, f16Dest[offset:])
 		}
 	}
-	
+
 	offset := pos * kvStride
 	storeCache(k, layer.AttnCache.k, layer.AttnCache.k16, offset)
 	storeCache(v, layer.AttnCache.v, layer.AttnCache.v16, offset)

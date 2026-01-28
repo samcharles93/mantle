@@ -15,6 +15,7 @@ type File struct {
 	file     *mcf.File
 	index    *mcf.TensorIndex
 	dataSect *mcf.MCFSection
+	quant    *mcf.QuantInfo
 }
 
 type TensorInfo struct {
@@ -53,7 +54,25 @@ func Open(path string) (*File, error) {
 		return cleanup(errors.New("mcf: missing tensor data section"))
 	}
 
-	return &File{file: mf, index: index, dataSect: dataSec}, nil
+	var quant *mcf.QuantInfo
+	quantSec := mf.Section(mcf.SectionQuantInfo)
+	if quantSec != nil {
+		quantData := mf.SectionData(quantSec)
+		if len(quantData) == 0 {
+			return cleanup(errors.New("mcf: empty quantinfo section"))
+		}
+		q, err := mcf.ParseQuantInfoSection(quantData)
+		if err != nil {
+			return cleanup(err)
+		}
+		quant = q
+	}
+
+	if err := validateQuantIndex(mf, index, quant); err != nil {
+		return cleanup(err)
+	}
+
+	return &File{file: mf, index: index, dataSect: dataSec, quant: quant}, nil
 }
 
 func (f *File) Close() error {
@@ -64,6 +83,7 @@ func (f *File) Close() error {
 	f.file = nil
 	f.index = nil
 	f.dataSect = nil
+	f.quant = nil
 	return err
 }
 
@@ -73,6 +93,13 @@ func (f *File) SectionData(t mcf.SectionType) []byte {
 	}
 	sec := f.file.Section(t)
 	return f.file.SectionData(sec)
+}
+
+func (f *File) QuantInfo() *mcf.QuantInfo {
+	if f == nil {
+		return nil
+	}
+	return f.quant
 }
 
 func (f *File) Tensor(name string) (TensorInfo, error) {
@@ -125,13 +152,25 @@ func (f *File) ReadTensorRaw(name string) ([]byte, TensorInfo, error) {
 	if err != nil {
 		return nil, TensorInfo{}, fmt.Errorf("tensor %s: %w", name, err)
 	}
-	elemSize, err := dtypeElemSize(info.DType)
-	if err != nil {
-		return nil, TensorInfo{}, fmt.Errorf("tensor %s: %w", name, err)
-	}
-	wantSize, ok := mulUint64(n, uint64(elemSize))
-	if !ok {
-		return nil, TensorInfo{}, fmt.Errorf("tensor %s: tensor too large", name)
+	var wantSize uint64
+	if mcf.DTypeRequiresAligned64(info.DType) {
+		shapeU64 := make([]uint64, len(info.Shape))
+		for i, v := range info.Shape {
+			shapeU64[i] = uint64(v)
+		}
+		wantSize, err = mcf.QuantPayloadSize(shapeU64, info.DType)
+		if err != nil {
+			return nil, TensorInfo{}, fmt.Errorf("tensor %s: %w", name, err)
+		}
+	} else {
+		elemSize, err := dtypeElemSize(info.DType)
+		if err != nil {
+			return nil, TensorInfo{}, fmt.Errorf("tensor %s: %w", name, err)
+		}
+		wantSize, ok = mulUint64(n, uint64(elemSize))
+		if !ok {
+			return nil, TensorInfo{}, fmt.Errorf("tensor %s: tensor too large", name)
+		}
 	}
 	if wantSize != info.DataSize {
 		return nil, TensorInfo{}, fmt.Errorf(
@@ -279,6 +318,57 @@ func dtypeElemSize(dt mcf.TensorDType) (int, error) {
 	default:
 		return 0, fmt.Errorf("unsupported dtype %d", dt)
 	}
+}
+
+func validateQuantIndex(mf *mcf.File, index *mcf.TensorIndex, quant *mcf.QuantInfo) error {
+	if mf == nil || index == nil {
+		return errors.New("mcf: missing tensor index")
+	}
+
+	needsAligned := false
+	for i := 0; i < index.Count(); i++ {
+		entry, err := index.Entry(i)
+		if err != nil {
+			return err
+		}
+		if mcf.DTypeRequiresAligned64(entry.DType) {
+			shape, err := index.Shape(i)
+			if err != nil {
+				return err
+			}
+			wantSize, err := mcf.QuantPayloadSize(shape, entry.DType)
+			if err != nil {
+				return err
+			}
+			if entry.DataOff%64 != 0 {
+				return errors.New("mcf: quant tensor payload is not 64-byte aligned")
+			}
+			if entry.DataSize != wantSize {
+				return errors.New("mcf: quant tensor payload size mismatch")
+			}
+			needsAligned = true
+		}
+	}
+	if needsAligned && (mf.Header.Flags&mcf.FlagTensorDataAligned64) == 0 {
+		return errors.New("mcf: missing FlagTensorDataAligned64 for quantized tensors")
+	}
+
+	if quant == nil {
+		return nil
+	}
+	for _, rec := range quant.Records() {
+		if int(rec.TensorIndex) >= index.Count() {
+			return errors.New("mcf: quant record tensor index out of range")
+		}
+		entry, err := index.Entry(int(rec.TensorIndex))
+		if err != nil {
+			return err
+		}
+		if entry.DType != mcf.TensorDType(rec.Method) {
+			return errors.New("mcf: quant record method does not match tensor dtype")
+		}
+	}
+	return nil
 }
 
 func bf16ToF32(u uint16) float32 {

@@ -4,7 +4,7 @@ type SectionType uint32
 
 const (
 	SectionModelInfo   SectionType = 0x0001
-	SectionQuantInfo   SectionType = 0x0002
+	SectionQuantInfo   SectionType = 0x0002 // Quantization metadata (v1.1)
 	SectionTensorIndex SectionType = 0x0003
 	SectionTensorData  SectionType = 0x0004
 

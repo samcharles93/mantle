@@ -36,10 +36,11 @@ const (
 )
 
 // TensorDType identifies the tensor element encoding.
-// Keep these stable forever; add new values only.
-type TensorDType uint32
+// CONSTRAINT: Quantization methods intended for QuantRecord must be <= 0x00FF.
+type TensorDType uint16
 
 const (
+	// --- Primitives (0x00 - 0x0F) ---
 	DTypeUnknown TensorDType = iota
 	DTypeF32
 	DTypeF16
@@ -54,25 +55,38 @@ const (
 	DTypeI64
 	DTypeU64
 
-	// Quant/packed encodings can live in a higher range.
-	// e.g. 0x1000+... (reserved for future)
+	// --- Mantle Quantization Registry (0x10 - 0xFF) ---
+	// These fit within uint8 to match QuantRecord.Method.
+
+	// Family: int* (Raw / Asymmetric-Capable)
+	DTypeInt8 TensorDType = 0x0010
+	DTypeInt4 TensorDType = 0x0011
+
+	// Family: q* (Block-wise / Symmetric / Weights)
+	DTypeQ8 TensorDType = 0x0020
+	DTypeQ4 TensorDType = 0x0021
+
+	// Family: k* (Super-Block / Hierarchical / Weights)
+	DTypeK6 TensorDType = 0x0030
+	DTypeK4 TensorDType = 0x0031
+	DTypeK3 TensorDType = 0x0032
+	DTypeK2 TensorDType = 0x0033
 )
 
+const tensorIndexEntrySize = 40
+
 // TensorIndexEntry is the on-disk fixed-size record for a tensor.
-// Name bytes live in the strings table.
-// Shape dims live in the dims table.
 type TensorIndexEntry struct {
-	NameOff uint32 // into strings table
-	NameLen uint32 // bytes
+	NameOff uint32
+	NameLen uint32
 
 	DType TensorDType
-	Rank  uint32 // number of dims
+	Rank  uint32
 
-	DimOff uint32 // index into dims table (uint64 elements)
-	_      uint32 // reserved (padding)
+	DimOff uint32
+	_      uint32
 
 	// DataOff is an absolute file offset (from start of file), not section-relative.
-	// This makes slicing data out of the mmap trivial.
 	DataOff  uint64
 	DataSize uint64
 }
@@ -98,7 +112,6 @@ type TensorIndexRecord struct {
 var errBadTensorIndex = errors.New("mcf: corrupt tensor index section")
 
 // ParseTensorIndexSection validates and returns a view over a tensor index section payload.
-// Pass it File.SectionData(File.Section(SectionTensorIndex)).
 func ParseTensorIndexSection(sec []byte) (*TensorIndex, error) {
 	// Header is fixed-size and little-endian in the file.
 	const hdrSize = 48 // binary.Size(TensorIndexHeader{}) if packed; keep constant for stability.
@@ -130,7 +143,7 @@ func ParseTensorIndexSection(sec []byte) (*TensorIndex, error) {
 	// Bounds check tables (using uint64 arithmetic safely)
 	secLen := uint64(len(sec))
 
-	entrySize := uint64(unsafe.Sizeof(TensorIndexEntry{}))
+	entrySize := uint64(tensorIndexEntrySize)
 	entriesBytes := uint64(h.TensorCount) * entrySize
 
 	dimsBytes := uint64(h.DimsCount) * 8
@@ -176,7 +189,7 @@ func ParseTensorIndexSection(sec []byte) (*TensorIndex, error) {
 }
 
 func readTensorIndexEntry(sec []byte, entriesOff uint64, i uint32) (TensorIndexEntry, error) {
-	entrySize := uint64(unsafe.Sizeof(TensorIndexEntry{}))
+	entrySize := uint64(tensorIndexEntrySize)
 	base := entriesOff + uint64(i)*entrySize
 	end := base + entrySize
 	if end > uint64(len(sec)) {
@@ -186,10 +199,14 @@ func readTensorIndexEntry(sec []byte, entriesOff uint64, i uint32) (TensorIndexE
 	b := sec[base:end]
 
 	// Layout matches TensorIndexEntry fields in order (little-endian).
+	dt := binary.LittleEndian.Uint32(b[8:12])
+	if dt > 0xFFFF {
+		return TensorIndexEntry{}, errBadTensorIndex
+	}
 	e := TensorIndexEntry{
 		NameOff:  binary.LittleEndian.Uint32(b[0:4]),
 		NameLen:  binary.LittleEndian.Uint32(b[4:8]),
-		DType:    TensorDType(binary.LittleEndian.Uint32(b[8:12])),
+		DType:    TensorDType(dt),
 		Rank:     binary.LittleEndian.Uint32(b[12:16]),
 		DimOff:   binary.LittleEndian.Uint32(b[16:20]),
 		DataOff:  binary.LittleEndian.Uint64(b[24:32]),
@@ -384,7 +401,7 @@ func EncodeTensorIndexSection(records []TensorIndexRecord) ([]byte, error) {
 
 	// Layout: header | entries | dims | strings
 	hdrSize := uint64(48)
-	entrySize := uint64(unsafe.Sizeof(TensorIndexEntry{}))
+	entrySize := uint64(tensorIndexEntrySize)
 
 	hdr.EntriesOff = hdrSize
 	hdr.DimsOff = hdr.EntriesOff + entrySize*uint64(len(entries))
