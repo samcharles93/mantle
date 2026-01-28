@@ -2,19 +2,17 @@ package mcf
 
 import "unsafe"
 
-// MCF global constants must never change.
 const (
-	// MagicMCF is the file magic for all MCF containers.
-	// It is encoded as "MCF\0".
 	MagicMCF = "MCF\x00"
 
-	// Current Major Version: Any change indicates a breaking format change.
+	// Current Major Version: 1 (Breaking changes only)
 	CurrentMajor uint16 = 1
 
-	// Current Minor Version: Versions may add new optional sections or fields.
-	CurrentMinor uint16 = 0
+	// Current Minor Version
+	CurrentMinor uint16 = 1
 
-	// Format level flags
+	// FlagTensorDataAligned64: REQUIRED for all files using DTypeQ* or DTypeK*
+	// This ensures the SoA payload is 64-byte aligned for AVX-512.
 	FlagTensorDataAligned64 uint64 = 1 << 0
 )
 
