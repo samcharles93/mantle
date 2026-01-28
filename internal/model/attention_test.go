@@ -202,4 +202,3 @@ func compareSlices(t *testing.T, got, want []float32, tol float32) {
 		}
 	}
 }
-

@@ -5,8 +5,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/logits"
+	"github.com/samcharles93/mantle/internal/model"
 )
 
 type Stats struct {

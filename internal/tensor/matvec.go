@@ -281,7 +281,7 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 			// Horizontal reduction using AddPairsGrouped
 			zero := archsimd.BroadcastFloat32x8(0)
 			pairs := acc.AddPairsGrouped(zero) // [(a+b), (c+d), (e+f), (g+h), 0, 0, 0, 0]
-			lo := pairs.GetLo() // [(a+b), (c+d), (e+f), (g+h)]
+			lo := pairs.GetLo()                // [(a+b), (c+d), (e+f), (g+h)]
 			var sum float32
 			sum += lo.GetElem(0) + lo.GetElem(1) + lo.GetElem(2) + lo.GetElem(3)
 
