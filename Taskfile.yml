@@ -36,7 +36,7 @@ tasks:
       MANTLE_PACK_OUT_DIR: /work/models/mcf
     desc: Pack a model into the model container format.
     cmds:
-      - bin/mantle pack -in /work/models/raw/Ministral-3-3B-Instruct-2512-BF16 -out /work/models/mcf/Ministral-3-3B-Instruct-2512-BF16.mcf --dedup --cast keep
+      - bin/mantle pack -in /work/models/raw/Qwen3-0.6B -out /work/models/mcf/Qwen3-0.6B.mcf --dedup --cast keep
 
   run:
     env:
@@ -44,7 +44,7 @@ tasks:
     desc: Run a small test prompt against an MCF model.
     cmds:
       - |
-        bin/mantle run -m "$MANTLE_MODELS_DIR/Ministral-3-3B-Instruct-2512-BF16.mcf" \
+        bin/mantle run -m "$MANTLE_MODELS_DIR/Qwen3-0.6B.mcf" \
           --steps 128 \
           --show-config \
           --show-tokens \
@@ -57,3 +57,10 @@ tasks:
     desc: Run in interactive mode
     cmds:
       - bin/mantle run --system "You are an all-knowing Artificial Intelligence"
+
+  bench-simd-compare:
+    env:
+      GOEXPERIMENT: simd
+    desc: Run SIMD vs scalar benchmark comparisons
+    cmds:
+      - "{{.GO}} test -bench='(SIMD|Scalar)$' -benchtime=3s ./internal/tensor/"

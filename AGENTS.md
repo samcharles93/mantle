@@ -27,8 +27,7 @@ The Model Container Format (MCF) **is**:
 ## Hard constraints (must follow)
 
 ### Go and build constraints
-- Target **Go 1.25** (as per `go.mod`).
-- **Pure Go only**: no CGO, no C/C++ bindings, no platform-native acceleration via foreign code.
+- You must ensure you run `go1.26rc2` for any commands that require `go`. `go` commands will not work in this project due to the experimental nature of the simd/archsimd package which this project depends on.
 - Prefer the standard library first.
 - Use modern Go where it improves clarity or correctness:
   - built-in `min()` / `max()` where appropriate
@@ -40,19 +39,14 @@ The Model Container Format (MCF) **is**:
 - Code must be `gofmt`-clean.
 
 ### Dependency policy (very strict)
-Do **not** add third-party dependencies.
-
-Only these non-stdlib dependencies are permitted:
-- `github.com/urfave/cli/v3`
-- `golang.org/x/sys`
 
 Any new dependency is a design change and must be explicitly requested and justified.
 
 ### Implementation discipline
 - **No stubs.**
 - **No half-implementations.**
-- **No TODOs** (or “future work” placeholders) in committed code.
-- All changes must compile and be runnable by default (within repo constraints).
+- **No TODOs** (or “future work” placeholders) in committed code. unless created by the user.
+- All changes must compile and be runnable by default (within repo or users constraints).
 - Treat all created files (especially tests) as permanent artefacts unless explicitly instructed otherwise.
 
 ### Low-level format and runtime invariants
