@@ -75,13 +75,13 @@ func newAttnPool(workers, maxCtx int) *attnPool {
 	return p
 }
 
-func (m *Model) initAttnPool() {
+func (m *Instance) initAttnPool() {
 	m.attnPoolOnce.Do(func() {
 		m.attnPool = newAttnPool(attnWorkersFor(m.HeadCount), m.MaxContext)
 	})
 }
 
-func (m *Model) getAttnPool() *attnPool {
+func (m *Instance) getAttnPool() *attnPool {
 	if m.attnPool == nil {
 		m.initAttnPool()
 	}

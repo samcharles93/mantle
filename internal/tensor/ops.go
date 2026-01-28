@@ -75,11 +75,10 @@ func dotSIMD(a, b []float32) float32 {
 		acc = acc.Add(va.Mul(vb))
 	}
 
-	// Horizontal reduction using AddPairsGrouped
-	zero := archsimd.BroadcastFloat32x8(0)
-	pairs := acc.AddPairsGrouped(zero) // [(a+b), (c+d), (e+f), (g+h), 0, 0, 0, 0]
-	lo := pairs.GetLo()                // [(a+b), (c+d), (e+f), (g+h)]
-	sum := lo.GetElem(0) + lo.GetElem(1) + lo.GetElem(2) + lo.GetElem(3)
+	// Horizontal reduction: store to array and sum scalarly
+	var tmp [8]float32
+	acc.Store(&tmp)
+	sum := tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 
 	// Handle remaining elements with scalar
 	for ; i < n; i++ {

@@ -47,7 +47,7 @@ func (s mcfSource) TensorShape(name string) ([]int, bool) {
 	return shape, true
 }
 
-func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int) (*Model, error) {
+func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int) (*Instance, error) {
 	if mcfFile == nil {
 		return nil, fmt.Errorf("mcf: nil file")
 	}
@@ -62,7 +62,7 @@ func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int) (*M
 	return loadModelFromSource(cfg, spec, mcfSource{mf: mcfFile}, maxContext)
 }
 
-func loadModelFromSource(cfg *hfConfig, spec *archSpec, src tensorSource, maxContext int) (*Model, error) {
+func loadModelFromSource(cfg *hfConfig, spec *archSpec, src tensorSource, maxContext int) (*Instance, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("nil config")
 	}
@@ -447,7 +447,7 @@ func loadModelFromSource(cfg *hfConfig, spec *archSpec, src tensorSource, maxCon
 		muPScale = float32(math.Sqrt(float64(modelCfg.Config.EmbeddingLength)))
 	}
 
-	m := &Model{
+	m := &Instance{
 		Config:        modelCfg,
 		Embeddings:    emb,
 		OutputNorm:    outNorm,
@@ -901,7 +901,7 @@ func inferFFNLength(src tensorSource, names archNames, layer int) int {
 	return 0
 }
 
-func (m *Model) attention(layer *Layer, x []float32, pos int) []float32 {
+func (m *Instance) attention(layer *Layer, x []float32, pos int) []float32 {
 	nHead := m.HeadCount
 	headDim := m.HeadDim
 	kvHeads := layer.HeadKV
@@ -1005,7 +1005,7 @@ func (m *Model) attention(layer *Layer, x []float32, pos int) []float32 {
 	return m.scratch.attnProj
 }
 
-func (m *Model) shortconv(layer *Layer, x []float32) []float32 {
+func (m *Instance) shortconv(layer *Layer, x []float32) []float32 {
 	embd := m.Config.Config.EmbeddingLength
 	tensor.MatVec(m.scratch.scProj, layer.ShortConvInProj, x)
 	b := m.scratch.scProj[:embd]
@@ -1048,7 +1048,7 @@ func (m *Model) shortconv(layer *Layer, x []float32) []float32 {
 	return m.scratch.tmp
 }
 
-func (m *Model) ffn(layer *Layer, x []float32) []float32 {
+func (m *Instance) ffn(layer *Layer, x []float32) []float32 {
 	tensor.MatVec(m.scratch.ffnUp, layer.FfnUp, x)
 	tensor.MatVec(m.scratch.ffnGate, layer.FfnGate, x)
 	for i := range m.scratch.ffnAct {
@@ -1058,7 +1058,7 @@ func (m *Model) ffn(layer *Layer, x []float32) []float32 {
 	return m.scratch.tmp2
 }
 
-func (m *Model) initScratch() {
+func (m *Instance) initScratch() {
 	embd := m.Config.Config.EmbeddingLength
 	ffn := m.Config.Config.FFNLength
 	numExperts := m.Config.Config.NumExperts
@@ -1098,7 +1098,7 @@ func (m *Model) initScratch() {
 	m.initAttnPool()
 }
 
-func (m *Model) initRoPE() {
+func (m *Instance) initRoPE() {
 	headDim := m.HeadDim
 	if headDim == 0 {
 		headDim = m.Config.Config.HeadDim

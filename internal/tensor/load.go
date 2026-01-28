@@ -3,38 +3,8 @@ package tensor
 import (
 	"fmt"
 
-	"github.com/samcharles93/mantle/internal/gguf"
 	"github.com/samcharles93/mantle/internal/safetensors"
 )
-
-// LoadGGUFMat loads a 2D matrix from a GGUF file.
-func LoadGGUFMat(f *gguf.File, name string) (*Mat, error) {
-	data, dims, err := gguf.ReadTensorF32(f, name)
-	if err != nil {
-		return nil, err
-	}
-	if len(dims) != 2 {
-		return nil, fmt.Errorf("%s: expected 2D tensor", name)
-	}
-	r := int(dims[1])
-	c := int(dims[0])
-	if r*c != len(data) {
-		return nil, fmt.Errorf("%s: size mismatch", name)
-	}
-	return &Mat{R: r, C: c, Stride: c, Data: data}, nil
-}
-
-// LoadGGUFVec loads a 1D vector from a GGUF file.
-func LoadGGUFVec(f *gguf.File, name string) ([]float32, error) {
-	data, dims, err := gguf.ReadTensorF32(f, name)
-	if err != nil {
-		return nil, err
-	}
-	if len(dims) != 1 {
-		return nil, fmt.Errorf("%s: expected 1D tensor", name)
-	}
-	return data, nil
-}
 
 // LoadSafetensorsMat loads a 2D matrix from a Safetensors file.
 func LoadSafetensorsMat(st *safetensors.File, name string) (*Mat, error) {

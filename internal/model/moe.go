@@ -6,7 +6,7 @@ import (
 	"github.com/samcharles93/mantle/internal/tensor"
 )
 
-func (m *Model) ffnProject(up, gate, down *tensor.Mat, x []float32) []float32 {
+func (m *Instance) ffnProject(up, gate, down *tensor.Mat, x []float32) []float32 {
 	intermediate := up.R
 	if intermediate <= 0 || intermediate > len(m.scratch.ffnUp) {
 		panic("ffn intermediate size exceeds scratch buffers")
@@ -24,7 +24,7 @@ func (m *Model) ffnProject(up, gate, down *tensor.Mat, x []float32) []float32 {
 	return m.scratch.tmp2
 }
 
-func (m *Model) moe(layer *Layer, x []float32) []float32 {
+func (m *Instance) moe(layer *Layer, x []float32) []float32 {
 	moe := layer.MoE
 	if moe == nil {
 		panic("moe layer missing moe config")

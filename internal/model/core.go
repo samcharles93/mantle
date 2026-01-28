@@ -8,7 +8,7 @@ import (
 
 // ForwardToken runs one autoregressive step for the provided token id.
 // It returns a logits slice owned by the model (overwritten on next call).
-func (m *Model) ForwardToken(tok int) ([]float32, error) {
+func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 	if tok < 0 || tok >= m.Config.Config.VocabSize {
 		return nil, fmt.Errorf("token id out of range: %d", tok)
 	}
@@ -65,7 +65,7 @@ func (m *Model) ForwardToken(tok int) ([]float32, error) {
 	return m.scratch.logits, nil
 }
 
-func (m *Model) Reset() {
+func (m *Instance) Reset() {
 	m.Pos = 0
 	for i := range m.Layers {
 		layer := &m.Layers[i]

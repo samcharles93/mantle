@@ -215,7 +215,7 @@ func runCmd() *cli.Command {
 			}
 
 			var (
-				m         *model.Model
+				m         *model.Instance
 				hfTok     *tokenizer.HFTokenizer
 				tok       tokenizer.Tokenizer
 				tokConfig tokenizer.TokenizerConfig

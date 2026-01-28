@@ -55,7 +55,7 @@ type ModelConfig struct {
 	Tokenizer tokenizer.TokenizerConfig
 }
 
-type Model struct {
+type Instance struct {
 	Config        *ModelConfig
 	Embeddings    *tensor.Mat
 	OutputNorm    []float32
