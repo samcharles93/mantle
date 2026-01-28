@@ -5,7 +5,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/samcharles93/mantle/internal/llm"
+	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/logits"
 )
 
@@ -17,7 +17,7 @@ type Stats struct {
 
 // Generate runs the inference loop for a fixed number of steps.
 // It handles sampling and updates the model state.
-func Generate(model llm.Model, sampler *logits.Sampler, promptTokens []int, steps int, callback func(string)) (Stats, error) {
+func Generate(model model.Model, sampler *logits.Sampler, promptTokens []int, steps int, callback func(string)) (Stats, error) {
 	var stats Stats
 
 	// Prefill
@@ -57,7 +57,7 @@ func Generate(model llm.Model, sampler *logits.Sampler, promptTokens []int, step
 
 // Generator manages the state of a generation session
 type Generator struct {
-	Model     llm.Model
+	Model     model.Model
 	Sampler   *logits.Sampler
 	Tokenizer interface {
 		Decode([]int) (string, error)

@@ -31,19 +31,21 @@ func matVecParWaitGroup(dst []float32, w *Mat, x []float32) {
 			break
 		}
 		wg.Add(1)
-		go func(rs, re int) {
-			defer wg.Done()
-			for r := rs; r < re; r++ {
-				row := w.Data[r*w.Stride : r*w.Stride+w.C]
-				var sum float32
-				for j := 0; j < w.C; j++ {
-					sum += row[j] * x[j]
-				}
-				dst[r] = sum
-			}
-		}(rs, re)
+		go matVecParWorker(&wg, dst, w, x, rs, re)
 	}
 	wg.Wait()
+}
+
+func matVecParWorker(wg *sync.WaitGroup, dst []float32, w *Mat, x []float32, rs, re int) {
+	defer wg.Done()
+	for r := rs; r < re; r++ {
+		row := w.Data[r*w.Stride : r*w.Stride+w.C]
+		var sum float32
+		for j := 0; j < w.C; j++ {
+			sum += row[j] * x[j]
+		}
+		dst[r] = sum
+	}
 }
 
 func BenchmarkMatVecNaive(b *testing.B) {
@@ -197,4 +199,112 @@ func closeEnough(a, b float32, rel float64) bool {
 	diff := math.Abs(da - db)
 	scale := math.Max(1.0, math.Max(math.Abs(da), math.Abs(db)))
 	return diff <= rel*scale
+}
+
+// SIMD vs Scalar comparison benchmarks
+
+func BenchmarkMatVecPoolSIMD(b *testing.B) {
+	r, c := 2048, 2048
+	w := NewMat(r, c)
+	x := make([]float32, c)
+	dst := make([]float32, r)
+	FillRand(&w, 1)
+
+	b.ResetTimer()
+	for b.Loop() {
+		matVecRangeF32SIMD(dst, &w, x, 0, r)
+	}
+}
+
+func BenchmarkMatVecPoolScalar(b *testing.B) {
+	r, c := 2048, 2048
+	w := NewMat(r, c)
+	x := make([]float32, c)
+	dst := make([]float32, r)
+	FillRand(&w, 1)
+
+	b.ResetTimer()
+	for b.Loop() {
+		matVecRangeF32Scalar(dst, &w, x, 0, r)
+	}
+}
+
+func BenchmarkMatVecPoolBF16SIMD(b *testing.B) {
+	r, c := 2048, 2048
+	data := make([]float32, r*c)
+	w := Mat{
+		R:      r,
+		C:      c,
+		Stride: c,
+		DType:  mcf.DTypeF32,
+		Data:   data,
+	}
+	FillRand(&w, 1)
+
+	raw := encodeBF16Raw(data)
+	wRaw, err := NewMatFromRaw(r, c, mcf.DTypeBF16, raw)
+	if err != nil {
+		b.Fatalf("NewMatFromRaw bf16: %v", err)
+	}
+
+	x := make([]float32, c)
+	dst := make([]float32, r)
+	b.ResetTimer()
+	for b.Loop() {
+		matVecRangeBF16SIMD(dst, &wRaw, x, 0, r)
+	}
+}
+
+func BenchmarkMatVecPoolBF16Scalar(b *testing.B) {
+	r, c := 2048, 2048
+	data := make([]float32, r*c)
+	w := Mat{
+		R:      r,
+		C:      c,
+		Stride: c,
+		DType:  mcf.DTypeF32,
+		Data:   data,
+	}
+	FillRand(&w, 1)
+
+	raw := encodeBF16Raw(data)
+	wRaw, err := NewMatFromRaw(r, c, mcf.DTypeBF16, raw)
+	if err != nil {
+		b.Fatalf("NewMatFromRaw bf16: %v", err)
+	}
+
+	x := make([]float32, c)
+	dst := make([]float32, r)
+	b.ResetTimer()
+	for b.Loop() {
+		matVecRangeBF16Scalar(dst, &wRaw, x, 0, r)
+	}
+}
+
+func BenchmarkGemmParSIMD(b *testing.B) {
+	const m, k, n = 256, 256, 256
+	A := NewMat(m, k)
+	B := NewMat(k, n)
+	C := NewMat(m, n)
+	FillRand(&A, 7)
+	FillRand(&B, 8)
+
+	b.ResetTimer()
+	for b.Loop() {
+		blockUpdateAlpha1SIMD(C.Data, A.Data, B.Data, C.Stride, A.Stride, B.Stride, 0, m, 0, n, 0, k)
+	}
+}
+
+func BenchmarkGemmParScalar(b *testing.B) {
+	const m, k, n = 256, 256, 256
+	A := NewMat(m, k)
+	B := NewMat(k, n)
+	C := NewMat(m, n)
+	FillRand(&A, 7)
+	FillRand(&B, 8)
+
+	b.ResetTimer()
+	for b.Loop() {
+		blockUpdateAlpha1Scalar(C.Data, A.Data, B.Data, C.Stride, A.Stride, B.Stride, 0, m, 0, n, 0, k)
+	}
 }

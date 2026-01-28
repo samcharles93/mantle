@@ -384,13 +384,14 @@ func runCmd() *cli.Command {
 				if genConfig.RopeScaling != nil {
 					fmt.Fprintf(
 						os.Stderr,
-						"rope: base=%g scaling=%s factor=%g orig_ctx=%d low=%g high=%g\n",
+						"rope: base=%g scaling=%s factor=%g orig_ctx=%d low=%g high=%g attn=%g\n",
 						genConfig.RopeFreqBase,
 						genConfig.RopeScaling.Type,
 						genConfig.RopeScaling.Factor,
 						genConfig.RopeScaling.OrigMaxCtx,
 						genConfig.RopeScaling.LowFactor,
 						genConfig.RopeScaling.HighFactor,
+						genConfig.RopeScaling.AttentionFactor,
 					)
 				} else {
 					fmt.Fprintf(os.Stderr, "rope: base=%g scaling=none\n", genConfig.RopeFreqBase)

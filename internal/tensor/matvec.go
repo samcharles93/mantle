@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/samcharles93/mantle/pkg/mcf"
+	"simd/archsimd"
 )
 
 type matVecTask struct {
@@ -120,6 +121,16 @@ func matVecRange(dst []float32, w *Mat, x []float32, rs, re int) {
 			panic("unsupported dtype for matvec")
 		}
 	}
+
+	if cpu.HasAVX2 {
+		matVecRangeF32SIMD(dst, w, x, rs, re)
+		return
+	}
+	matVecRangeF32Scalar(dst, w, x, rs, re)
+}
+
+// matVecRangeF32Scalar computes matvec for F32 using scalar operations.
+func matVecRangeF32Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 	for i := rs; i < re; i++ {
 		row := w.Data[i*w.Stride : i*w.Stride+w.C]
 		var sum float32
@@ -134,7 +145,47 @@ func matVecRange(dst []float32, w *Mat, x []float32, rs, re int) {
 	}
 }
 
+// matVecRangeF32SIMD computes matvec for F32 using AVX2 SIMD.
+// Uses a single accumulator to minimize register pressure.
+func matVecRangeF32SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
+	c := w.C
+	for i := rs; i < re; i++ {
+		row := w.Data[i*w.Stride : i*w.Stride+w.C]
+
+		// Single accumulator - reduces register pressure
+		var acc archsimd.Float32x8
+		j := 0
+		// Process 8 elements at a time
+		for ; j+8 <= c; j += 8 {
+			vrow := archsimd.LoadFloat32x8Slice(row[j:])
+			vx := archsimd.LoadFloat32x8Slice(x[j:])
+			acc = acc.Add(vrow.Mul(vx))
+		}
+
+		// Horizontal reduction: store to array and sum scalarly
+		var tmp [8]float32
+		acc.Store(&tmp)
+		var sum float32
+		sum += tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
+
+		// Handle remaining elements
+		for ; j < c; j++ {
+			sum += row[j] * x[j]
+		}
+		dst[i] = sum
+	}
+}
+
 func matVecRangeBF16(dst []float32, w *Mat, x []float32, rs, re int) {
+	if cpu.HasAVX2 {
+		matVecRangeBF16SIMD(dst, w, x, rs, re)
+		return
+	}
+	matVecRangeBF16Scalar(dst, w, x, rs, re)
+}
+
+// matVecRangeBF16Scalar computes matvec for BF16 using scalar operations.
+func matVecRangeBF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 	raw := w.Raw
 	if u16raw, ok := rawUint16LE(raw); ok {
 		for i := rs; i < re; i++ {
@@ -194,6 +245,69 @@ func matVecRangeBF16(dst []float32, w *Mat, x []float32, rs, re int) {
 			offj += 16
 		}
 		for ; j < w.C; j++ {
+			u := u16le(raw, offj)
+			sum += bf16ToF32Table(u) * x[j]
+			offj += 2
+		}
+		dst[i] = sum
+	}
+}
+
+// matVecRangeBF16SIMD computes matvec for BF16 using AVX2 SIMD.
+// Uses a single accumulator to minimize register pressure.
+func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
+	raw := w.Raw
+	if u16raw, ok := rawUint16LE(raw); ok {
+		c := w.C
+		for i := rs; i < re; i++ {
+			rowBase := i * w.Stride
+			row := u16raw[rowBase : rowBase+w.Stride]
+			if c > 0 {
+				_ = row[c-1]
+			}
+
+			// Single accumulator
+			var acc archsimd.Float32x8
+			j := 0
+			// Process 8 elements at a time
+			for ; j+8 <= c; j += 8 {
+				// Load 8 BF16 values as uint16, convert to F32
+				vu := archsimd.LoadUint16x8Slice(row[j:])
+				vf := vu.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vx := archsimd.LoadFloat32x8Slice(x[j:])
+				acc = acc.Add(vf.Mul(vx))
+			}
+
+			// Horizontal reduction using AddPairsGrouped
+			zero := archsimd.BroadcastFloat32x8(0)
+			pairs := acc.AddPairsGrouped(zero) // [(a+b), (c+d), (e+f), (g+h), 0, 0, 0, 0]
+			lo := pairs.GetLo() // [(a+b), (c+d), (e+f), (g+h)]
+			var sum float32
+			sum += lo.GetElem(0) + lo.GetElem(1) + lo.GetElem(2) + lo.GetElem(3)
+
+			// Handle remaining elements
+			for ; j < c; j++ {
+				sum += bf16ToF32Table(row[j]) * x[j]
+			}
+			dst[i] = sum
+		}
+		return
+	}
+
+	// Slow path: need to load from bytes with u16le
+	rowBytes := w.Stride * 2
+	c := w.C
+	for i := rs; i < re; i++ {
+		off := i * rowBytes
+		if c > 0 {
+			_ = raw[off+(c-1)*2+1]
+		}
+
+		// For the byte path, use scalar for now
+		var sum float32
+		j := 0
+		offj := off
+		for ; j < c; j++ {
 			u := u16le(raw, offj)
 			sum += bf16ToF32Table(u) * x[j]
 			offj += 2

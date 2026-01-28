@@ -1,13 +1,27 @@
 package tensor
 
-import "runtime"
+import (
+	"runtime"
 
-// Tuned for the benchmark shape (256^3) and typical L1/L2 sizes.
-// tileN is kept moderate to reduce register pressure in the inner loop.
+	"simd/archsimd"
+)
+
+// Tuned for the benchmark shape (256^3). Tile sizes are variables to allow
+// test-time sweeps without recompilation.
 const (
-	tileM = 64
-	tileN = 64
-	tileK = 32
+	defaultTileM = 32
+	defaultTileN = 32
+	defaultTileK = 16
+
+	maxTileM = 64
+	maxTileN = 64
+	maxTileK = 64
+)
+
+var (
+	tileM = defaultTileM
+	tileN = defaultTileN
+	tileK = defaultTileK
 )
 
 type gemmTask struct {
@@ -29,22 +43,21 @@ func newGemmPool() *gemmPool {
 		size = 1
 	}
 	p := &gemmPool{
-		size: size,
-		// Buffered to reduce per-call synchronization on task dispatch.
+		size:      size,
 		tasks:     make(chan gemmTask, size*2),
 		doneSlots: make(chan chan struct{}, size),
 	}
 	for i := 0; i < size; i++ {
-		// Buffered so workers can signal completion without blocking.
-		p.doneSlots <- make(chan struct{}, size)
+		p.doneSlots <- make(chan struct{}, 1)
 	}
 	for w := 0; w < size; w++ {
-		go func() {
+		packB := make([]float32, maxTileK*maxTileN)
+		go func(packB []float32) {
 			for task := range p.tasks {
-				gemmRangeRows(task.C, task.A, task.B, task.alpha, task.beta, task.rs, task.re)
+				gemmRangeRows(task.C, task.A, task.B, task.alpha, task.beta, task.rs, task.re, packB)
 				task.done <- struct{}{}
 			}
-		}()
+		}(packB)
 	}
 	return p
 }
@@ -53,8 +66,6 @@ var gemmWorkPool = newGemmPool()
 
 // GemmPar computes the matrix product C = alpha*A*B + beta*C using a
 // blocked algorithm and parallelising across ranges of output rows.
-//
-// Panics if dimensions do not conform (A.C==B.R, C.R==A.R, C.C==B.C).
 func GemmPar(C, A, B *Mat, alpha, beta float32, workers int) {
 	if A.C != B.R || C.R != A.R || C.C != B.C {
 		panic("gemm: dimension mismatch")
@@ -70,14 +81,13 @@ func GemmPar(C, A, B *Mat, alpha, beta float32, workers int) {
 		workers = C.R
 	}
 	if workers <= 1 {
-		gemmRangeRows(C, A, B, alpha, beta, 0, C.R)
+		gemmRangeRows(C, A, B, alpha, beta, 0, C.R, nil)
 		return
 	}
 	if workers > gemmWorkPool.size {
 		workers = gemmWorkPool.size
 	}
 
-	// Even row partitioning.
 	chunk := (C.R + workers - 1) / workers
 
 	done := <-gemmWorkPool.doneSlots
@@ -105,47 +115,36 @@ func GemmPar(C, A, B *Mat, alpha, beta float32, workers int) {
 }
 
 // gemmRangeRows performs a blocked GEMM on a contiguous range of rows of C.
-// It updates rows [rs, re) of C using the corresponding rows of A.
-func gemmRangeRows(C, A, B *Mat, alpha, beta float32, rs, re int) {
-	// Fast path: common inference case alpha=1, beta=0.
+func gemmRangeRows(C, A, B *Mat, alpha, beta float32, rs, re int, packB []float32) {
 	if alpha == 1 && beta == 0 {
-		gemmRangeRowsAlpha1Beta0(C, A, B, rs, re)
+		gemmRangeRowsAlpha1Beta0(C, A, B, rs, re, packB)
 		return
 	}
 
-	// Scale/zero C range according to beta.
 	if beta == 0 {
 		cStride := C.Stride
 		n := C.C
 		for i := rs; i < re; i++ {
 			base := i * cStride
-			row := C.Data[base : base+n]
-			for j := range row {
-				row[j] = 0
-			}
+			clear(C.Data[base : base+n])
 		}
 	} else if beta != 1 {
 		cStride := C.Stride
 		n := C.C
 		for i := rs; i < re; i++ {
 			base := i * cStride
-			row := C.Data[base : base+n]
-			for j := range row {
-				row[j] *= beta
+			for j := 0; j < n; j++ {
+				C.Data[base+j] *= beta
 			}
 		}
 	}
 
-	// m := A.R
-	// _ = m
 	n := B.C
 	k := A.C
-
 	aStride := A.Stride
 	bStride := B.Stride
 	cStride := C.Stride
 
-	// Blocked loops.
 	for i0 := rs; i0 < re; i0 += tileM {
 		iMax := min(i0+tileM, re)
 		for k0 := 0; k0 < k; k0 += tileK {
@@ -158,13 +157,16 @@ func gemmRangeRows(C, A, B *Mat, alpha, beta float32, rs, re int) {
 	}
 }
 
-func gemmRangeRowsAlpha1Beta0(C, A, B *Mat, rs, re int) {
-	// beta==0: clear C range once, then accumulate.
+func gemmRangeRowsAlpha1Beta0(C, A, B *Mat, rs, re int, packB []float32) {
+	if cpu.HasAVX2 && len(packB) >= tileK*tileN {
+		gemmRangeRowsAlpha1Beta0Packed(C, A, B, rs, re, packB)
+		return
+	}
+
 	cStride := C.Stride
 	n := C.C
 	cData := C.Data
 
-	// Zero contiguous segments with the built-in clear for better codegen.
 	for i := rs; i < re; i++ {
 		base := i * cStride
 		clear(cData[base : base+n])
@@ -176,7 +178,6 @@ func gemmRangeRowsAlpha1Beta0(C, A, B *Mat, rs, re int) {
 	aData := A.Data
 	bData := B.Data
 
-	// Blocked loops.
 	for i0 := rs; i0 < re; i0 += tileM {
 		iMax := min(i0+tileM, re)
 		for k0 := 0; k0 < k; k0 += tileK {
@@ -189,7 +190,63 @@ func gemmRangeRowsAlpha1Beta0(C, A, B *Mat, rs, re int) {
 	}
 }
 
+func gemmRangeRowsAlpha1Beta0Packed(C, A, B *Mat, rs, re int, packB []float32) {
+	cStride := C.Stride
+	n := C.C
+	cData := C.Data
+
+	for i := rs; i < re; i++ {
+		base := i * cStride
+		clear(cData[base : base+n])
+	}
+
+	k := A.C
+	aStride := A.Stride
+	bStride := B.Stride
+	aData := A.Data
+	bData := B.Data
+
+	for k0 := 0; k0 < k; k0 += tileK {
+		kMax := min(k0+tileK, k)
+		kInner := kMax - k0
+		for j0 := 0; j0 < n; j0 += tileN {
+			jMax := min(j0+tileN, n)
+			width := jMax - j0
+
+			packBTile(packB, bData, bStride, k0, kMax, j0, jMax)
+
+			for i0 := rs; i0 < re; i0 += tileM {
+				iMax := min(i0+tileM, re)
+				blockUpdateAlpha1SIMDPacked(cData, aData, packB, cStride, aStride, i0, iMax, j0, width, k0, kInner)
+			}
+		}
+	}
+}
+
+func packBTile(dst []float32, bData []float32, bStride int, k0, kMax, j0, jMax int) {
+	width := jMax - j0
+	kInner := kMax - k0
+	if width <= 0 || kInner <= 0 {
+		return
+	}
+	if width > maxTileN || kInner > maxTileK {
+		panic("packBTile exceeds max tile size")
+	}
+	for kk := 0; kk < kInner; kk++ {
+		srcOff := (k0+kk)*bStride + j0
+		copy(dst[kk*width:(kk+1)*width], bData[srcOff:srcOff+width])
+	}
+}
+
 func blockUpdateGeneric(cData, aData, bData []float32, cStride, aStride, bStride int, alpha float32, i0, iMax, j0, jMax, k0, kMax int) {
+	if cpu.HasAVX2 {
+		blockUpdateGenericSIMD(cData, aData, bData, cStride, aStride, bStride, alpha, i0, iMax, j0, jMax, k0, kMax)
+		return
+	}
+	blockUpdateGenericScalar(cData, aData, bData, cStride, aStride, bStride, alpha, i0, iMax, j0, jMax, k0, kMax)
+}
+
+func blockUpdateGenericScalar(cData, aData, bData []float32, cStride, aStride, bStride int, alpha float32, i0, iMax, j0, jMax, k0, kMax int) {
 	width := jMax - j0
 	for i := i0; i < iMax; i++ {
 		aRow := aData[i*aStride:]
@@ -219,7 +276,116 @@ func blockUpdateGeneric(cData, aData, bData []float32, cStride, aStride, bStride
 	}
 }
 
+// blockUpdateGenericSIMD uses a micro-kernel approach.
+// Accumulates across multiple kk iterations before storing to reduce memory traffic.
+func blockUpdateGenericSIMD(cData, aData, bData []float32, cStride, aStride, bStride int, alpha float32, i0, iMax, j0, jMax, k0, kMax int) {
+	width := jMax - j0
+	kInner := kMax - k0
+
+	for i := i0; i < iMax; i++ {
+		aRow := aData[i*aStride:]
+		cOff := i*cStride + j0
+		cRow := cData[cOff : cOff+width]
+
+		// For small k, use direct approach
+		if kInner <= 4 {
+			for kk := k0; kk < kMax; kk++ {
+				aik := aRow[kk] * alpha
+				vaik := archsimd.BroadcastFloat32x8(aik)
+				bOff := kk*bStride + j0
+				bRow := bData[bOff : bOff+width]
+				j := 0
+				for ; j+16 <= width; j += 16 {
+					vc0 := archsimd.LoadFloat32x8Slice(cRow[j:])
+					vb0 := archsimd.LoadFloat32x8Slice(bRow[j:])
+					vc0 = vc0.Add(vb0.Mul(vaik))
+					vc0.StoreSlice(cRow[j:])
+					vc1 := archsimd.LoadFloat32x8Slice(cRow[j+8:])
+					vb1 := archsimd.LoadFloat32x8Slice(bRow[j+8:])
+					vc1 = vc1.Add(vb1.Mul(vaik))
+					vc1.StoreSlice(cRow[j+8:])
+				}
+				for ; j+8 <= width; j += 8 {
+					vc := archsimd.LoadFloat32x8Slice(cRow[j:])
+					vb := archsimd.LoadFloat32x8Slice(bRow[j:])
+					vc = vc.Add(vb.Mul(vaik))
+					vc.StoreSlice(cRow[j:])
+				}
+				for ; j < width; j++ {
+					cRow[j] += aik * bRow[j]
+				}
+			}
+			continue
+		}
+
+		// For larger k, accumulate in registers across multiple kk iterations
+		// We process 32 elements at a time (4 SIMD vectors)
+		j := 0
+		for ; j+32 <= width; j += 32 {
+			// Initialize accumulators from C
+			var acc0, acc1, acc2, acc3 archsimd.Float32x8
+			acc0 = archsimd.LoadFloat32x8Slice(cRow[j:])
+			acc1 = archsimd.LoadFloat32x8Slice(cRow[j+8:])
+			acc2 = archsimd.LoadFloat32x8Slice(cRow[j+16:])
+			acc3 = archsimd.LoadFloat32x8Slice(cRow[j+24:])
+
+			// Accumulate across all kk iterations
+			for kk := k0; kk < kMax; kk++ {
+				aik := aRow[kk] * alpha
+				vaik := archsimd.BroadcastFloat32x8(aik)
+				bOff := kk*bStride + j
+				bRow := bData[bOff : bOff+32]
+
+				vb0 := archsimd.LoadFloat32x8Slice(bRow[0:])
+				acc0 = acc0.Add(vb0.Mul(vaik))
+				vb1 := archsimd.LoadFloat32x8Slice(bRow[8:])
+				acc1 = acc1.Add(vb1.Mul(vaik))
+				vb2 := archsimd.LoadFloat32x8Slice(bRow[16:])
+				acc2 = acc2.Add(vb2.Mul(vaik))
+				vb3 := archsimd.LoadFloat32x8Slice(bRow[24:])
+				acc3 = acc3.Add(vb3.Mul(vaik))
+			}
+
+			// Store back to C
+			acc0.StoreSlice(cRow[j:])
+			acc1.StoreSlice(cRow[j+8:])
+			acc2.StoreSlice(cRow[j+16:])
+			acc3.StoreSlice(cRow[j+24:])
+		}
+
+		// Handle remaining elements with direct approach
+		for ; j+8 <= width; j += 8 {
+			var acc archsimd.Float32x8
+			acc = archsimd.LoadFloat32x8Slice(cRow[j:])
+			for kk := k0; kk < kMax; kk++ {
+				aik := aRow[kk] * alpha
+				vaik := archsimd.BroadcastFloat32x8(aik)
+				bOff := kk*bStride + j0 + j
+				vb := archsimd.LoadFloat32x8Slice(bData[bOff : bOff+8])
+				acc = acc.Add(vb.Mul(vaik))
+			}
+			acc.StoreSlice(cRow[j:])
+		}
+		// Handle remaining elements with scalar
+		for ; j < width; j++ {
+			for kk := k0; kk < kMax; kk++ {
+				aik := aRow[kk] * alpha
+				bOff := kk*bStride + j0 + j
+				cRow[j] += aik * bData[bOff]
+			}
+		}
+	}
+}
+
 func blockUpdateAlpha1(cData, aData, bData []float32, cStride, aStride, bStride int, i0, iMax, j0, jMax, k0, kMax int) {
+	if cpu.HasAVX2 {
+		blockUpdateAlpha1SIMD(cData, aData, bData, cStride, aStride, bStride, i0, iMax, j0, jMax, k0, kMax)
+		return
+	}
+	blockUpdateAlpha1Scalar(cData, aData, bData, cStride, aStride, bStride, i0, iMax, j0, jMax, k0, kMax)
+}
+
+func blockUpdateAlpha1Scalar(cData, aData, bData []float32, cStride, aStride, bStride int, i0, iMax, j0, jMax, k0, kMax int) {
 	width := jMax - j0
 	for i := i0; i < iMax; i++ {
 		aRow := aData[i*aStride:]
@@ -231,7 +397,6 @@ func blockUpdateAlpha1(cData, aData, bData []float32, cStride, aStride, bStride 
 			bOff := kk*bStride + j0
 			bRow := bData[bOff : bOff+width]
 
-			// Unroll by 4: reduces loop overhead while keeping register pressure lower than x8.
 			j := 0
 			for ; j+3 < width; j += 4 {
 				cRow[j+0] += aik * bRow[j+0]
@@ -241,6 +406,194 @@ func blockUpdateAlpha1(cData, aData, bData []float32, cStride, aStride, bStride 
 			}
 			for ; j < width; j++ {
 				cRow[j] += aik * bRow[j]
+			}
+		}
+	}
+}
+
+// blockUpdateAlpha1SIMD uses a micro-kernel approach.
+// Accumulates across multiple kk iterations before storing to reduce memory traffic.
+func blockUpdateAlpha1SIMD(cData, aData, bData []float32, cStride, aStride, bStride int, i0, iMax, j0, jMax, k0, kMax int) {
+	width := jMax - j0
+	kInner := kMax - k0
+
+	for i := i0; i < iMax; i++ {
+		aRow := aData[i*aStride:]
+		cOff := i*cStride + j0
+		cRow := cData[cOff : cOff+width]
+
+		// For small k, use direct approach
+		if kInner <= 4 {
+			for kk := k0; kk < kMax; kk++ {
+				aik := aRow[kk]
+				vaik := archsimd.BroadcastFloat32x8(aik)
+				bOff := kk*bStride + j0
+				bRow := bData[bOff : bOff+width]
+				j := 0
+				for ; j+16 <= width; j += 16 {
+					vc0 := archsimd.LoadFloat32x8Slice(cRow[j:])
+					vb0 := archsimd.LoadFloat32x8Slice(bRow[j:])
+					vc0 = vc0.Add(vb0.Mul(vaik))
+					vc0.StoreSlice(cRow[j:])
+					vc1 := archsimd.LoadFloat32x8Slice(cRow[j+8:])
+					vb1 := archsimd.LoadFloat32x8Slice(bRow[j+8:])
+					vc1 = vc1.Add(vb1.Mul(vaik))
+					vc1.StoreSlice(cRow[j+8:])
+				}
+				for ; j+8 <= width; j += 8 {
+					vc := archsimd.LoadFloat32x8Slice(cRow[j:])
+					vb := archsimd.LoadFloat32x8Slice(bRow[j:])
+					vc = vc.Add(vb.Mul(vaik))
+					vc.StoreSlice(cRow[j:])
+				}
+				for ; j < width; j++ {
+					cRow[j] += aik * bRow[j]
+				}
+			}
+			continue
+		}
+
+		// For larger k, accumulate in registers across multiple kk iterations
+		j := 0
+		for ; j+32 <= width; j += 32 {
+			var acc0, acc1, acc2, acc3 archsimd.Float32x8
+			acc0 = archsimd.LoadFloat32x8Slice(cRow[j:])
+			acc1 = archsimd.LoadFloat32x8Slice(cRow[j+8:])
+			acc2 = archsimd.LoadFloat32x8Slice(cRow[j+16:])
+			acc3 = archsimd.LoadFloat32x8Slice(cRow[j+24:])
+
+			for kk := k0; kk < kMax; kk++ {
+				aik := aRow[kk]
+				vaik := archsimd.BroadcastFloat32x8(aik)
+				bOff := kk*bStride + j
+				bRow := bData[bOff : bOff+32]
+
+				vb0 := archsimd.LoadFloat32x8Slice(bRow[0:])
+				acc0 = acc0.Add(vb0.Mul(vaik))
+				vb1 := archsimd.LoadFloat32x8Slice(bRow[8:])
+				acc1 = acc1.Add(vb1.Mul(vaik))
+				vb2 := archsimd.LoadFloat32x8Slice(bRow[16:])
+				acc2 = acc2.Add(vb2.Mul(vaik))
+				vb3 := archsimd.LoadFloat32x8Slice(bRow[24:])
+				acc3 = acc3.Add(vb3.Mul(vaik))
+			}
+
+			acc0.StoreSlice(cRow[j:])
+			acc1.StoreSlice(cRow[j+8:])
+			acc2.StoreSlice(cRow[j+16:])
+			acc3.StoreSlice(cRow[j+24:])
+		}
+
+		// Handle remaining elements
+		for ; j+8 <= width; j += 8 {
+			var acc archsimd.Float32x8
+			acc = archsimd.LoadFloat32x8Slice(cRow[j:])
+			for kk := k0; kk < kMax; kk++ {
+				aik := aRow[kk]
+				vaik := archsimd.BroadcastFloat32x8(aik)
+				bOff := kk*bStride + j0 + j
+				vb := archsimd.LoadFloat32x8Slice(bData[bOff : bOff+8])
+				acc = acc.Add(vb.Mul(vaik))
+			}
+			acc.StoreSlice(cRow[j:])
+		}
+		// Handle remaining elements with scalar
+		for ; j < width; j++ {
+			for kk := k0; kk < kMax; kk++ {
+				aik := aRow[kk]
+				bOff := kk*bStride + j0 + j
+				cRow[j] += aik * bData[bOff]
+			}
+		}
+	}
+}
+
+// blockUpdateAlpha1SIMDPacked uses a packed B tile with contiguous rows.
+// packB is arranged as kInner rows of length width.
+func blockUpdateAlpha1SIMDPacked(cData, aData, packB []float32, cStride, aStride int, i0, iMax, j0, width, k0, kInner int) {
+	if width <= 0 || kInner <= 0 {
+		return
+	}
+	for i := i0; i < iMax; i++ {
+		aRow := aData[i*aStride:]
+		cOff := i*cStride + j0
+		cRow := cData[cOff : cOff+width]
+
+		if kInner <= 4 {
+			for kk := 0; kk < kInner; kk++ {
+				aik := aRow[k0+kk]
+				vaik := archsimd.BroadcastFloat32x8(aik)
+				bRow := packB[kk*width : kk*width+width]
+				j := 0
+				for ; j+16 <= width; j += 16 {
+					vc0 := archsimd.LoadFloat32x8Slice(cRow[j:])
+					vb0 := archsimd.LoadFloat32x8Slice(bRow[j:])
+					vc0 = vc0.Add(vb0.Mul(vaik))
+					vc0.StoreSlice(cRow[j:])
+					vc1 := archsimd.LoadFloat32x8Slice(cRow[j+8:])
+					vb1 := archsimd.LoadFloat32x8Slice(bRow[j+8:])
+					vc1 = vc1.Add(vb1.Mul(vaik))
+					vc1.StoreSlice(cRow[j+8:])
+				}
+				for ; j+8 <= width; j += 8 {
+					vc := archsimd.LoadFloat32x8Slice(cRow[j:])
+					vb := archsimd.LoadFloat32x8Slice(bRow[j:])
+					vc = vc.Add(vb.Mul(vaik))
+					vc.StoreSlice(cRow[j:])
+				}
+				for ; j < width; j++ {
+					cRow[j] += aik * bRow[j]
+				}
+			}
+			continue
+		}
+
+		j := 0
+		for ; j+32 <= width; j += 32 {
+			var acc0, acc1, acc2, acc3 archsimd.Float32x8
+			acc0 = archsimd.LoadFloat32x8Slice(cRow[j:])
+			acc1 = archsimd.LoadFloat32x8Slice(cRow[j+8:])
+			acc2 = archsimd.LoadFloat32x8Slice(cRow[j+16:])
+			acc3 = archsimd.LoadFloat32x8Slice(cRow[j+24:])
+
+			for kk := 0; kk < kInner; kk++ {
+				aik := aRow[k0+kk]
+				vaik := archsimd.BroadcastFloat32x8(aik)
+				bRow := packB[kk*width : kk*width+width]
+
+				vb0 := archsimd.LoadFloat32x8Slice(bRow[j:])
+				acc0 = acc0.Add(vb0.Mul(vaik))
+				vb1 := archsimd.LoadFloat32x8Slice(bRow[j+8:])
+				acc1 = acc1.Add(vb1.Mul(vaik))
+				vb2 := archsimd.LoadFloat32x8Slice(bRow[j+16:])
+				acc2 = acc2.Add(vb2.Mul(vaik))
+				vb3 := archsimd.LoadFloat32x8Slice(bRow[j+24:])
+				acc3 = acc3.Add(vb3.Mul(vaik))
+			}
+
+			acc0.StoreSlice(cRow[j:])
+			acc1.StoreSlice(cRow[j+8:])
+			acc2.StoreSlice(cRow[j+16:])
+			acc3.StoreSlice(cRow[j+24:])
+		}
+
+		for ; j+8 <= width; j += 8 {
+			var acc archsimd.Float32x8
+			acc = archsimd.LoadFloat32x8Slice(cRow[j:])
+			for kk := 0; kk < kInner; kk++ {
+				aik := aRow[k0+kk]
+				vaik := archsimd.BroadcastFloat32x8(aik)
+				bRow := packB[kk*width : kk*width+width]
+				vb := archsimd.LoadFloat32x8Slice(bRow[j:])
+				acc = acc.Add(vb.Mul(vaik))
+			}
+			acc.StoreSlice(cRow[j:])
+		}
+
+		for ; j < width; j++ {
+			for kk := 0; kk < kInner; kk++ {
+				aik := aRow[k0+kk]
+				cRow[j] += aik * packB[kk*width+j]
 			}
 		}
 	}
