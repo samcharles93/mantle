@@ -1,80 +1,78 @@
 # Mantle
 
-Mantle is a **model execution substrate**.
+Mantle is a model execution experiment in Pure Go.
 
-It provides a container-first way to **store**, **load**, **inspect**, and **coordinate** execution of machine learning models using the **Model Container Format (MCF)**, without implying runtime behaviour.
+This is just an experiment which will probably have heaps of changes and optimisations along the way. it's in no way a replacement for cpp-based apps. 
+use Llama.cpp if you want speed, performance, and a working app.
 
-## What this repo is
+Now that disclaimer is done.
+
+## What AI thinks this repo is:
 
 - **Mantle**: runtime substrate and tooling for model execution
 - **MCF**: a single-file, random-access container format for model data (raw or quantised), designed to be efficient with memory mapping where available, but not dependent on it
 
-## Quick start
+## I think this repo is:
 
-### Requirements
-- Go **1.25**
-- No CGO, pure Go only
+A big experiment to see what's possible in pure Go. and it was fun, it works!, and it's fairly decent for small models.
+It started out just creating the kernels in pure go and trying to work with Go assembly '.s' files (to learn how to use them), but when I found out about `simd/archsimd` I was just too curious about seeing how much I could get from it.
+
+Now, I didn't need the model container format (MCF). But, trying to decode GGUF was just stupidly difficult (tokenisers not being recognised, spewing stop tokens, model didn't produce cohesive responses), and safetensors, while possible and it worked, was slow.
+therefore, I decided to embark on stuffing up another containerised model format. and here we are, MCF and Mantle...
+
+Anyway, If you'd like to test this out now, You must have Go v1.26rc2 and enable the GOEXPERIMENT=simd env for all build/run/test commands or just infer the usage from the Taskfile (or use `task installGoRC`).
+
+You will need to clone a safetensors model from HF and pack it using the CLI `bin/mantle pack -in /path/to/safetensors/ -out /path/to/model.mcf`,
+You can also add the `--dedup` flag to remove duplicated tensors from the resulting model container. For most models, this does nothing, but in testing, Qwen3-0.6B has a duplicated tensor in attn and embd. and it reduced the model file by 300mb with no quality hit.
+
+To run the model *only on CPU* you just need to use the `mantle run` command with `-m/--model`, or alternatively, pass in a directory of models to use with `MANTLE_MODELS_DIR=/path/to/models mantle run`.
+
+
+### Build Requirements
+- Go 1.26rc2
+- AMD64 CPU (simd/archsimd will only compile for amd64)
 
 ### Build
-```bash
-go build ./...
+```shell
+GOEXPERIMENT=simd go1.26rc2 build -o bin/mantle ./cmd/mantle
 ````
 
-## CLI usage
-
-The CLI is organised around simple verbs.
-
-### Run a model
+## CLI:
+### Run
 
 ```bash
-mantle run -m Qwen3/Qwen3-3B-Instruct
-# or with an explicit file
-mantle run -m /work/models/Qwen3-3B-Instruct.mcf
-# or select from a models directory
-MANTLE_MODELS_DIR=/work/models mantle run
+mantle run -m /models/mcf/Qwen3-3B-Instruct.mcf
+
+# Or you can pass a directory to multiple models:
+MANTLE_MODELS_DIR=/models mantle run
 ```
 
-If `--model/-m` is not provided, `mantle run` requires `MANTLE_MODELS_DIR`. It selects the only
-`.mcf` in that directory automatically, or prompts you to choose when multiple models are present.
+### Pack (create a model container)
 
-### Serve a model directory
-
-```bash
-mantle serve --models-path /work/models
-```
-
-### Inspect a container
-
-```bash
-mantle inspect -m /work/models/Qwen3-3B-Instruct.mcf
-```
-
-### Pack (build an MCF container)
+By default the container will be packed with the same tensor dtype as the safetensors model.
+Use the `--dedup` to deduplicate tensors or `--cast` to cast the tensors to another dtype.
 
 ```bash
 mantle pack --in /path/to/model --out /work/models/MyModel.mcf
-# or rely on defaults
-mantle pack --in /path/to/model
 ```
 
-When `--out/--output` is omitted, the default output path is `./out/<input-dir-name>.mcf`. Set
-`MANTLE_PACK_OUT_DIR` to override the output directory. The `--out` flag always takes precedence.
+The flags will likely evolve, the `run` command will eventually be implied, the serve command will serve an OpenAI API endpoint. 
+I plan to add `inspect` and `serve` only if the project continues, or, you're welcome to submit a PR.
 
-> Note: Exact flags may evolve. Keep verbs stable (`run`, `serve`, `inspect`, `pack`).
 
 ## Architecture (high level)
 
 ### Mantle layers
 
-* **Model store**: loads model containers from disk (MCF)
-* **Container reader**: validates structure and exposes random-access views over sections
-* **Execution coordination**: hands model bytes to the selected runtime backend and manages lifetimes and I/O modes
+* Model store: loads model containers from disk (MCF)
+* Container reader: validates structure and exposes random-access views over sections
+* Execution coordination: hands model bytes to the selected runtime backend and manages lifetimes and I/O modes
 
 ### MCF fundamentals
 
-* Single-file container with **absolute offsets**
-* **Little-endian** on-disk fields
-* **Optional sections**: readers tolerate unknown sections and tolerate missing optional ones
+* Single-file container with absolute offsets
+* Little-endian on-disk fields
+* Optional sections: readers tolerate unknown sections and tolerate missing optional ones
 * Runtime behavior remains explicit, but may consult explicit config fields. For example, sliding attention is only
   enabled when `layer_types` includes `sliding_attention` and `sliding_window > 0` in the model config.
 * Designed for **random access**:
@@ -92,13 +90,4 @@ When `--out/--output` is omitted, the default output path is `./out/<input-dir-n
 
 ## Contributing
 
-* No stubs, no TODOs, no half-implementations
-* Tests and benchmarks are required for core kernels and hot paths
-* Keep reusable, architecture-agnostic code centralised for reuse across model families
-* Before considering work complete:
-
-  * `gofmt ./...` (or `go fmt ./...`)
-  * `golangci-lint run`
-  * `go test` for the affected packages (and `go test ./...` for shared/format changes)
-
-See `AGENTS.md` for the full set of hard rules and invariants.
+... Submit a PR.
