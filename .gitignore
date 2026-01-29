@@ -5,3 +5,4 @@ bin/infer
 ./bin/infer
 ./bin/rlvr
 ./bin/gguf_inspect
+.task/
