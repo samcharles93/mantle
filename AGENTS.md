@@ -1,6 +1,6 @@
-# Mantle (Project Agents)
+# Mantle AGENTS.md
 
-This file sets **non-negotiable rules** and **project scope** for ChatGPT (and humans) working in this repo.
+This file sets **non-negotiable rules** and **project scope** for working in this repo.
 
 ## Project scope
 
@@ -12,22 +12,22 @@ Mantle is **not**:
 - a model conversion pipeline
 
 Mantle **is**:
-- a **model execution substrate**
-- a **container-first** execution environment centred on **MCF**
-- a coordination layer between **on-disk model bytes** and **runtime execution**
+- a model execution system
+- a container-first execution environment centred on mcf
+- a coordination layer between on-disk model bytes and runtime execution
 - explicitly controlled by the runtime and caller, not implied by container contents
 
-The Model Container Format (MCF) **is**:
+The Model Container Format (MCF) is:
 - a single-file, random-access container for machine learning model data
 - explicit in structure and layout, with absolute offsets and deterministic design
-- designed to be efficient with **memory mapping where available**, but **must not require mmap**
+- designed to be efficient with memory mapping where available, but must not require mmap
 - able to store tensor data in raw or quantised form
 - forward-compatible via versioned, optional sections (readers tolerate unknown sections and tolerate absence of optional ones)
 
 ## Hard constraints (must follow)
 
 ### Go and build constraints
-- You must ensure you run `go1.26rc2` for any commands that require `go`. `go` commands will not work in this project due to the experimental nature of the simd/archsimd package which this project depends on.
+- You must ensure you run `GOEXPERIMENT=simd go1.26rc2` for any commands that require `go`. `go` commands will not work in this project due to the experimental nature of the simd/archsimd package which this project depends on.
 - Prefer the standard library first.
 - Use modern Go where it improves clarity or correctness:
   - built-in `min()` / `max()` where appropriate
@@ -43,17 +43,17 @@ The Model Container Format (MCF) **is**:
 Any new dependency is a design change and must be explicitly requested and justified.
 
 ### Implementation discipline
-- **No stubs.**
-- **No half-implementations.**
-- **No TODOs** (or “future work” placeholders) in committed code. unless created by the user.
+- No stubs.
+- No half-implementations.
+- No TODOs (or “future work” placeholders) in committed code. unless created by the user.
 - All changes must compile and be runnable by default (within repo or users constraints).
 - Treat all created files (especially tests) as permanent artefacts unless explicitly instructed otherwise.
 
 ### Low-level format and runtime invariants
-- All on-disk multi-byte numeric fields are **little-endian**.
-- References inside the container are **absolute file offsets** unless a section explicitly defines section-relative offsets.
+- All on-disk multi-byte numeric fields are little-endian.
+- References inside the container are absolute file offsets unless a section explicitly defines section-relative offsets.
 - No runtime behaviour may be inferred from container contents. The runtime decides behaviour, always.
-- Preserve alignment rules (default **8-byte alignment**) unless the spec/version explicitly changes them.
+- Preserve alignment rules (default 8-byte alignment) unless the spec/version explicitly changes them.
 - Parsing must be bounds-checked, overflow-safe, deterministic, and tolerant of unknown optional sections.
 
 ### Portability and I/O strategy
@@ -75,7 +75,7 @@ Any new dependency is a design change and must be explicitly requested and justi
 - Determinism matters: do not let map iteration order affect output. Sort where relevant.
 
 ### Kernels, tests, and benchmarks
-- Core library kernels must have **tests** and **benchmarks**.
+- Core library kernels must have tests and benchmarks.
 - Prefer correctness tests that validate full outputs over piecemeal field checks.
 - Benchmarks should measure realistic hot paths and avoid unnecessary allocations in the benchmark harness.
 
@@ -112,7 +112,6 @@ If you change anything about MCF structure, section semantics, alignment, or com
 
 ### Dependencies and build
 - [ ] No new third-party dependencies
-- [ ] Pure Go only (no CGO)
 - [ ] `gofmt`/`go fmt` run on all affected packages
 - [ ] `golangci-lint run` passes (or findings fixed)
 - [ ] Builds succeed
