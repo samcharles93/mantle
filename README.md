@@ -7,12 +7,11 @@ use Llama.cpp if you want speed, performance, and a working app.
 
 Now that disclaimer is done.
 
-## What AI thinks this repo is:
+There's 2 sides of this repo:
+- Mantle: the runtime and tooling for model execution
+- MCF: a single-file, random-access container format for model data (raw or quantised), designed to be efficient with mmap where available.
 
-- **Mantle**: runtime substrate and tooling for model execution
-- **MCF**: a single-file, random-access container format for model data (raw or quantised), designed to be efficient with memory mapping where available, but not dependent on it
-
-## I think this repo is:
+## This repo is:
 
 A big experiment to see what's possible in pure Go. and it was fun, it works!, and it's fairly decent for small models.
 It started out just creating the kernels in pure go and trying to work with Go assembly '.s' files (to learn how to use them), but when I found out about `simd/archsimd` I was just too curious about seeing how much I could get from it.
@@ -27,7 +26,6 @@ You can also add the `--dedup` flag to remove duplicated tensors from the result
 
 To run the model *only on CPU* you just need to use the `mantle run` command with `-m/--model`, or alternatively, pass in a directory of models to use with `MANTLE_MODELS_DIR=/path/to/models mantle run`.
 
-
 ### Build Requirements
 - Go 1.26rc2
 - AMD64 CPU (simd/archsimd will only compile for amd64)
@@ -37,7 +35,7 @@ To run the model *only on CPU* you just need to use the `mantle run` command wit
 GOEXPERIMENT=simd go1.26rc2 build -o bin/mantle ./cmd/mantle
 ````
 
-## CLI:
+To use the CLI:
 ### Run
 
 ```bash
