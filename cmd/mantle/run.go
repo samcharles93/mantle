@@ -101,10 +101,10 @@ func runCmd() *cli.Command {
 				Destination: &topP,
 			},
 			&cli.Float64Flag{
-				Name:        "min-p",
-				Aliases:     []string{"min_p", "minp"},
-				Usage:       "min_p sampling parameter (0.0 = disabled)",
-				Value:       0.05,
+				Name:    "min-p",
+				Aliases: []string{"min_p", "minp"},
+				Usage:   "min_p sampling parameter (0.0 = disabled)",
+				Value:   0.05,
 			},
 			&cli.Float64Flag{
 				Name:        "repeat-penalty",
@@ -144,16 +144,16 @@ func runCmd() *cli.Command {
 				Destination: &echoPrompt,
 			},
 			&cli.StringFlag{
-				Name:        "cache-type-k",
-				Aliases:     []string{"cache_type_k", "ctk"},
-				Usage:       "KV cache data type for K (f32, f16)",
-				Value:       "f16",
+				Name:    "cache-type-k",
+				Aliases: []string{"cache_type_k", "ctk"},
+				Usage:   "KV cache data type for K (f32, f16)",
+				Value:   "f16",
 			},
 			&cli.StringFlag{
-				Name:        "cache-type-v",
-				Aliases:     []string{"cache_type_v", "ctv"},
-				Usage:       "KV cache data type for V (f32, f16)",
-				Value:       "f16",
+				Name:    "cache-type-v",
+				Aliases: []string{"cache_type_v", "ctv"},
+				Usage:   "KV cache data type for V (f32, f16)",
+				Value:   "f16",
 			},
 			// Optional overrides
 			&cli.StringFlag{
@@ -162,44 +162,44 @@ func runCmd() *cli.Command {
 				Destination: &tokenizerJSON,
 			},
 			&cli.StringFlag{
-				Name:        "rope-scaling",
-				Usage:       "RoPE scaling type (linear, yarn, none)",
+				Name:  "rope-scaling",
+				Usage: "RoPE scaling type (linear, yarn, none)",
 			},
 			&cli.Float64Flag{
-				Name:        "rope-scale",
-				Usage:       "RoPE scaling factor",
+				Name:  "rope-scale",
+				Usage: "RoPE scaling factor",
 			},
 			&cli.Float64Flag{
-				Name:        "rope-freq-base",
-				Usage:       "RoPE base frequency",
+				Name:  "rope-freq-base",
+				Usage: "RoPE base frequency",
 			},
 			&cli.Float64Flag{
-				Name:        "rope-freq-scale",
-				Usage:       "RoPE frequency scaling factor",
+				Name:  "rope-freq-scale",
+				Usage: "RoPE frequency scaling factor",
 			},
 			&cli.Int64Flag{
-				Name:        "yarn-orig-ctx",
-				Usage:       "YaRN original context size",
+				Name:  "yarn-orig-ctx",
+				Usage: "YaRN original context size",
 			},
 			&cli.Float64Flag{
-				Name:        "yarn-ext-factor",
-				Usage:       "YaRN extrapolation mix factor",
-				Value:       -1.0,
+				Name:  "yarn-ext-factor",
+				Usage: "YaRN extrapolation mix factor",
+				Value: -1.0,
 			},
 			&cli.Float64Flag{
-				Name:        "yarn-attn-factor",
-				Usage:       "YaRN attention factor",
-				Value:       -1.0,
+				Name:  "yarn-attn-factor",
+				Usage: "YaRN attention factor",
+				Value: -1.0,
 			},
 			&cli.Float64Flag{
-				Name:        "yarn-beta-slow",
-				Usage:       "YaRN beta slow",
-				Value:       -1.0,
+				Name:  "yarn-beta-slow",
+				Usage: "YaRN beta slow",
+				Value: -1.0,
 			},
 			&cli.Float64Flag{
-				Name:        "yarn-beta-fast",
-				Usage:       "YaRN beta fast",
-				Value:       -1.0,
+				Name:  "yarn-beta-fast",
+				Usage: "YaRN beta fast",
+				Value: -1.0,
 			},
 			&cli.StringFlag{
 				Name:        "tokenizer-config",
@@ -320,7 +320,7 @@ func runCmd() *cli.Command {
 			}
 			m.Config.Config.CacheTypeK = c.String("cache-type-k")
 			m.Config.Config.CacheTypeV = c.String("cache-type-v")
-			
+
 			// RoPE Scaling Overrides
 			ropeOverride := false
 			if c.IsSet("rope-freq-base") {
@@ -344,18 +344,18 @@ func runCmd() *cli.Command {
 				if c.IsSet("yarn-ext-factor") {
 					rs.LowFactor = c.Float("yarn-ext-factor")
 				}
-                                if c.IsSet("yarn-attn-factor") {
-                                    rs.AttentionFactor = c.Float("yarn-attn-factor")
-                                }
-                                if c.IsSet("yarn-beta-fast") {
-                                    rs.BetaFast = c.Float("yarn-beta-fast")
-                                }
-                                if c.IsSet("yarn-beta-slow") {
-                                    rs.BetaSlow = c.Float("yarn-beta-slow")
-                                }
+				if c.IsSet("yarn-attn-factor") {
+					rs.AttentionFactor = c.Float("yarn-attn-factor")
+				}
+				if c.IsSet("yarn-beta-fast") {
+					rs.BetaFast = c.Float("yarn-beta-fast")
+				}
+				if c.IsSet("yarn-beta-slow") {
+					rs.BetaSlow = c.Float("yarn-beta-slow")
+				}
 				ropeOverride = true
 			}
-			
+
 			if ropeOverride {
 				m.UpdateRoPE()
 			}

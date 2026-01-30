@@ -123,7 +123,7 @@ func (s *Sampler) Sample(logits []float32, recent []int, excludePenalty []int) i
 	if s.cfg.MinP > 0 {
 		maxProb := prob[0]
 		threshold := maxProb * float64(s.cfg.MinP)
-		
+
 		newLen := 0
 		var newSum float64
 		for i := 0; i < len(prob); i++ {
@@ -134,7 +134,7 @@ func (s *Sampler) Sample(logits []float32, recent []int, excludePenalty []int) i
 				newLen++
 			}
 		}
-		
+
 		// If we filtered anything, resize and modify sum for re-normalization implicit in TopP?
 		// Actually TopP logic iterates until cumulative sum triggers.
 		// If we removed items, sum is < 1.0.

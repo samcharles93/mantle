@@ -13,9 +13,9 @@ type attnTask struct {
 }
 
 type attnContext struct {
-	q, cacheK, cacheV []float32
+	q, cacheK, cacheV  []float32
 	cacheK16, cacheV16 []uint16
-	attnOut           []float32
+	attnOut            []float32
 
 	pos, start        int
 	kvStride, headDim int
