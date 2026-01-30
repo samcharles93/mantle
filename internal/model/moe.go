@@ -1,8 +1,6 @@
 package model
 
 import (
-	"math"
-
 	"github.com/samcharles93/mantle/internal/tensor"
 )
 
@@ -85,31 +83,131 @@ func selectTopK(selScores, rawScores []float32, k int, routeScale float32, idxOu
 	if k > len(idxOut) || k > len(wOut) {
 		panic("topk scratch buffers too small")
 	}
-	bestScores := make([]float32, k)
-	for i := 0; i < k; i++ {
-		idxOut[i] = -1
-		bestScores[i] = float32(math.Inf(-1))
+
+	// Use partial selection sort with stack allocation
+	// Covers all practical MoE cases (k <= 8 typical)
+	// This is O(k*n) with very low constant factor and zero allocations
+	if k <= 8 {
+		selectTopKSmall(selScores, rawScores, k, routeScale, idxOut, wOut)
+		return
 	}
 
+	// For larger k, use heap-based selection (rare in practice)
+	selectTopKHeap(selScores, rawScores, k, routeScale, idxOut, wOut)
+}
+
+// selectTopKSmall uses partial selection for small k values (k <= 8).
+// Uses stack-allocated array for zero allocations.
+func selectTopKSmall(selScores, rawScores []float32, k int, routeScale float32, idxOut []int, wOut []float32) {
+	// Stack-allocated array for scores to avoid heap allocation
+	// Support up to k=8 which covers all typical MoE configurations
+	var bestIdx [8]int
+	for i := 0; i < k; i++ {
+		bestIdx[i] = -1
+	}
+
+	// Find top k using partial selection
+	// Maintain sorted order: bestIdx[0] has highest score
 	for i, score := range selScores {
-		insert := -1
+		// Find position to insert (scores sorted descending)
+		pos := k
 		for j := 0; j < k; j++ {
-			if score > bestScores[j] || (score == bestScores[j] && (idxOut[j] == -1 || i < idxOut[j])) {
-				insert = j
+			if bestIdx[j] == -1 || score > selScores[bestIdx[j]] {
+				pos = j
 				break
 			}
 		}
-		if insert == -1 {
-			continue
+		if pos >= k {
+			continue // Not in top k
 		}
-		for j := k - 1; j > insert; j-- {
-			bestScores[j] = bestScores[j-1]
-			idxOut[j] = idxOut[j-1]
+		// Shift elements to make room
+		for j := k - 1; j > pos; j-- {
+			bestIdx[j] = bestIdx[j-1]
 		}
-		bestScores[insert] = score
-		idxOut[insert] = i
+		bestIdx[pos] = i
 	}
 
+	// Copy to output
+	for i := 0; i < k; i++ {
+		idxOut[i] = bestIdx[i]
+	}
+
+	computeTopKWeights(selScores, rawScores, k, routeScale, idxOut, wOut)
+}
+
+// pair represents a score-index pair for heap operations.
+type pair struct {
+	score float32
+	idx   int
+}
+
+// selectTopKHeap uses a min-heap for selection when k is larger.
+// Complexity: O(n log k) vs O(k*n) for selection sort.
+func selectTopKHeap(selScores, rawScores []float32, k int, routeScale float32, idxOut []int, wOut []float32) {
+	// Simple binary min-heap storing (score, index) pairs
+	// Root is the k-th largest element seen so far
+	heap := make([]pair, 0, k)
+
+	// Initialize heap with first k elements
+	for i := 0; i < k && i < len(selScores); i++ {
+		heap = append(heap, pair{selScores[i], i})
+	}
+	// Heapify (build min-heap)
+	for i := len(heap)/2 - 1; i >= 0; i-- {
+		heapifyDown(heap, i)
+	}
+
+	// Process remaining elements
+	for i := k; i < len(selScores); i++ {
+		score := selScores[i]
+		if score > heap[0].score {
+			// Replace min and heapify down
+			heap[0] = pair{score, i}
+			heapifyDown(heap, 0)
+		}
+	}
+
+	// Extract from heap in descending order
+	for i := k - 1; i >= 0; i-- {
+		if len(heap) > 0 {
+			idxOut[i] = heap[0].idx
+			// Pop min and heapify
+			heap[0] = heap[len(heap)-1]
+			heap = heap[:len(heap)-1]
+			if len(heap) > 0 {
+				heapifyDown(heap, 0)
+			}
+		} else {
+			idxOut[i] = -1
+		}
+	}
+
+	computeTopKWeights(selScores, rawScores, k, routeScale, idxOut, wOut)
+}
+
+// heapifyDown maintains min-heap property by moving element at i down.
+func heapifyDown(heap []pair, i int) {
+	n := len(heap)
+	for {
+		minIdx := i
+		left := 2*i + 1
+		right := 2*i + 2
+		if left < n && heap[left].score < heap[minIdx].score {
+			minIdx = left
+		}
+		if right < n && heap[right].score < heap[minIdx].score {
+			minIdx = right
+		}
+		if minIdx == i {
+			break
+		}
+		heap[i], heap[minIdx] = heap[minIdx], heap[i]
+		i = minIdx
+	}
+}
+
+// computeTopKWeights computes normalized weights for selected experts.
+func computeTopKWeights(selScores, rawScores []float32, k int, routeScale float32, idxOut []int, wOut []float32) {
 	var denom float32
 	for j := 0; j < k; j++ {
 		id := idxOut[j]

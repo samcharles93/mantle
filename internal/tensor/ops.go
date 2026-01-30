@@ -212,6 +212,13 @@ func SiluAndMul(dst, x []float32) {
 	if len(dst) < d {
 		panic("SiluAndMul dst too small")
 	}
+	// Note: SIMD version disabled pending accurate fast exp implementation
+	// The scalar version is accurate and still quite fast
+	siluAndMulScalar(dst, x)
+}
+
+func siluAndMulScalar(dst, x []float32) {
+	d := len(x) / 2
 	for i := range d {
 		dst[i] = Silu(x[i]) * x[d+i]
 	}
