@@ -17,10 +17,82 @@ type matVecTask struct {
 	qx     *quantVec
 }
 
+type matVecWorker struct {
+	tasks  chan matVecTask
+	qbuf   []int8
+	scales []float32
+	mu     sync.Mutex
+}
+
+// L1 and L2 cache sizes in bytes (conservative estimates)
+const (
+	l1CacheSize = 32 * 1024  // 32KB typical L1 cache
+	l2CacheSize = 256 * 1024 // 256KB typical L2 cache
+)
+
+// computeOptimalBatchSize calculates the optimal batch size for quantized matvec
+// to maximize cache utilization while minimizing allocations
+func computeOptimalBatchSize(blocksPerRow int, totalRows int) int {
+	// Each row requires: blocksPerRow*32 bytes for qbuf + blocksPerRow*4 bytes for scales
+	bytesPerRow := blocksPerRow*32 + blocksPerRow*4
+
+	// Target fitting into L1 cache for best performance
+	// Reserve some space for other data (x vector, etc.)
+	const l1Reserved = 8 * 1024 // Reserve 8KB for other data
+	availableL1 := l1CacheSize - l1Reserved
+	if availableL1 <= 0 {
+		availableL1 = 8 * 1024 // Minimum 8KB
+	}
+
+	// Calculate maximum rows that fit in available L1 cache
+	maxRowsL1 := availableL1 / bytesPerRow
+	if maxRowsL1 <= 0 {
+		maxRowsL1 = 1
+	}
+
+	// Limit batch size to reasonable values
+	// Min batch size: 1 (for very large blocksPerRow)
+	// Max batch size: 16 (balance between cache efficiency and parallelization)
+	const minBatch = 1
+	const maxBatch = 16
+
+	// Ensure we don't exceed total rows
+	batch := maxRowsL1
+	if batch < minBatch {
+		batch = minBatch
+	}
+	if batch > maxBatch {
+		batch = maxBatch
+	}
+	if batch > totalRows {
+		batch = totalRows
+	}
+
+	return batch
+}
+
+// ensureWorkerBuffers ensures the worker has buffers of at least required size
+func (w *matVecWorker) ensureWorkerBuffers(requiredQbuf, requiredScales int) ([]int8, []float32) {
+	if w == nil {
+		return nil, nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(w.qbuf) < requiredQbuf {
+		w.qbuf = make([]int8, requiredQbuf)
+	}
+	if len(w.scales) < requiredScales {
+		w.scales = make([]float32, requiredScales)
+	}
+	return w.qbuf[:requiredQbuf], w.scales[:requiredScales]
+}
+
 type matVecPool struct {
 	size      int
 	tasks     chan matVecTask
 	doneSlots chan chan struct{}
+	workers   []*matVecWorker
 }
 
 var matVecWorkPool *matVecPool
@@ -43,18 +115,36 @@ func newMatVecPool() *matVecPool {
 		size:      size,
 		tasks:     make(chan matVecTask, size*2),
 		doneSlots: make(chan chan struct{}, size),
+		workers:   make([]*matVecWorker, size),
 	}
 	for i := 0; i < size; i++ {
 		p.doneSlots <- make(chan struct{}, 1)
-	}
-	for i := 0; i < size; i++ {
-		go func() {
-			for task := range p.tasks {
-				matVecRange(task.dst, task.w, task.x, task.rs, task.re, task.qx)
+		worker := &matVecWorker{
+			tasks: make(chan matVecTask, 1),
+		}
+		p.workers[i] = worker
+		go func(w *matVecWorker) {
+			for task := range w.tasks {
+				matVecRangeWithWorker(task.dst, task.w, task.x, task.rs, task.re, task.qx, w)
 				task.done <- struct{}{}
 			}
-		}()
+		}(worker)
 	}
+
+	// Start dispatcher
+	go func() {
+		workerIdx := 0
+		for task := range p.tasks {
+			worker := p.workers[workerIdx]
+			worker.tasks <- task
+			workerIdx = (workerIdx + 1) % size
+		}
+		// Close worker channels when main task channel closes
+		for _, worker := range p.workers {
+			close(worker.tasks)
+		}
+	}()
+
 	return p
 }
 
@@ -71,8 +161,9 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 	var qx *quantVec
 	if w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType) && cpu.HasAVX2 {
 		blocks := (w.C + 31) / 32
-		q, q16, scales := quantizeVecBlocks(x, blocks)
-		qx = &quantVec{q: q, q16: q16, scales: scales}
+		qx = getQuantVec(blocks)
+		quantizeVecBlocksInto(x, blocks, qx.q, qx.q16, qx.scales)
+		defer putQuantVec(qx)
 	}
 
 	pool := getMatVecPool()
@@ -118,8 +209,12 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 }
 
 func matVecRange(dst []float32, w *Mat, x []float32, rs, re int, qx *quantVec) {
+	matVecRangeWithWorker(dst, w, x, rs, re, qx, nil)
+}
+
+func matVecRangeWithWorker(dst []float32, w *Mat, x []float32, rs, re int, qx *quantVec, worker *matVecWorker) {
 	if w.Raw != nil && w.DType != mcf.DTypeF32 {
-		if matVecRangeQuant(dst, w, x, rs, re, qx) {
+		if matVecRangeQuantWithWorker(dst, w, x, rs, re, qx, worker) {
 			return
 		}
 		switch w.DType {

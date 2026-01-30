@@ -3,6 +3,7 @@ package tensor
 import (
 	"errors"
 	"math"
+	"sync"
 
 	"github.com/samcharles93/mantle/pkg/mcf"
 	"simd/archsimd"
@@ -29,6 +30,57 @@ type quantVec struct {
 	q      []int8
 	q16    []int16
 	scales []float32
+}
+
+var quantVecPool = sync.Pool{
+	New: func() any {
+		return &quantVec{}
+	},
+}
+
+func getQuantVec(blocks int) *quantVec {
+	qx := quantVecPool.Get().(*quantVec)
+	qx.q = ensureInt8Slice(qx.q, blocks*32)
+	qx.q16 = ensureInt16Slice(qx.q16, blocks*32)
+	qx.scales = ensureFloat32Slice(qx.scales, blocks)
+	return qx
+}
+
+func putQuantVec(qx *quantVec) {
+	if qx == nil {
+		return
+	}
+	quantVecPool.Put(qx)
+}
+
+func ensureInt8Slice(dst []int8, n int) []int8 {
+	if n <= 0 {
+		return dst[:0]
+	}
+	if cap(dst) < n {
+		return make([]int8, n)
+	}
+	return dst[:n]
+}
+
+func ensureInt16Slice(dst []int16, n int) []int16 {
+	if n <= 0 {
+		return dst[:0]
+	}
+	if cap(dst) < n {
+		return make([]int16, n)
+	}
+	return dst[:n]
+}
+
+func ensureFloat32Slice(dst []float32, n int) []float32 {
+	if n <= 0 {
+		return dst[:0]
+	}
+	if cap(dst) < n {
+		return make([]float32, n)
+	}
+	return dst[:n]
 }
 
 var q4SignTable = [16]int8{
@@ -149,32 +201,32 @@ func quantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (quantLay
 	return layout, nil
 }
 
-func matVecRangeQuant(dst []float32, w *Mat, x []float32, rs, re int, qx *quantVec) bool {
+func matVecRangeQuantWithWorker(dst []float32, w *Mat, x []float32, rs, re int, qx *quantVec, worker *matVecWorker) bool {
 	switch w.DType {
 	case mcf.DTypeQ8:
-		matVecRangeQ(dst, w, x, rs, re, 8, qx)
+		matVecRangeQWithWorker(dst, w, x, rs, re, 8, qx, worker)
 		return true
 	case mcf.DTypeQ4:
-		matVecRangeQ(dst, w, x, rs, re, 4, qx)
+		matVecRangeQWithWorker(dst, w, x, rs, re, 4, qx, worker)
 		return true
 	case mcf.DTypeK6:
-		matVecRangeK(dst, w, x, rs, re, 6, qx)
+		matVecRangeKWithWorker(dst, w, x, rs, re, 6, qx, worker)
 		return true
 	case mcf.DTypeK4:
-		matVecRangeK(dst, w, x, rs, re, 4, qx)
+		matVecRangeKWithWorker(dst, w, x, rs, re, 4, qx, worker)
 		return true
 	case mcf.DTypeK3:
-		matVecRangeK(dst, w, x, rs, re, 3, qx)
+		matVecRangeKWithWorker(dst, w, x, rs, re, 3, qx, worker)
 		return true
 	case mcf.DTypeK2:
-		matVecRangeK(dst, w, x, rs, re, 2, qx)
+		matVecRangeKWithWorker(dst, w, x, rs, re, 2, qx, worker)
 		return true
 	default:
 		return false
 	}
 }
 
-func matVecRangeQ(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quantVec) {
+func matVecRangeQWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quantVec, worker *matVecWorker) {
 	layout, err := quantLayoutForMat(w.R, w.C, w.DType, len(w.Raw))
 	if err != nil {
 		panic(err)
@@ -186,8 +238,17 @@ func matVecRangeQ(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quan
 	scalesU16, scalesOK := rawUint16LE(scalesRaw)
 	data := w.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
 
-	// Use batched processing for better cache behavior (process 4 rows at a time)
-	const batchSize = 4
+	// Use cache-aware batching for optimal performance
+	// Calculate optimal batch size based on L1 cache size and blocks per row
+	totalRows := re - rs
+	batchSize := computeOptimalBatchSize(layout.blocksPerRow, totalRows)
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+	if batchSize > totalRows {
+		batchSize = totalRows
+	}
+
 	for batchStart := rs; batchStart < re; batchStart += batchSize {
 		batchEnd := batchStart + batchSize
 		if batchEnd > re {
@@ -195,9 +256,15 @@ func matVecRangeQ(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quan
 		}
 		actualBatch := batchEnd - batchStart
 
-		// Allocate working buffers for this batch
-		qbuf := make([]int8, actualBatch*layout.blocksPerRow*32)
-		scales := make([]float32, actualBatch*layout.blocksPerRow)
+		// Use worker buffers if available, otherwise allocate
+		var qbuf []int8
+		var scales []float32
+		if worker != nil {
+			qbuf, scales = worker.ensureWorkerBuffers(actualBatch*layout.blocksPerRow*32, actualBatch*layout.blocksPerRow)
+		} else {
+			qbuf = make([]int8, actualBatch*layout.blocksPerRow*32)
+			scales = make([]float32, actualBatch*layout.blocksPerRow)
+		}
 
 		// Decode all blocks for this batch
 		for r := batchStart; r < batchEnd; r++ {
@@ -251,7 +318,7 @@ func matVecRangeQ(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quan
 	}
 }
 
-func matVecRangeK(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quantVec) {
+func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quantVec, worker *matVecWorker) {
 	layout, err := quantLayoutForMat(w.R, w.C, w.DType, len(w.Raw))
 	if err != nil {
 		panic(err)
@@ -264,8 +331,17 @@ func matVecRangeK(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quan
 	subRaw := w.Raw[layout.subScaleOff : layout.subScaleOff+layout.subScaleCount]
 	data := w.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
 
-	// Use batched processing for better cache behavior (process 4 rows at a time)
-	const batchSize = 4
+	// Use cache-aware batching for optimal performance
+	// Calculate optimal batch size based on L1 cache size and blocks per row
+	totalRows := re - rs
+	batchSize := computeOptimalBatchSize(layout.blocksPerRow, totalRows)
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+	if batchSize > totalRows {
+		batchSize = totalRows
+	}
+
 	for batchStart := rs; batchStart < re; batchStart += batchSize {
 		batchEnd := batchStart + batchSize
 		if batchEnd > re {
@@ -273,9 +349,15 @@ func matVecRangeK(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quan
 		}
 		actualBatch := batchEnd - batchStart
 
-		// Allocate working buffers for this batch
-		qbuf := make([]int8, actualBatch*layout.blocksPerRow*32)
-		scales := make([]float32, actualBatch*layout.blocksPerRow)
+		// Use worker buffers if available, otherwise allocate
+		var qbuf []int8
+		var scales []float32
+		if worker != nil {
+			qbuf, scales = worker.ensureWorkerBuffers(actualBatch*layout.blocksPerRow*32, actualBatch*layout.blocksPerRow)
+		} else {
+			qbuf = make([]int8, actualBatch*layout.blocksPerRow*32)
+			scales = make([]float32, actualBatch*layout.blocksPerRow)
+		}
 
 		// Decode all blocks for this batch
 		for r := batchStart; r < batchEnd; r++ {
@@ -466,6 +548,14 @@ func decodeBlock4(dst *[32]int8, src []byte) {
 }
 
 func decodeBlockBits(dst *[32]int8, src []byte, bits int) {
+	if cpu.HasAVX2 && (bits == 2 || bits == 3 || bits == 6) {
+		decodeBlockBitsSIMD(dst, src, bits)
+		return
+	}
+	decodeBlockBitsScalar(dst, src, bits)
+}
+
+func decodeBlockBitsScalar(dst *[32]int8, src []byte, bits int) {
 	bitPos := 0
 	for i := 0; i < 32; i++ {
 		var v uint8
@@ -478,6 +568,99 @@ func decodeBlockBits(dst *[32]int8, src []byte, bits int) {
 			bitPos++
 		}
 		dst[i] = signExtend(v, bits)
+	}
+}
+
+func decodeBlockBitsSIMD(dst *[32]int8, src []byte, bits int) {
+	switch bits {
+	case 2:
+		decodeBlock2BitsSIMD(dst, src)
+	case 3:
+		decodeBlock3BitsSIMD(dst, src)
+	case 6:
+		decodeBlock6BitsSIMD(dst, src)
+	default:
+		decodeBlockBitsScalar(dst, src, bits)
+	}
+}
+
+func decodeBlock2BitsSIMD(dst *[32]int8, src []byte) {
+	// For 2 bits: 32 values = 64 bits = 8 bytes
+	// Each byte contains 4 values (2 bits each)
+	// Optimized scalar extraction with unrolled loop
+
+	// Process 4 bytes (16 values) at a time
+	for i := 0; i < 8; i += 4 {
+		b0 := src[i]
+		b1 := src[i+1]
+		b2 := src[i+2]
+		b3 := src[i+3]
+
+		base := i * 4
+		// Byte 0
+		dst[base] = signExtend(b0&0x03, 2)
+		dst[base+1] = signExtend((b0>>2)&0x03, 2)
+		dst[base+2] = signExtend((b0>>4)&0x03, 2)
+		dst[base+3] = signExtend(b0>>6, 2)
+
+		// Byte 1
+		dst[base+4] = signExtend(b1&0x03, 2)
+		dst[base+5] = signExtend((b1>>2)&0x03, 2)
+		dst[base+6] = signExtend((b1>>4)&0x03, 2)
+		dst[base+7] = signExtend(b1>>6, 2)
+
+		// Byte 2
+		dst[base+8] = signExtend(b2&0x03, 2)
+		dst[base+9] = signExtend((b2>>2)&0x03, 2)
+		dst[base+10] = signExtend((b2>>4)&0x03, 2)
+		dst[base+11] = signExtend(b2>>6, 2)
+
+		// Byte 3
+		dst[base+12] = signExtend(b3&0x03, 2)
+		dst[base+13] = signExtend((b3>>2)&0x03, 2)
+		dst[base+14] = signExtend((b3>>4)&0x03, 2)
+		dst[base+15] = signExtend(b3>>6, 2)
+	}
+}
+
+func decodeBlock3BitsSIMD(dst *[32]int8, src []byte) {
+	// For 3 bits: 32 values = 96 bits = 12 bytes.
+	decodeBitsBuffer(dst, src, 3)
+}
+
+func decodeBlock6BitsSIMD(dst *[32]int8, src []byte) {
+	// For 6 bits: 32 values = 192 bits = 24 bytes.
+	decodeBitsBuffer(dst, src, 6)
+}
+
+func decodeBitsBuffer(dst *[32]int8, src []byte, bits int) {
+	if bits <= 0 || bits >= 8 {
+		decodeBlockBitsScalar(dst, src, bits)
+		return
+	}
+
+	mask := uint64((1 << bits) - 1)
+	var bitBuf uint64
+	var bitCount uint
+	srcIdx := 0
+	for i := 0; i < 32; i++ {
+		for bitCount < uint(bits) {
+			var next uint64
+			if srcIdx < len(src) {
+				next = uint64(src[srcIdx])
+			}
+			bitBuf |= next << bitCount
+			bitCount += 8
+			srcIdx++
+		}
+		val := uint8(bitBuf & mask)
+		dst[i] = signExtend(val, bits)
+		bitBuf >>= bits
+		if bitCount < uint(bits) {
+			bitCount = 0
+		} else {
+			bitCount -= uint(bits)
+		}
 	}
 }
 
@@ -569,6 +752,23 @@ func quantizeVecBlocks(x []float32, blocks int) ([]int8, []int16, []float32) {
 	qx := make([]int8, blocks*32)
 	qx16 := make([]int16, blocks*32)
 	scales := make([]float32, blocks)
+	quantizeVecBlocksInto(x, blocks, qx, qx16, scales)
+	return qx, qx16, scales
+}
+
+func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, scales []float32) {
+	if blocks <= 0 {
+		return
+	}
+	for i := range qx {
+		qx[i] = 0
+	}
+	for i := range qx16 {
+		qx16[i] = 0
+	}
+	for i := range scales {
+		scales[i] = 0
+	}
 	for b := 0; b < blocks; b++ {
 		base := b * 32
 		maxAbs := float32(0)
@@ -607,7 +807,6 @@ func quantizeVecBlocks(x []float32, blocks int) ([]int8, []int16, []float32) {
 			qx16[base+i] = int16(int8(q))
 		}
 	}
-	return qx, qx16, scales
 }
 
 func mulInt(a, b int) (int, bool) {

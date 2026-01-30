@@ -2,7 +2,18 @@ version: "3"
 
 vars:
   GO: go1.26rc2
-  MODEL_NAME: "Qwen3-0.6B"
+
+env:
+  ENV: development
+  MANTLE_PACK_OUT_DIR: /work/models/mcf
+  MANTLE_QUANT_IN: /work/models/mcf/{{.MODEL_NAME}}.mcf
+  MANTLE_QUANT_OUT: /work/models/mcf/{{.MODEL_NAME}}.k4.mcf
+  MANTLE_MODELS_DIR: /work/models/mcf
+
+dotenv: 
+  - .env.local
+  - .env.{{.ENV}}
+  - example.env
 
 tasks:
   default:
@@ -27,8 +38,6 @@ tasks:
       - bin/mantle
 
   pack:
-    env:
-      MANTLE_PACK_OUT_DIR: /work/models/mcf
     desc: Pack a model into the model container format.
     cmds:
       - bin/mantle pack -in /work/models/raw/{{.MODEL_NAME}} -out /work/models/mcf/{{.MODEL_NAME}}.mcf --dedup --cast keep
@@ -36,39 +45,22 @@ tasks:
       - echo "You can now run the model using 'bin/mantle run -m /work/models/mcf/{{.MODEL_NAME}}.mcf'"
 
   quantize:
-    env:
-      MANTLE_QUANT_IN: /work/models/mcf/{{.MODEL_NAME}}.mcf
-      MANTLE_QUANT_OUT: /work/models/mcf/{{.MODEL_NAME}}.k4.mcf
     desc: Quantize an existing MCF model (k4 by default).
     cmds:
       - bin/mantle quantize -in "$MANTLE_QUANT_IN" -out "$MANTLE_QUANT_OUT" --method k4
       - echo "Successfully Quantized MCF file!"
 
   run:
-    env:
-      MANTLE_MODELS_DIR: /work/models/mcf
     desc: Run a small test prompt against an MCF model.
     cmds:
-      - |
-        bin/mantle run -m "$MANTLE_MODELS_DIR/{{.MODEL_NAME}}.k4.mcf" \
-          --steps 128 \
-          --show-config \
-          --show-tokens \
-          --temp 0.1 \
-          --top-k 40 \
-          --top-p 0.9 \
-          --min-p 0.05 \
-          --rope-scale 1.0 \
-          --rope-freq-base 1000000 \
-          --system "You are a helpful assistant." \
-          --prompt "In 100 words, tell me about you."
+      - bin/mantle run -m "$MANTLE_MODELS_DIR/{{.MODEL_NAME}}{{.MODEL_QUANT}}.mcf" --steps 128 --show-config --show-tokens --system "You are a helpful assistant." --prompt "In 100 words, tell me about you."
 
   run-interactive:
     env:
       MANTLE_MODELS_DIR: /work/models/mcf
     desc: Run in interactive mode
     cmds:
-      - bin/mantle run --system "You are an all-knowing Artificial Intelligence"
+      - bin/mantle run --system "You are a helpful AI assistant."
 
   bench-simd-compare:
     env:
