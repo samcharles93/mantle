@@ -24,10 +24,40 @@ var (
 	tileK = defaultTileK
 )
 
+func selectGemmTiles(m, k, n int) (int, int, int) {
+	if tileM != defaultTileM || tileN != defaultTileN || tileK != defaultTileK {
+		return clampTile(tileM, maxTileM), clampTile(tileN, maxTileN), clampTile(tileK, maxTileK)
+	}
+
+	tm := defaultTileM
+	tn := defaultTileN
+	tk := defaultTileK
+
+	switch {
+	case k >= 192:
+		tk = 32
+	case k >= 96:
+		tk = 24
+	}
+
+	return clampTile(tm, maxTileM), clampTile(tn, maxTileN), clampTile(tk, maxTileK)
+}
+
+func clampTile(value, max int) int {
+	if value < 1 {
+		return 1
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
 type gemmTask struct {
 	C, A, B     *Mat
 	alpha, beta float32
 	rs, re      int
+	tm, tn, tk  int
 	done        chan struct{}
 }
 
@@ -54,7 +84,7 @@ func newGemmPool() *gemmPool {
 		packB := make([]float32, maxTileK*maxTileN)
 		go func(packB []float32) {
 			for task := range p.tasks {
-				gemmRangeRows(task.C, task.A, task.B, task.alpha, task.beta, task.rs, task.re, packB)
+				gemmRangeRows(task.C, task.A, task.B, task.alpha, task.beta, task.rs, task.re, packB, task.tm, task.tn, task.tk)
 				task.done <- struct{}{}
 			}
 		}(packB)
@@ -74,6 +104,8 @@ func GemmPar(C, A, B *Mat, alpha, beta float32, workers int) {
 		return
 	}
 
+	tm, tn, tk := selectGemmTiles(C.R, A.C, B.C)
+
 	if workers <= 0 {
 		workers = runtime.GOMAXPROCS(0)
 	}
@@ -81,7 +113,7 @@ func GemmPar(C, A, B *Mat, alpha, beta float32, workers int) {
 		workers = C.R
 	}
 	if workers <= 1 {
-		gemmRangeRows(C, A, B, alpha, beta, 0, C.R, nil)
+		gemmRangeRows(C, A, B, alpha, beta, 0, C.R, nil, tm, tn, tk)
 		return
 	}
 	if workers > gemmWorkPool.size {
@@ -105,6 +137,9 @@ func GemmPar(C, A, B *Mat, alpha, beta float32, workers int) {
 			beta:  beta,
 			rs:    rs,
 			re:    re,
+			tm:    tm,
+			tn:    tn,
+			tk:    tk,
 			done:  done,
 		}
 	}
@@ -115,9 +150,9 @@ func GemmPar(C, A, B *Mat, alpha, beta float32, workers int) {
 }
 
 // gemmRangeRows performs a blocked GEMM on a contiguous range of rows of C.
-func gemmRangeRows(C, A, B *Mat, alpha, beta float32, rs, re int, packB []float32) {
+func gemmRangeRows(C, A, B *Mat, alpha, beta float32, rs, re int, packB []float32, tm, tn, tk int) {
 	if alpha == 1 && beta == 0 {
-		gemmRangeRowsAlpha1Beta0(C, A, B, rs, re, packB)
+		gemmRangeRowsAlpha1Beta0(C, A, B, rs, re, packB, tm, tn, tk)
 		return
 	}
 
@@ -145,21 +180,21 @@ func gemmRangeRows(C, A, B *Mat, alpha, beta float32, rs, re int, packB []float3
 	bStride := B.Stride
 	cStride := C.Stride
 
-	for i0 := rs; i0 < re; i0 += tileM {
-		iMax := min(i0+tileM, re)
-		for k0 := 0; k0 < k; k0 += tileK {
-			kMax := min(k0+tileK, k)
-			for j0 := 0; j0 < n; j0 += tileN {
-				jMax := min(j0+tileN, n)
+	for i0 := rs; i0 < re; i0 += tm {
+		iMax := min(i0+tm, re)
+		for k0 := 0; k0 < k; k0 += tk {
+			kMax := min(k0+tk, k)
+			for j0 := 0; j0 < n; j0 += tn {
+				jMax := min(j0+tn, n)
 				blockUpdateGeneric(C.Data, A.Data, B.Data, cStride, aStride, bStride, alpha, i0, iMax, j0, jMax, k0, kMax)
 			}
 		}
 	}
 }
 
-func gemmRangeRowsAlpha1Beta0(C, A, B *Mat, rs, re int, packB []float32) {
-	if cpu.HasAVX2 && len(packB) >= tileK*tileN {
-		gemmRangeRowsAlpha1Beta0Packed(C, A, B, rs, re, packB)
+func gemmRangeRowsAlpha1Beta0(C, A, B *Mat, rs, re int, packB []float32, tm, tn, tk int) {
+	if cpu.HasAVX2 && len(packB) >= tk*tn {
+		gemmRangeRowsAlpha1Beta0Packed(C, A, B, rs, re, packB, tm, tn, tk)
 		return
 	}
 
@@ -178,19 +213,19 @@ func gemmRangeRowsAlpha1Beta0(C, A, B *Mat, rs, re int, packB []float32) {
 	aData := A.Data
 	bData := B.Data
 
-	for i0 := rs; i0 < re; i0 += tileM {
-		iMax := min(i0+tileM, re)
-		for k0 := 0; k0 < k; k0 += tileK {
-			kMax := min(k0+tileK, k)
-			for j0 := 0; j0 < n; j0 += tileN {
-				jMax := min(j0+tileN, n)
+	for i0 := rs; i0 < re; i0 += tm {
+		iMax := min(i0+tm, re)
+		for k0 := 0; k0 < k; k0 += tk {
+			kMax := min(k0+tk, k)
+			for j0 := 0; j0 < n; j0 += tn {
+				jMax := min(j0+tn, n)
 				blockUpdateAlpha1(cData, aData, bData, cStride, aStride, bStride, i0, iMax, j0, jMax, k0, kMax)
 			}
 		}
 	}
 }
 
-func gemmRangeRowsAlpha1Beta0Packed(C, A, B *Mat, rs, re int, packB []float32) {
+func gemmRangeRowsAlpha1Beta0Packed(C, A, B *Mat, rs, re int, packB []float32, tm, tn, tk int) {
 	cStride := C.Stride
 	n := C.C
 	cData := C.Data
