@@ -24,6 +24,10 @@ type Mat struct {
 	DType mcf.TensorDType
 	Data  []float32
 	Raw   []byte
+
+	// Quant holds an optional pre-unpacked quant cache for q*/k* weights.
+	// When present, MatVec can skip per-call bit unpacking.
+	Quant *QuantCache
 }
 
 // NewMat allocates a new matrix with the given number of rows and columns.

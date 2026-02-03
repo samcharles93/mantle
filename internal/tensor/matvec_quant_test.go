@@ -30,6 +30,36 @@ func TestMatVecQ4MatchesDequant(t *testing.T) {
 	assertCloseSlice(t, got, want, 1e-4)
 }
 
+func TestMatVecQ4CachedMatchesDequant(t *testing.T) {
+	const (
+		rows  = 3
+		cols  = 64
+		scale = 0.05
+	)
+	qvals := makeQVals(rows * cols)
+	payload := buildQPayload(rows, cols, 4, scale, qvals)
+	verifyPayloadSize(t, payload, rows, cols, mcf.DTypeQ4)
+
+	x := make([]float32, cols)
+	for i := range x {
+		x[i] = float32((i%11)-5) * 0.2
+	}
+	scaleUsed := Float16ToFloat32(Float32ToFloat16(scale))
+	want := matVecExpected(rows, cols, scaleUsed, qvals, x)
+
+	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeQ4, Raw: payload}
+	cache, err := BuildQuantCache(&w)
+	if err != nil {
+		t.Fatalf("BuildQuantCache: %v", err)
+	}
+	w.Quant = cache
+
+	got := make([]float32, rows)
+	MatVec(got, &w, x)
+
+	assertCloseSlice(t, got, want, 1e-4)
+}
+
 func TestMatVecQ8MatchesDequant(t *testing.T) {
 	const (
 		rows  = 4
@@ -72,6 +102,36 @@ func TestMatVecK4MatchesDequant(t *testing.T) {
 	want := matVecExpected(rows, cols, scaleUsed, qvals, x)
 
 	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: payload}
+	got := make([]float32, rows)
+	MatVec(got, &w, x)
+
+	assertCloseSlice(t, got, want, 1e-4)
+}
+
+func TestMatVecK4CachedMatchesDequant(t *testing.T) {
+	const (
+		rows  = 2
+		cols  = 64
+		scale = 0.075
+	)
+	qvals := makeQVals(rows * cols)
+	payload := buildKPayload(rows, cols, 4, scale, qvals)
+	verifyPayloadSize(t, payload, rows, cols, mcf.DTypeK4)
+
+	x := make([]float32, cols)
+	for i := range x {
+		x[i] = float32((i%7)-3) * 0.3
+	}
+	scaleUsed := Float16ToFloat32(Float32ToFloat16(scale))
+	want := matVecExpected(rows, cols, scaleUsed, qvals, x)
+
+	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: payload}
+	cache, err := BuildQuantCache(&w)
+	if err != nil {
+		t.Fatalf("BuildQuantCache: %v", err)
+	}
+	w.Quant = cache
+
 	got := make([]float32, rows)
 	MatVec(got, &w, x)
 
@@ -188,6 +248,58 @@ func BenchmarkMatVecK4(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		MatVec(dst, &w, x)
+	}
+}
+
+func BenchmarkMatVecK4Triple(b *testing.B) {
+	const (
+		rows  = 512
+		cols  = 512
+		scale = 0.05
+	)
+	qvals := makeQVals(rows * cols)
+	payload := buildK4Payload(rows, cols, scale, qvals)
+	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: payload}
+	x := make([]float32, cols)
+	for i := range x {
+		x[i] = float32((i%13)-6) * 0.11
+	}
+	dst0 := make([]float32, rows)
+	dst1 := make([]float32, rows)
+	dst2 := make([]float32, rows)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatVec(dst0, &w, x)
+		MatVec(dst1, &w, x)
+		MatVec(dst2, &w, x)
+	}
+}
+
+func BenchmarkMatVecK4TripleSharedQx(b *testing.B) {
+	const (
+		rows  = 512
+		cols  = 512
+		scale = 0.05
+	)
+	qvals := makeQVals(rows * cols)
+	payload := buildK4Payload(rows, cols, scale, qvals)
+	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: payload}
+	x := make([]float32, cols)
+	for i := range x {
+		x[i] = float32((i%13)-6) * 0.11
+	}
+	dst0 := make([]float32, rows)
+	dst1 := make([]float32, rows)
+	dst2 := make([]float32, rows)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		qx := PrepareQuantVec(x)
+		MatVecWithQuant(dst0, &w, x, qx)
+		MatVecWithQuant(dst1, &w, x, qx)
+		MatVecWithQuant(dst2, &w, x, qx)
+		ReleaseQuantVec(qx)
 	}
 }
 

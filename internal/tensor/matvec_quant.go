@@ -26,27 +26,29 @@ type quantLayout struct {
 	dataBytes int
 }
 
-type quantVec struct {
+type QuantVec struct {
 	q      []int8
 	q16    []int16
 	scales []float32
+	Blocks int
 }
 
 var quantVecPool = sync.Pool{
 	New: func() any {
-		return &quantVec{}
+		return &QuantVec{}
 	},
 }
 
-func getQuantVec(blocks int) *quantVec {
-	qx := quantVecPool.Get().(*quantVec)
+func getQuantVec(blocks int) *QuantVec {
+	qx := quantVecPool.Get().(*QuantVec)
+	qx.Blocks = blocks
 	qx.q = ensureInt8Slice(qx.q, blocks*32)
 	qx.q16 = ensureInt16Slice(qx.q16, blocks*32)
 	qx.scales = ensureFloat32Slice(qx.scales, blocks)
 	return qx
 }
 
-func putQuantVec(qx *quantVec) {
+func putQuantVec(qx *QuantVec) {
 	if qx == nil {
 		return
 	}
@@ -201,7 +203,11 @@ func quantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (quantLay
 	return layout, nil
 }
 
-func matVecRangeQuantWithWorker(dst []float32, w *Mat, x []float32, rs, re int, qx *quantVec, worker *matVecWorker) bool {
+func matVecRangeQuantWithWorker(dst []float32, w *Mat, x []float32, rs, re int, qx *QuantVec, worker *matVecWorker) bool {
+	if w.Quant != nil && w.Quant.validFor(w) {
+		matVecRangeQuantCached(dst, w, x, rs, re, qx)
+		return true
+	}
 	switch w.DType {
 	case mcf.DTypeQ8:
 		matVecRangeQWithWorker(dst, w, x, rs, re, 8, qx, worker)
@@ -226,7 +232,50 @@ func matVecRangeQuantWithWorker(dst []float32, w *Mat, x []float32, rs, re int, 
 	}
 }
 
-func matVecRangeQWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quantVec, worker *matVecWorker) {
+func matVecRangeQuantCached(dst []float32, w *Mat, x []float32, rs, re int, qx *QuantVec) {
+	qc := w.Quant
+	blocksPerRow := qc.BlocksPerRow
+	useInt8 := qx != nil && len(qx.q) >= blocksPerRow*32 && len(qx.q16) >= blocksPerRow*32 && len(qx.scales) >= blocksPerRow
+
+	for r := rs; r < re; r++ {
+		blockBase := r * blocksPerRow
+		rowOff := blockBase * 32
+		qRow := qc.Q[rowOff : rowOff+blocksPerRow*32]
+		scales := qc.Scales[blockBase : blockBase+blocksPerRow]
+
+		var sum float32
+		for b := 0; b < blocksPerRow; b++ {
+			col := b * 32
+			n := w.C - col
+			if n <= 0 {
+				break
+			}
+			if n > 32 {
+				n = 32
+			}
+			scale := scales[b]
+			if scale == 0 {
+				continue
+			}
+			off := b * 32
+			qBlock := qRow[off : off+32]
+			if useInt8 {
+				xScale := qx.scales[b]
+				if xScale == 0 {
+					continue
+				}
+				xBlock := qx.q16[off : off+32]
+				dot := dotInt8Int16(qBlock, xBlock, 32)
+				sum += float32(dot) * (scale * xScale)
+			} else {
+				sum += scale * dotInt8Float32(qBlock, x[col:], n)
+			}
+		}
+		dst[r] = sum
+	}
+}
+
+func matVecRangeQWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *QuantVec, worker *matVecWorker) {
 	layout, err := quantLayoutForMat(w.R, w.C, w.DType, len(w.Raw))
 	if err != nil {
 		panic(err)
@@ -318,7 +367,7 @@ func matVecRangeQWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 	}
 }
 
-func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *quantVec, worker *matVecWorker) {
+func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int, qx *QuantVec, worker *matVecWorker) {
 	layout, err := quantLayoutForMat(w.R, w.C, w.DType, len(w.Raw))
 	if err != nil {
 		panic(err)
@@ -369,11 +418,13 @@ func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 				superIdx := superBase + (b / 8)
 				superScale := scaleAt(superU16, superRaw, superIdx, superOK)
 				if superScale == 0 {
+					scales[rowIdx*layout.blocksPerRow+b] = 0
 					continue
 				}
 
 				u6 := subRaw[blockIdx] & 0x3F
 				if u6 == 0 {
+					scales[rowIdx*layout.blocksPerRow+b] = 0
 					continue
 				}
 				scale := superScale * (float32(u6) / 32.0)

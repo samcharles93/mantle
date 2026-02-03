@@ -14,7 +14,7 @@ type matVecTask struct {
 	x      []float32
 	rs, re int
 	done   chan struct{}
-	qx     *quantVec
+	qx     *QuantVec
 }
 
 type matVecWorker struct {
@@ -151,6 +151,15 @@ func newMatVecPool() *matVecPool {
 // MatVec computes dst = w * x where w is a matrix and x is a vector.
 // It runs in parallel using a worker pool.
 func MatVec(dst []float32, w *Mat, x []float32) {
+	matVecWithQuant(dst, w, x, nil)
+}
+
+// MatVecWithQuant computes dst = w * x using a pre-quantized input vector when available.
+func MatVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec) {
+	matVecWithQuant(dst, w, x, qx)
+}
+
+func matVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec) {
 	if w.R == 0 || w.C == 0 {
 		return
 	}
@@ -158,12 +167,17 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 		panic("matvec shape mismatch")
 	}
 
-	var qx *quantVec
-	if w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType) && cpu.HasAVX2 {
+	useQuant := w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType) && cpu.HasAVX2
+	var localQx *QuantVec
+	if useQuant {
 		blocks := (w.C + 31) / 32
-		qx = getQuantVec(blocks)
-		quantizeVecBlocksInto(x, blocks, qx.q, qx.q16, qx.scales)
-		defer putQuantVec(qx)
+		if qx != nil && qx.Blocks == blocks && len(qx.q) >= blocks*32 && len(qx.q16) >= blocks*32 && len(qx.scales) >= blocks {
+			localQx = qx
+		} else {
+			localQx = getQuantVec(blocks)
+			quantizeVecBlocksInto(x, blocks, localQx.q, localQx.q16, localQx.scales)
+			defer putQuantVec(localQx)
+		}
 	}
 
 	pool := getMatVecPool()
@@ -173,7 +187,7 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 	}
 
 	if workers <= 1 {
-		matVecRange(dst, w, x, 0, w.R, qx)
+		matVecRange(dst, w, x, 0, w.R, localQx)
 		return
 	}
 
@@ -198,7 +212,7 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 			rs:   rs,
 			re:   re,
 			done: done,
-			qx:   qx,
+			qx:   localQx,
 		}
 	}
 
@@ -208,11 +222,11 @@ func MatVec(dst []float32, w *Mat, x []float32) {
 	pool.doneSlots <- done
 }
 
-func matVecRange(dst []float32, w *Mat, x []float32, rs, re int, qx *quantVec) {
+func matVecRange(dst []float32, w *Mat, x []float32, rs, re int, qx *QuantVec) {
 	matVecRangeWithWorker(dst, w, x, rs, re, qx, nil)
 }
 
-func matVecRangeWithWorker(dst []float32, w *Mat, x []float32, rs, re int, qx *quantVec, worker *matVecWorker) {
+func matVecRangeWithWorker(dst []float32, w *Mat, x []float32, rs, re int, qx *QuantVec, worker *matVecWorker) {
 	if w.Raw != nil && w.DType != mcf.DTypeF32 {
 		if matVecRangeQuantWithWorker(dst, w, x, rs, re, qx, worker) {
 			return

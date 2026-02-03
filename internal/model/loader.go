@@ -646,6 +646,11 @@ func loadMat(src tensorSource, name string) (*tensor.Mat, error) {
 				return nil, fmt.Errorf("%s: quant payload size mismatch", name)
 			}
 			m := tensor.Mat{R: r, C: c, Stride: c, DType: payload.DType, Raw: payload.Raw}
+			cache, err := tensor.BuildQuantCache(&m)
+			if err != nil {
+				return nil, fmt.Errorf("%s: quant cache: %w", name, err)
+			}
+			m.Quant = cache
 			return &m, nil
 		}
 		data, err := decodeTensorF32(payload)
@@ -963,9 +968,14 @@ func (m *Instance) attention(layer *Layer, x []float32, pos int) []float32 {
 	v := m.scratch.v[:kvStride]
 	attnOut := m.scratch.attnOut
 
-	tensor.MatVec(q, layer.Wq, x)
-	tensor.MatVec(k, layer.Wk, x)
-	tensor.MatVec(v, layer.Wv, x)
+	var qx *tensor.QuantVec
+	if tensor.CanUseQuantVec(layer.Wq) || tensor.CanUseQuantVec(layer.Wk) || tensor.CanUseQuantVec(layer.Wv) {
+		qx = tensor.PrepareQuantVec(x)
+		defer tensor.ReleaseQuantVec(qx)
+	}
+	tensor.MatVecWithQuant(q, layer.Wq, x, qx)
+	tensor.MatVecWithQuant(k, layer.Wk, x, qx)
+	tensor.MatVecWithQuant(v, layer.Wv, x, qx)
 
 	if len(layer.WqBias) > 0 {
 		tensor.Add(q, layer.WqBias)
@@ -1064,7 +1074,7 @@ func (m *Instance) attention(layer *Layer, x []float32, pos int) []float32 {
 
 	if layer.AttnGate != nil {
 		gate := m.scratch.attnGate[:nHead*headDim]
-		tensor.MatVec(gate, layer.AttnGate, x)
+		tensor.MatVecWithQuant(gate, layer.AttnGate, x, qx)
 		for i := range gate {
 			attnOut[i] *= tensor.Sigmoid(gate[i])
 		}
@@ -1117,8 +1127,13 @@ func (m *Instance) shortconv(layer *Layer, x []float32) []float32 {
 }
 
 func (m *Instance) ffn(layer *Layer, x []float32) []float32 {
-	tensor.MatVec(m.scratch.ffnUp, layer.FfnUp, x)
-	tensor.MatVec(m.scratch.ffnGate, layer.FfnGate, x)
+	var qx *tensor.QuantVec
+	if tensor.CanUseQuantVec(layer.FfnUp) || tensor.CanUseQuantVec(layer.FfnGate) {
+		qx = tensor.PrepareQuantVec(x)
+		defer tensor.ReleaseQuantVec(qx)
+	}
+	tensor.MatVecWithQuant(m.scratch.ffnUp, layer.FfnUp, x, qx)
+	tensor.MatVecWithQuant(m.scratch.ffnGate, layer.FfnGate, x, qx)
 	for i := range m.scratch.ffnAct {
 		m.scratch.ffnAct[i] = tensor.Silu(m.scratch.ffnGate[i]) * m.scratch.ffnUp[i]
 	}
