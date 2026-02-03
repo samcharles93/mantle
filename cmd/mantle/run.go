@@ -22,7 +22,6 @@ import (
 
 func runCmd() *cli.Command {
 	var (
-		modelPath     string
 		prompt        string
 		system        string
 		steps         int64
@@ -32,15 +31,13 @@ func runCmd() *cli.Command {
 		repeatPenalty float64
 		repeatLastN   int64
 		seed          int64
-		maxContext    int64
 		noTemplate    bool
 		echoPrompt    bool
 
 		// Optional overrides
-		tokenizerJSON   string
-		tokenizerConfig string
-		chatTemplate    string
-		hfConfigFile    string
+		messagesJSON string
+		toolsJSON    string
+		hfConfigFile string
 
 		// Debug flags
 		showConfig bool
@@ -50,197 +47,183 @@ func runCmd() *cli.Command {
 		memProfile string
 	)
 
+	flags := append([]cli.Flag{}, commonModelFlags()...)
+	flags = append(flags, commonTokenizerFlags()...)
+	flags = append(flags,
+		&cli.StringFlag{
+			Name:        "prompt",
+			Aliases:     []string{"p"},
+			Usage:       "prompt text to tokenize",
+			Destination: &prompt,
+		},
+		&cli.StringFlag{
+			Name:        "system",
+			Aliases:     []string{"sys"},
+			Usage:       "optional system prompt",
+			Destination: &system,
+		},
+		&cli.StringFlag{
+			Name:        "messages-json",
+			Usage:       "path to JSON chat history (array or {\"messages\": [...]})",
+			Destination: &messagesJSON,
+		},
+		&cli.StringFlag{
+			Name:        "tools-json",
+			Usage:       "path to JSON tools definition (array or {\"tools\": [...]})",
+			Destination: &toolsJSON,
+		},
+		&cli.Int64Flag{
+			Name:        "steps",
+			Aliases:     []string{"n", "num-tokens", "num_tokens"},
+			Usage:       "number of tokens to generate (default -1 = infinite)",
+			Value:       -1,
+			Destination: &steps,
+		},
+		&cli.Float64Flag{
+			Name:        "temp",
+			Aliases:     []string{"temperature", "t"},
+			Usage:       "sampling temperature",
+			Value:       0.8,
+			Destination: &temp,
+		},
+		&cli.Int64Flag{
+			Name:        "top-k",
+			Aliases:     []string{"top_k", "topk"},
+			Usage:       "top-k sampling parameter",
+			Value:       40,
+			Destination: &topK,
+		},
+		&cli.Float64Flag{
+			Name:        "top-p",
+			Aliases:     []string{"top_p", "topp"},
+			Usage:       "top_p sampling parameter",
+			Value:       0.95,
+			Destination: &topP,
+		},
+		&cli.Float64Flag{
+			Name:    "min-p",
+			Aliases: []string{"min_p", "minp"},
+			Usage:   "min_p sampling parameter (0.0 = disabled)",
+			Value:   0.05,
+		},
+		&cli.Float64Flag{
+			Name:        "repeat-penalty",
+			Aliases:     []string{"repeat_penalty"},
+			Usage:       "repetition penalty (1.0 = disabled)",
+			Value:       1.1,
+			Destination: &repeatPenalty,
+		},
+		&cli.Int64Flag{
+			Name:        "repeat-last-n",
+			Aliases:     []string{"repeat_last_n"},
+			Usage:       "last n tokens to penalize",
+			Value:       64,
+			Destination: &repeatLastN,
+		},
+		&cli.Int64Flag{
+			Name:        "seed",
+			Usage:       "sampling RNG seed (default -1 = random)",
+			Value:       -1,
+			Destination: &seed,
+		},
+		&cli.BoolFlag{
+			Name:        "no-template",
+			Usage:       "disable chat template rendering",
+			Destination: &noTemplate,
+		},
+		&cli.BoolFlag{
+			Name:        "echo-prompt",
+			Usage:       "print prompt text before generation",
+			Destination: &echoPrompt,
+		},
+		&cli.StringFlag{
+			Name:    "cache-type-k",
+			Aliases: []string{"cache_type_k", "ctk"},
+			Usage:   "KV cache data type for K (f32, f16)",
+			Value:   "f16",
+		},
+		&cli.StringFlag{
+			Name:    "cache-type-v",
+			Aliases: []string{"cache_type_v", "ctv"},
+			Usage:   "KV cache data type for V (f32, f16)",
+			Value:   "f16",
+		},
+		// Optional overrides
+		&cli.StringFlag{
+			Name:  "rope-scaling",
+			Usage: "RoPE scaling type (linear, yarn, none)",
+		},
+		&cli.Float64Flag{
+			Name:  "rope-scale",
+			Usage: "RoPE scaling factor",
+		},
+		&cli.Float64Flag{
+			Name:  "rope-freq-base",
+			Usage: "RoPE base frequency",
+		},
+		&cli.Float64Flag{
+			Name:  "rope-freq-scale",
+			Usage: "RoPE frequency scaling factor",
+		},
+		&cli.Int64Flag{
+			Name:  "yarn-orig-ctx",
+			Usage: "YaRN original context size",
+		},
+		&cli.Float64Flag{
+			Name:  "yarn-ext-factor",
+			Usage: "YaRN extrapolation mix factor",
+			Value: -1.0,
+		},
+		&cli.Float64Flag{
+			Name:  "yarn-attn-factor",
+			Usage: "YaRN attention factor",
+			Value: -1.0,
+		},
+		&cli.Float64Flag{
+			Name:  "yarn-beta-slow",
+			Usage: "YaRN beta slow",
+			Value: -1.0,
+		},
+		&cli.Float64Flag{
+			Name:  "yarn-beta-fast",
+			Usage: "YaRN beta fast",
+			Value: -1.0,
+		},
+		&cli.StringFlag{
+			Name:        "hf-config",
+			Usage:       "explicit path to hf config.json",
+			Destination: &hfConfigFile,
+		},
+		// Debug flags
+		&cli.BoolFlag{
+			Name:        "show-config",
+			Usage:       "print model + tokenizer summary",
+			Value:       true,
+			Destination: &showConfig,
+		},
+		&cli.BoolFlag{
+			Name:        "show-tokens",
+			Usage:       "print prompt token ids",
+			Value:       true,
+			Destination: &showTokens,
+		},
+		// Profiling flags
+		&cli.StringFlag{
+			Name:        "cpuprofile",
+			Usage:       "write cpu profile to file",
+			Destination: &cpuProfile,
+		},
+		&cli.StringFlag{
+			Name:        "memprofile",
+			Usage:       "write memory profile to file",
+			Destination: &memProfile,
+		},
+	)
+
 	return &cli.Command{
 		Name:  "run",
 		Usage: "Run inference for LLM models",
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:        "model",
-				Aliases:     []string{"m"},
-				Usage:       "path to .mcf file",
-				Destination: &modelPath,
-			},
-			&cli.StringFlag{
-				Name:        "prompt",
-				Aliases:     []string{"p"},
-				Usage:       "prompt text to tokenize",
-				Destination: &prompt,
-			},
-			&cli.StringFlag{
-				Name:        "system",
-				Aliases:     []string{"sys"},
-				Usage:       "optional system prompt",
-				Destination: &system,
-			},
-			&cli.Int64Flag{
-				Name:        "steps",
-				Aliases:     []string{"n", "num-tokens", "num_tokens"},
-				Usage:       "number of tokens to generate (default -1 = infinite)",
-				Value:       -1,
-				Destination: &steps,
-			},
-			&cli.Float64Flag{
-				Name:        "temp",
-				Aliases:     []string{"temperature", "t"},
-				Usage:       "sampling temperature",
-				Value:       0.8,
-				Destination: &temp,
-			},
-			&cli.Int64Flag{
-				Name:        "top-k",
-				Aliases:     []string{"top_k", "topk"},
-				Usage:       "top-k sampling parameter",
-				Value:       40,
-				Destination: &topK,
-			},
-			&cli.Float64Flag{
-				Name:        "top-p",
-				Aliases:     []string{"top_p", "topp"},
-				Usage:       "top_p sampling parameter",
-				Value:       0.95,
-				Destination: &topP,
-			},
-			&cli.Float64Flag{
-				Name:    "min-p",
-				Aliases: []string{"min_p", "minp"},
-				Usage:   "min_p sampling parameter (0.0 = disabled)",
-				Value:   0.05,
-			},
-			&cli.Float64Flag{
-				Name:        "repeat-penalty",
-				Aliases:     []string{"repeat_penalty"},
-				Usage:       "repetition penalty (1.0 = disabled)",
-				Value:       1.1,
-				Destination: &repeatPenalty,
-			},
-			&cli.Int64Flag{
-				Name:        "repeat-last-n",
-				Aliases:     []string{"repeat_last_n"},
-				Usage:       "last n tokens to penalize",
-				Value:       64,
-				Destination: &repeatLastN,
-			},
-			&cli.Int64Flag{
-				Name:        "seed",
-				Usage:       "sampling RNG seed (default -1 = random)",
-				Value:       -1,
-				Destination: &seed,
-			},
-			&cli.Int64Flag{
-				Name:        "max-context",
-				Aliases:     []string{"max-ctx", "ctx", "c"},
-				Usage:       "max context length",
-				Value:       4096,
-				Destination: &maxContext,
-			},
-			&cli.BoolFlag{
-				Name:        "no-template",
-				Usage:       "disable chat template rendering",
-				Destination: &noTemplate,
-			},
-			&cli.BoolFlag{
-				Name:        "echo-prompt",
-				Usage:       "print prompt text before generation",
-				Destination: &echoPrompt,
-			},
-			&cli.StringFlag{
-				Name:    "cache-type-k",
-				Aliases: []string{"cache_type_k", "ctk"},
-				Usage:   "KV cache data type for K (f32, f16)",
-				Value:   "f16",
-			},
-			&cli.StringFlag{
-				Name:    "cache-type-v",
-				Aliases: []string{"cache_type_v", "ctv"},
-				Usage:   "KV cache data type for V (f32, f16)",
-				Value:   "f16",
-			},
-			// Optional overrides
-			&cli.StringFlag{
-				Name:        "tokenizer-json",
-				Usage:       "override path to tokenizer.json",
-				Destination: &tokenizerJSON,
-			},
-			&cli.StringFlag{
-				Name:  "rope-scaling",
-				Usage: "RoPE scaling type (linear, yarn, none)",
-			},
-			&cli.Float64Flag{
-				Name:  "rope-scale",
-				Usage: "RoPE scaling factor",
-			},
-			&cli.Float64Flag{
-				Name:  "rope-freq-base",
-				Usage: "RoPE base frequency",
-			},
-			&cli.Float64Flag{
-				Name:  "rope-freq-scale",
-				Usage: "RoPE frequency scaling factor",
-			},
-			&cli.Int64Flag{
-				Name:  "yarn-orig-ctx",
-				Usage: "YaRN original context size",
-			},
-			&cli.Float64Flag{
-				Name:  "yarn-ext-factor",
-				Usage: "YaRN extrapolation mix factor",
-				Value: -1.0,
-			},
-			&cli.Float64Flag{
-				Name:  "yarn-attn-factor",
-				Usage: "YaRN attention factor",
-				Value: -1.0,
-			},
-			&cli.Float64Flag{
-				Name:  "yarn-beta-slow",
-				Usage: "YaRN beta slow",
-				Value: -1.0,
-			},
-			&cli.Float64Flag{
-				Name:  "yarn-beta-fast",
-				Usage: "YaRN beta fast",
-				Value: -1.0,
-			},
-			&cli.StringFlag{
-				Name:        "tokenizer-config",
-				Usage:       "override path to tokenizer_config.json",
-				Destination: &tokenizerConfig,
-			},
-			&cli.StringFlag{
-				Name:        "chat-template",
-				Usage:       "override path to chat_template.jinja",
-				Destination: &chatTemplate,
-			},
-			&cli.StringFlag{
-				Name:        "hf-config",
-				Usage:       "explicit path to hf config.json",
-				Destination: &hfConfigFile,
-			},
-			// Debug flags
-			&cli.BoolFlag{
-				Name:        "show-config",
-				Usage:       "print model + tokenizer summary",
-				Value:       true,
-				Destination: &showConfig,
-			},
-			&cli.BoolFlag{
-				Name:        "show-tokens",
-				Usage:       "print prompt token ids",
-				Value:       true,
-				Destination: &showTokens,
-			},
-			// Profiling flags
-			&cli.StringFlag{
-				Name:        "cpuprofile",
-				Usage:       "write cpu profile to file",
-				Destination: &cpuProfile,
-			},
-			&cli.StringFlag{
-				Name:        "memprofile",
-				Usage:       "write memory profile to file",
-				Destination: &memProfile,
-			},
-		},
+		Flags: flags,
 		Action: func(ctx context.Context, c *cli.Command) error {
 			if cpuProfile != "" {
 				f, err := os.Create(cpuProfile)
@@ -268,7 +251,7 @@ func runCmd() *cli.Command {
 				}()
 			}
 
-			resolvedModelPath, err := resolveRunModelPath(modelPath, os.Stdin, os.Stderr)
+			resolvedModelPath, err := resolveRunModelPath(modelPath, modelsPath, os.Stdin, os.Stderr)
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: resolve model: %v", err), 1)
 			}
@@ -408,8 +391,8 @@ func runCmd() *cli.Command {
 			}
 
 			// Load Tokenizer (Required for MCF)
-			if tokenizerJSON != "" && fileExists(tokenizerJSON) {
-				tokJSONBytes, err := os.ReadFile(tokenizerJSON)
+			if tokenizerJSONPath != "" && fileExists(tokenizerJSONPath) {
+				tokJSONBytes, err := os.ReadFile(tokenizerJSONPath)
 				if err != nil {
 					return cli.Exit(fmt.Sprintf("error: read tokenizer.json: %v", err), 1)
 				}
@@ -560,17 +543,45 @@ func runCmd() *cli.Command {
 				ContextTokens: make([]int, 0, int(maxContext)),
 			}
 
-			msgs := make([]tokenizer.Message, 0, 10)
-			if system != "" {
-				msgs = append(msgs, tokenizer.Message{Role: "system", Content: system})
+			var (
+				msgs  []tokenizer.Message
+				tools []any
+			)
+			if toolsJSON != "" {
+				if !fileExists(toolsJSON) {
+					return cli.Exit(fmt.Sprintf("error: tools json not found: %s", toolsJSON), 1)
+				}
+				loaded, err := tokenizer.LoadToolsJSON(toolsJSON)
+				if err != nil {
+					return cli.Exit(fmt.Sprintf("error: load tools json: %v", err), 1)
+				}
+				tools = loaded
 			}
 
 			interactive := false
-			if prompt != "" {
-				msgs = append(msgs, tokenizer.Message{Role: "user", Content: prompt})
+			if messagesJSON != "" {
+				if !fileExists(messagesJSON) {
+					return cli.Exit(fmt.Sprintf("error: messages json not found: %s", messagesJSON), 1)
+				}
+				loaded, err := tokenizer.LoadMessagesJSON(messagesJSON)
+				if err != nil {
+					return cli.Exit(fmt.Sprintf("error: load messages json: %v", err), 1)
+				}
+				msgs = loaded
+				if prompt != "" || system != "" {
+					fmt.Fprintln(os.Stderr, "warning: --messages-json overrides --prompt/--system")
+				}
 			} else {
-				interactive = true
-				fmt.Fprintln(os.Stderr, "Interactive mode. Type /exit to quit.")
+				msgs = make([]tokenizer.Message, 0, 10)
+				if system != "" {
+					msgs = append(msgs, tokenizer.Message{Role: "system", Content: system})
+				}
+				if prompt != "" {
+					msgs = append(msgs, tokenizer.Message{Role: "user", Content: prompt})
+				} else {
+					interactive = true
+					fmt.Fprintln(os.Stderr, "Interactive mode. Type /exit to quit.")
+				}
 			}
 
 			scanner := bufio.NewScanner(os.Stdin)
@@ -594,19 +605,26 @@ func runCmd() *cli.Command {
 
 				// Render prompt
 				var rendered string
-				if !noTemplate && effectiveTemplate != "" {
+				if !noTemplate {
 					// Get info from tokenizer interface if possible
 					bosToken := ""
 					if t, ok := tok.(interface{ TokenString(int) string }); ok {
 						bosToken = t.TokenString(tokConfig.BOSTokenID)
 					}
-					if s, ok := tokenizer.RenderPromptTemplate(effectiveTemplate, bosToken, tokConfig.AddBOS, msgs, true); ok {
+					s, ok, err := tokenizer.RenderPromptTemplate(effectiveTemplate, bosToken, tokConfig.TokenString(tokConfig.EOSTokenID), tokConfig.AddBOS, msgs, tools, true, m.Config.Arch)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "error: render prompt:", err)
+					} else if ok {
 						rendered = s
 					}
 				}
 				if rendered == "" && len(msgs) > 0 {
 					// Fallback if no template: just use last content
-					rendered = msgs[len(msgs)-1].Content
+					if text, ok := tokenizer.MessageText(msgs[len(msgs)-1]); ok {
+						rendered = text
+					} else {
+						return cli.Exit("error: prompt content is not a string and no template renderer matched", 1)
+					}
 				}
 
 				if echoPrompt && !interactive {

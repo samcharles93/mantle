@@ -20,6 +20,7 @@ func main() {
 			packCmd(),
 			quantizeCmd(),
 			inspectCmd(),
+			serveCmd(),
 		},
 	}
 
