@@ -128,7 +128,7 @@ func selectTopKSmall(selScores, rawScores []float32, k int, routeScale float32, 
 	}
 
 	// Copy to output
-	for i := 0; i < k; i++ {
+	for i := range k {
 		idxOut[i] = bestIdx[i]
 	}
 
@@ -209,7 +209,7 @@ func heapifyDown(heap []pair, i int) {
 // computeTopKWeights computes normalized weights for selected experts.
 func computeTopKWeights(selScores, rawScores []float32, k int, routeScale float32, idxOut []int, wOut []float32) {
 	var denom float32
-	for j := 0; j < k; j++ {
+	for j := range k {
 		id := idxOut[j]
 		if id < 0 || id >= len(rawScores) {
 			continue
@@ -219,7 +219,7 @@ func computeTopKWeights(selScores, rawScores []float32, k int, routeScale float3
 	if denom == 0 {
 		denom = 1
 	}
-	for j := 0; j < k; j++ {
+	for j := range k {
 		id := idxOut[j]
 		if id < 0 || id >= len(rawScores) {
 			wOut[j] = 0
