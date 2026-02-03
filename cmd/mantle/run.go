@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"runtime/pprof"
@@ -13,11 +12,8 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/samcharles93/mantle/internal/inference"
-	"github.com/samcharles93/mantle/internal/logits"
-	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
-	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
 func runCmd() *cli.Command {
@@ -262,14 +258,6 @@ func runCmd() *cli.Command {
 				return cli.Exit(fmt.Sprintf("error: stat model path %q: %v", modelPath, err), 1)
 			}
 
-			var (
-				m         *model.Instance
-				hfTok     *tokenizer.HFTokenizer
-				tok       tokenizer.Tokenizer
-				tokConfig tokenizer.TokenizerConfig
-				genConfig *model.Config
-			)
-
 			if stat.IsDir() || !strings.HasSuffix(strings.ToLower(modelPath), ".mcf") {
 				return cli.Exit("error: mantle run only supports .mcf files", 1)
 			}
@@ -277,30 +265,18 @@ func runCmd() *cli.Command {
 			loadStart := time.Now()
 
 			fmt.Printf("Loading MCF model: %s\n", modelPath)
-
-			mcfFile, err := mcfstore.Open(modelPath)
-			if err != nil {
-				return cli.Exit(fmt.Sprintf("error: open mcf: %v", err), 1)
+			loader := inference.Loader{
+				TokenizerJSONPath:   tokenizerJSONPath,
+				TokenizerConfigPath: tokenizerConfig,
+				ChatTemplatePath:    chatTemplate,
+				HFConfigPath:        hfConfigFile,
 			}
-			defer func() { _ = mcfFile.Close() }()
-
-			cfgBytes := []byte(nil)
-			if hfConfigFile != "" {
-				cfgBytes, err = os.ReadFile(hfConfigFile)
-				if err != nil {
-					return cli.Exit(fmt.Sprintf("error: read hf config: %v", err), 1)
-				}
-			} else {
-				cfgBytes = mcfFile.SectionData(mcf.SectionHFConfigJSON)
-			}
-			if len(cfgBytes) == 0 {
-				return cli.Exit("error: config.json not found in MCF (use --hf-config to override)", 1)
-			}
-
-			m, err = model.LoadModelMCF(mcfFile, cfgBytes, int(maxContext))
+			loadResult, err := loader.Load(modelPath, int(maxContext))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)
 			}
+			defer func() { _ = loadResult.Engine.Close() }()
+			m := loadResult.Model
 			m.Config.Config.CacheTypeK = c.String("cache-type-k")
 			m.Config.Config.CacheTypeV = c.String("cache-type-v")
 
@@ -343,21 +319,13 @@ func runCmd() *cli.Command {
 				m.UpdateRoPE()
 			}
 
-			genConfig = &m.Config.Config
+			genConfig := &m.Config.Config
+			tok := loadResult.Tokenizer
+			tokConfig := loadResult.TokenizerConfig
+			genDefaults := loadResult.GenerationDefaults
 
-			// Apply generation_config.json defaults when the user did not override flags.
-			type hfGenerationConfig struct {
-				Temperature       *float64 `json:"temperature"`
-				TopK              *int     `json:"top_k"`
-				TopP              *float64 `json:"top_p"`
-				RepetitionPenalty *float64 `json:"repetition_penalty"`
-			}
-			var (
-				tempFromGen   bool
-				topKFromGen   bool
-				topPFromGen   bool
-				repeatFromGen bool
-			)
+			// Resolve effective chat template once for show-config and rendering.
+			effectiveTemplate, templateSource := inference.ResolveChatTemplate(chatTemplate, tokConfig, m.Config.Arch, loadResult.HFConfigJSON)
 			isSet := func(names ...string) bool {
 				for _, n := range names {
 					if c.IsSet(n) {
@@ -366,87 +334,10 @@ func runCmd() *cli.Command {
 				}
 				return false
 			}
-			if genBytes := mcfFile.SectionData(mcf.SectionHFGenerationConfigJSON); len(genBytes) > 0 {
-				var hfGen hfGenerationConfig
-				if err := json.Unmarshal(genBytes, &hfGen); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: parse generation_config.json: %v\n", err)
-				} else {
-					if !isSet("temp") && hfGen.Temperature != nil && *hfGen.Temperature > 0 {
-						temp = *hfGen.Temperature
-						tempFromGen = true
-					}
-					if !isSet("top_k", "topk") && hfGen.TopK != nil && *hfGen.TopK > 0 {
-						topK = int64(*hfGen.TopK)
-						topKFromGen = true
-					}
-					if !isSet("top_p", "topp") && hfGen.TopP != nil && *hfGen.TopP > 0 && *hfGen.TopP <= 1 {
-						topP = *hfGen.TopP
-						topPFromGen = true
-					}
-					if !isSet("repeat-penalty") && hfGen.RepetitionPenalty != nil && *hfGen.RepetitionPenalty > 0 {
-						repeatPenalty = *hfGen.RepetitionPenalty
-						repeatFromGen = true
-					}
-				}
-			}
-
-			// Load Tokenizer (Required for MCF)
-			if tokenizerJSONPath != "" && fileExists(tokenizerJSONPath) {
-				tokJSONBytes, err := os.ReadFile(tokenizerJSONPath)
-				if err != nil {
-					return cli.Exit(fmt.Sprintf("error: read tokenizer.json: %v", err), 1)
-				}
-				var tokCfgBytes []byte
-				if tokenizerConfig != "" && fileExists(tokenizerConfig) {
-					tokCfgBytes, err = os.ReadFile(tokenizerConfig)
-					if err != nil {
-						return cli.Exit(fmt.Sprintf("error: load tokenizer_config.json: %v", err), 1)
-					}
-				}
-				hfTok, err = tokenizer.LoadHFTokenizerBytes(tokJSONBytes, tokCfgBytes)
-				if err != nil {
-					return cli.Exit(fmt.Sprintf("error: load tokenizer.json: %v", err), 1)
-				}
-				if parsedCfg, err := tokenizer.ParseHFTokenizerConfigBytes(tokJSONBytes, tokCfgBytes); err == nil {
-					tokConfig = parsedCfg
-				} else {
-					fmt.Fprintf(os.Stderr, "warning: parse tokenizer_config.json: %v\n", err)
-				}
-			} else {
-				tokJSON := mcfFile.SectionData(mcf.SectionTokenizerJSON)
-				if len(tokJSON) == 0 {
-					return cli.Exit("error: tokenizer.json not found in MCF (use --tokenizer-json to override)", 1)
-				}
-				var tokCfg []byte
-				if tokenizerConfig != "" && fileExists(tokenizerConfig) {
-					tokCfg, err = os.ReadFile(tokenizerConfig)
-					if err != nil {
-						return cli.Exit(fmt.Sprintf("error: load tokenizer_config.json: %v", err), 1)
-					}
-				} else {
-					tokCfg = mcfFile.SectionData(mcf.SectionTokenizerConfigJSON)
-				}
-
-				hfTok, err = tokenizer.LoadHFTokenizerBytes(tokJSON, tokCfg)
-				if err != nil {
-					return cli.Exit(fmt.Sprintf("error: load tokenizer.json: %v", err), 1)
-				}
-				if parsedCfg, err := tokenizer.ParseHFTokenizerConfigBytes(tokJSON, tokCfg); err == nil {
-					tokConfig = parsedCfg
-				} else {
-					fmt.Fprintf(os.Stderr, "warning: parse tokenizer_config.json: %v\n", err)
-				}
-			}
-
-			tok = hfTok
-
-			// Prefer tokenizer-derived IDs and add-bos behavior; preserve chat_template.
-			tokConfig.BOSTokenID = hfTok.BOSID()
-			tokConfig.AddBOS = hfTok.AddBOS()
-			tokConfig.EOSTokenID = hfTok.EOSID()
-
-			// Resolve effective chat template once for show-config and rendering.
-			effectiveTemplate, templateSource := resolveChatTemplate(chatTemplate, tokConfig, m.Config.Arch, cfgBytes)
+			tempFromGen := !isSet("temp", "temperature", "t") && genDefaults.Temperature != nil && *genDefaults.Temperature > 0
+			topKFromGen := !isSet("top-k", "top_k", "topk") && genDefaults.TopK != nil && *genDefaults.TopK > 0
+			topPFromGen := !isSet("top-p", "top_p", "topp") && genDefaults.TopP != nil && *genDefaults.TopP > 0 && *genDefaults.TopP <= 1
+			repeatFromGen := !isSet("repeat-penalty", "repeat_penalty") && genDefaults.RepetitionPenalty != nil && *genDefaults.RepetitionPenalty > 0
 			samplingSource := func(flagSet bool, fromGen bool) string {
 				if flagSet {
 					return "flag"
@@ -459,6 +350,41 @@ func runCmd() *cli.Command {
 
 			loadDuration := time.Since(loadStart)
 			fmt.Printf("Model loaded in %s\n", loadDuration)
+
+			if seed == -1 {
+				seed = time.Now().UnixNano()
+			}
+
+			minP := c.Float("min-p")
+			repeatLastNVal := int(repeatLastN)
+			stepsVal := int(steps)
+			seedVal := seed
+			baseOpts := inference.RequestOptions{
+				Steps:       &stepsVal,
+				Seed:        &seedVal,
+				MinP:        &minP,
+				RepeatLastN: &repeatLastNVal,
+				NoTemplate:  &noTemplate,
+			}
+			if isSet("temp", "temperature", "t") {
+				baseOpts.Temperature = &temp
+			}
+			if isSet("top-k", "top_k", "topk") {
+				topKVal := int(topK)
+				baseOpts.TopK = &topKVal
+			}
+			if isSet("top-p", "top_p", "topp") {
+				baseOpts.TopP = &topP
+			}
+			if isSet("repeat-penalty", "repeat_penalty") {
+				baseOpts.RepeatPenalty = &repeatPenalty
+			}
+
+			previewReq := inference.ResolveRequest(baseOpts, genDefaults)
+			temp = previewReq.Temperature
+			topK = int64(previewReq.TopK)
+			topP = previewReq.TopP
+			repeatPenalty = previewReq.RepeatPenalty
 
 			if showConfig {
 				fmt.Fprintf(os.Stderr, "MCF | arch=%s\n", m.Config.Arch)
@@ -492,55 +418,16 @@ func runCmd() *cli.Command {
 				}
 
 				fmt.Fprintf(os.Stderr, "sampling: temp=%.3g (%s) top_k=%d (%s) top_p=%.3g (%s) repeat_penalty=%.3g (%s)\n",
-					temp, samplingSource(c.IsSet("temp"), tempFromGen),
-					topK, samplingSource(c.IsSet("top_k") || c.IsSet("topk"), topKFromGen),
-					topP, samplingSource(c.IsSet("top_p") || c.IsSet("topp"), topPFromGen),
-					repeatPenalty, samplingSource(c.IsSet("repeat-penalty"), repeatFromGen),
+					temp, samplingSource(isSet("temp", "temperature", "t"), tempFromGen),
+					topK, samplingSource(isSet("top-k", "top_k", "topk"), topKFromGen),
+					topP, samplingSource(isSet("top-p", "top_p", "topp"), topPFromGen),
+					repeatPenalty, samplingSource(isSet("repeat-penalty", "repeat_penalty"), repeatFromGen),
 				)
 				if effectiveTemplate == "" {
 					fmt.Fprintln(os.Stderr, "chat_template: none")
 				} else {
 					fmt.Fprintf(os.Stderr, "chat_template: %s\n", templateSource)
 				}
-			}
-
-			if seed == -1 {
-				seed = time.Now().UnixNano()
-			}
-
-			sampler := logits.NewSampler(logits.SamplerConfig{
-				Seed:          seed,
-				Temperature:   float32(temp),
-				TopK:          int(topK),
-				TopP:          float32(topP),
-				MinP:          float32(c.Float("min-p")),
-				RepeatPenalty: float32(repeatPenalty),
-				RepeatLastN:   int(repeatLastN),
-			})
-
-			stopTokens := []int{tokConfig.EOSTokenID}
-			if tokConfig.EOSTokenID < 0 {
-				stopTokens = stopTokens[:0]
-			}
-			// Only add the legacy id=2 fallback when it is actually an end-of-text token
-			// for this tokenizer.
-			if t, ok := tok.(interface{ TokenString(int) string }); ok {
-				token2 := strings.ToLower(strings.TrimSpace(t.TokenString(2)))
-				if token2 == "<|endoftext|>" || token2 == "<|end_of_text|>" || token2 == "</s>" {
-					if tokConfig.EOSTokenID != 2 && tokConfig.EOSTokenID >= 0 {
-						stopTokens = append(stopTokens, 2)
-					} else if tokConfig.EOSTokenID < 0 {
-						stopTokens = append(stopTokens, 2)
-					}
-				}
-			}
-
-			generator := &inference.Generator{
-				Model:         m,
-				Sampler:       sampler,
-				Tokenizer:     tok,
-				StopTokens:    stopTokens,
-				ContextTokens: make([]int, 0, int(maxContext)),
 			}
 
 			var (
@@ -603,48 +490,39 @@ func runCmd() *cli.Command {
 					msgs = append(msgs, tokenizer.Message{Role: "user", Content: input})
 				}
 
-				// Render prompt
-				var rendered string
-				if !noTemplate {
-					// Get info from tokenizer interface if possible
-					bosToken := ""
-					if t, ok := tok.(interface{ TokenString(int) string }); ok {
-						bosToken = t.TokenString(tokConfig.BOSTokenID)
-					}
-					s, ok, err := tokenizer.RenderPromptTemplate(effectiveTemplate, bosToken, tokConfig.TokenString(tokConfig.EOSTokenID), tokConfig.AddBOS, msgs, tools, true, m.Config.Arch)
-					if err != nil {
-						fmt.Fprintln(os.Stderr, "error: render prompt:", err)
-					} else if ok {
-						rendered = s
-					}
-				}
-				if rendered == "" && len(msgs) > 0 {
-					// Fallback if no template: just use last content
-					if text, ok := tokenizer.MessageText(msgs[len(msgs)-1]); ok {
-						rendered = text
-					} else {
-						return cli.Exit("error: prompt content is not a string and no template renderer matched", 1)
-					}
-				}
-
-				if echoPrompt && !interactive {
-					fmt.Printf("%s", rendered)
-				}
-
-				ids, err := tok.Encode(rendered)
+				rendered, err := inference.RenderPrompt(inference.PromptRenderInput{
+					TemplateOverride:    chatTemplate,
+					TokenizerConfig:     tokConfig,
+					Arch:                m.Config.Arch,
+					HFConfigJSON:        loadResult.HFConfigJSON,
+					Messages:            msgs,
+					Tools:               tools,
+					AddGenerationPrompt: true,
+					NoTemplate:          noTemplate,
+				})
 				if err != nil {
-					fmt.Fprintln(os.Stderr, "error: encode prompt:", err)
+					fmt.Fprintln(os.Stderr, "error: render prompt:", err)
 					break
 				}
 
 				if showTokens {
+					ids, err := tok.Encode(rendered)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "error: encode prompt:", err)
+						break
+					}
 					fmt.Fprintf(os.Stderr, "\nInput tokens (%d): %s\n", len(ids), joinInts(ids))
 				}
 
-				// Run generation
-				var responseBuilder strings.Builder
+				echoPromptVal := echoPrompt && !interactive
+				opts := baseOpts
+				opts.Messages = msgs
+				opts.Tools = tools
+				opts.EchoPrompt = &echoPromptVal
+				req := inference.ResolveRequest(opts, genDefaults)
 
-				_, stats, err := generator.Run(ids, int(steps), func(s string) {
+				var responseBuilder strings.Builder
+				result, err := loadResult.Engine.Generate(ctx, &req, func(s string) {
 					fmt.Print(s)
 					responseBuilder.WriteString(s)
 				})
@@ -654,7 +532,7 @@ func runCmd() *cli.Command {
 				}
 
 				fmt.Println() // Newline after generation
-				fmt.Fprintf(os.Stderr, "Stats: %.2f TPS (%d tokens in %s)\n", stats.TPS, stats.TokensGenerated, stats.Duration)
+				fmt.Fprintf(os.Stderr, "Stats: %.2f TPS (%d tokens in %s)\n", result.Stats.TPS, result.Stats.TokensGenerated, result.Stats.Duration)
 
 				// Append assistant response to history
 				msgs = append(msgs, tokenizer.Message{Role: "assistant", Content: responseBuilder.String()})
@@ -682,34 +560,6 @@ func joinInts(ids []int) string {
 	}
 	b.WriteByte(']')
 	return b.String()
-}
-
-func resolveChatTemplate(override string, cfg tokenizer.TokenizerConfig, arch string, hfConfig []byte) (string, string) {
-	template := strings.TrimSpace(override)
-	source := ""
-	switch {
-	case template != "":
-		source = "flag"
-	case strings.TrimSpace(cfg.ChatTemplate) != "":
-		template = cfg.ChatTemplate
-		source = "tokenizer_config"
-	default:
-		if inferred, ok := model.InferChatTemplate(arch, hfConfig); ok {
-			template = inferred
-			source = "model-default"
-		} else {
-			return "", "none"
-		}
-	}
-
-	// If the template looks like a path, load its contents.
-	if len(template) < 256 && fileExists(template) {
-		if raw, err := os.ReadFile(template); err == nil && len(raw) > 0 {
-			template = string(raw)
-			source += ":file"
-		}
-	}
-	return template, source
 }
 
 func fileExists(path string) bool {

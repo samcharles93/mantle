@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
 	"github.com/samcharles93/mantle/internal/api"
+	"github.com/samcharles93/mantle/internal/inference"
 	"github.com/urfave/cli/v3"
 )
 
@@ -37,7 +38,19 @@ func serveCmd() *cli.Command {
 		),
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			store := api.NewResponseStore()
-			server := api.NewServer(store)
+			loader := inference.Loader{
+				TokenizerJSONPath:   tokenizerJSONPath,
+				TokenizerConfigPath: tokenizerConfig,
+				ChatTemplatePath:    chatTemplate,
+			}
+			provider := api.NewCachedEngineProvider(api.EngineProviderConfig{
+				DefaultModelPath: modelPath,
+				ModelsPath:       modelsPath,
+				MaxContext:       int(maxContext),
+				Loader:           loader,
+			})
+			service := api.NewInferenceService(provider)
+			server := api.NewServer(store, service)
 			e := echo.New()
 			e.Use(middleware.RequestLogger())
 			e.Use(middleware.Recover())

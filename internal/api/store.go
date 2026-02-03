@@ -1,10 +1,10 @@
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type responseRecord struct {
@@ -24,56 +24,18 @@ func NewResponseStore() *ResponseStore {
 	}
 }
 
-func (s *ResponseStore) Create(req *ResponsesRequest, inputItems []ResponseItem, now time.Time) ResponsesResponse {
-	id := newResponseID()
-	resp := ResponsesResponse{
-		ID:                   id,
-		Object:               "response",
-		CreatedAt:            now.Unix(),
-		Status:               responseStatus(req),
-		Background:           req.Background,
-		Instructions:         req.Instructions,
-		MaxOutputTokens:      req.MaxOutputTokens,
-		MaxToolCalls:         req.MaxToolCalls,
-		Metadata:             req.Metadata,
-		Model:                req.Model,
-		ParallelToolCalls:    req.ParallelToolCalls,
-		PreviousResponseID:   req.PreviousResponseID,
-		Prompt:               req.Prompt,
-		PromptCacheKey:       req.PromptCacheKey,
-		PromptCacheRetention: req.PromptCacheRetention,
-		Reasoning:            req.Reasoning,
-		SafetyIdentifier:     req.SafetyIdentifier,
-		ServiceTier:          req.ServiceTier,
-		Store:                req.Store,
-		Temperature:          req.Temperature,
-		Text:                 req.Text,
-		ToolChoice:           req.ToolChoice,
-		Tools:                req.Tools,
-		TopP:                 req.TopP,
-		Truncation:           req.Truncation,
-	}
-
-	if resp.Status == "completed" {
-		completedAt := now.Unix()
-		resp.CompletedAt = &completedAt
-	}
-	resp.Output = []ResponseItem{}
-
+func (s *ResponseStore) Save(resp ResponsesResponse, inputItems []ResponseItem) {
 	visible := true
-	if req.Store != nil && !*req.Store {
+	if resp.Store != nil && !*resp.Store {
 		visible = false
 	}
-
 	s.mu.Lock()
-	s.responses[id] = &responseRecord{
+	s.responses[resp.ID] = &responseRecord{
 		Response:   resp,
 		InputItems: inputItems,
 		Visible:    visible,
 	}
 	s.mu.Unlock()
-
-	return resp
 }
 
 func (s *ResponseStore) Get(id string) (*responseRecord, bool) {
@@ -115,14 +77,9 @@ func (s *ResponseStore) Cancel(id string, now time.Time) (*ResponsesResponse, bo
 }
 
 func newResponseID() string {
-	b := make([]byte, 12)
-	_, _ = rand.Read(b)
-	return "resp_" + hex.EncodeToString(b)
+	return "resp_" + uuid.NewString()
 }
 
-func responseStatus(req *ResponsesRequest) string {
-	if req.Background != nil && *req.Background {
-		return "in_progress"
-	}
-	return "completed"
+func newOutputItemID() string {
+	return "msg_" + uuid.NewString()
 }

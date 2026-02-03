@@ -1,13 +1,12 @@
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
 
@@ -223,11 +222,5 @@ func asString(v any) (string, bool) {
 }
 
 func newInputItemID() string {
-	return "item_" + randomHex(8)
-}
-
-func randomHex(n int) string {
-	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	return "item_" + uuid.NewString()
 }

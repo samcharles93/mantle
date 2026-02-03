@@ -1,6 +1,7 @@
 package inference
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"time"
@@ -67,6 +68,10 @@ type Generator struct {
 }
 
 func (g *Generator) Run(allTokens []int, steps int, stream func(string)) ([]int, Stats, error) {
+	return g.RunWithContext(context.Background(), allTokens, steps, stream)
+}
+
+func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps int, stream func(string)) ([]int, Stats, error) {
 	var stats Stats
 	start := time.Now()
 
@@ -107,6 +112,9 @@ func (g *Generator) Run(allTokens []int, steps int, stream func(string)) ([]int,
 	}
 
 	for i := 0; i < limit; i++ {
+		if err := ctx.Err(); err != nil {
+			return g.ContextTokens, stats, err
+		}
 		next := g.Sampler.Sample(logitsVec, toks, g.StopTokens)
 
 		stop := slices.Contains(g.StopTokens, next)

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,17 +13,19 @@ import (
 )
 
 type Server struct {
-	store *ResponseStore
-	clock func() time.Time
+	store   *ResponseStore
+	service *InferenceService
+	clock   func() time.Time
 }
 
-func NewServer(store *ResponseStore) *Server {
+func NewServer(store *ResponseStore, service *InferenceService) *Server {
 	if store == nil {
 		store = NewResponseStore()
 	}
 	return &Server{
-		store: store,
-		clock: time.Now,
+		store:   store,
+		service: service,
+		clock:   time.Now,
 	}
 }
 
@@ -37,6 +40,9 @@ func (s *Server) Register(e *echo.Echo) {
 }
 
 func (s *Server) handleCreateResponse(c *echo.Context) error {
+	if s.service == nil {
+		return writeError(c, http.StatusInternalServerError, "server_error", "inference service not configured", "", "")
+	}
 	req, err := decodeJSON[ResponsesRequest](c.Request().Body)
 	if err != nil {
 		return writeBadRequest(c, err.Error())
@@ -48,20 +54,33 @@ func (s *Server) handleCreateResponse(c *echo.Context) error {
 		return writeBadRequest(c, "previous_response_id and conversation are mutually exclusive")
 	}
 
-	inputItems, err := normalizeInputItems(req.Input)
-	if err != nil {
-		return writeBadRequest(c, fmt.Sprintf("input: %v", err))
-	}
-
-	now := s.clock()
-	resp := s.store.Create(&req, inputItems, now)
-	resp.Output = []ResponseItem{}
-	resp.OutputText = ""
-
+	var writer *SSEStreamWriter
 	if req.Stream != nil && *req.Stream {
-		return s.writeSSE(c, resp, req.Background != nil && *req.Background)
+		w, err := NewSSEStreamWriter(c)
+		if err != nil {
+			return writeBadRequest(c, err.Error())
+		}
+		writer = w
 	}
 
+	resp, inputItems, err := s.service.CreateResponse(c.Request().Context(), &req, writer)
+	if err != nil {
+		if writer != nil && writer.Started() {
+			return nil
+		}
+		if errors.Is(err, ErrInvalidRequest) {
+			return writeBadRequest(c, err.Error())
+		}
+		return writeError(c, http.StatusInternalServerError, "server_error", err.Error(), "", "")
+	}
+
+	if resp != nil {
+		s.store.Save(*resp, inputItems)
+	}
+
+	if writer != nil {
+		return nil
+	}
 	return c.JSON(http.StatusOK, resp)
 }
 
@@ -208,20 +227,6 @@ func (s *Server) handleInputTokens(c *echo.Context) error {
 func streamParam(c *echo.Context) bool {
 	q := c.QueryParam("stream")
 	return q == "1" || strings.EqualFold(q, "true")
-}
-
-func parseStartingAfter(v string) int {
-	if v == "" {
-		return 0
-	}
-	n := 0
-	for _, r := range v {
-		if r < '0' || r > '9' {
-			return 0
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n
 }
 
 func (s *Server) writeSSE(c *echo.Context, resp ResponsesResponse, background bool) error {
