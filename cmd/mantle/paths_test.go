@@ -106,7 +106,7 @@ func TestDiscoverMCFModelsSorted(t *testing.T) {
 func TestResolveRunModelPath(t *testing.T) {
 	t.Run("model flag bypasses env", func(t *testing.T) {
 		t.Setenv(envMantleModelsDir, "")
-		got, err := resolveRunModelPath("/tmp/model.mcf", bytes.NewBuffer(nil), io.Discard)
+		got, err := resolveRunModelPath("/tmp/model.mcf", "", bytes.NewBuffer(nil), io.Discard)
 		if err != nil {
 			t.Fatalf("resolveRunModelPath returned error: %v", err)
 		}
@@ -127,7 +127,7 @@ func TestResolveRunModelPath(t *testing.T) {
 		stdinIsTTY = func() bool { return false }
 		defer func() { stdinIsTTY = prevTTY }()
 
-		got, err := resolveRunModelPath("", bytes.NewBuffer(nil), io.Discard)
+		got, err := resolveRunModelPath("", "", bytes.NewBuffer(nil), io.Discard)
 		if err != nil {
 			t.Fatalf("resolveRunModelPath returned error: %v", err)
 		}
@@ -149,7 +149,7 @@ func TestResolveRunModelPath(t *testing.T) {
 		stdinIsTTY = func() bool { return false }
 		defer func() { stdinIsTTY = prevTTY }()
 
-		if _, err := resolveRunModelPath("", bytes.NewBuffer(nil), io.Discard); err == nil {
+		if _, err := resolveRunModelPath("", "", bytes.NewBuffer(nil), io.Discard); err == nil {
 			t.Fatalf("expected error when multiple models and stdin is not a tty")
 		}
 	})
@@ -170,7 +170,7 @@ func TestResolveRunModelPath(t *testing.T) {
 		stdinIsTTY = func() bool { return true }
 		defer func() { stdinIsTTY = prevTTY }()
 
-		got, err := resolveRunModelPath("", bytes.NewBufferString("2\n"), io.Discard)
+		got, err := resolveRunModelPath("", "", bytes.NewBufferString("2\n"), io.Discard)
 		if err != nil {
 			t.Fatalf("resolveRunModelPath returned error: %v", err)
 		}

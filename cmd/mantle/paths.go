@@ -47,15 +47,18 @@ func resolvePackOut(inDir, outFlag string) (string, bool, error) {
 	return outPath, true, nil
 }
 
-func resolveRunModelPath(modelFlag string, stdin io.Reader, stderr io.Writer) (string, error) {
+func resolveRunModelPath(modelFlag string, modelsPath string, stdin io.Reader, stderr io.Writer) (string, error) {
 	modelFlag = strings.TrimSpace(modelFlag)
 	if modelFlag != "" {
 		return filepath.Clean(modelFlag), nil
 	}
 
-	modelsDir := strings.TrimSpace(os.Getenv(envMantleModelsDir))
+	modelsDir := strings.TrimSpace(modelsPath)
 	if modelsDir == "" {
-		return "", fmt.Errorf("--model is required unless %s is set", envMantleModelsDir)
+		modelsDir = strings.TrimSpace(os.Getenv(envMantleModelsDir))
+	}
+	if modelsDir == "" {
+		return "", fmt.Errorf("--model or --models-path is required unless %s is set", envMantleModelsDir)
 	}
 
 	models, err := discoverMCFModels(modelsDir)
