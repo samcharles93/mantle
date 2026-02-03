@@ -45,42 +45,45 @@ func (l Loader) Load(modelPath string, maxContext int) (*LoadResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = mcfFile.Close() }()
+	cleanup := func(err error) (*LoadResult, error) {
+		_ = mcfFile.Close()
+		return nil, err
+	}
 
 	cfgBytes := mcfFile.SectionData(mcf.SectionHFConfigJSON)
 	if l.HFConfigPath != "" {
 		override, err := os.ReadFile(l.HFConfigPath)
 		if err != nil {
-			return nil, fmt.Errorf("load hf config: %w", err)
+			return cleanup(fmt.Errorf("load hf config: %w", err))
 		}
 		if len(override) > 0 {
 			cfgBytes = override
 		}
 	}
 	if len(cfgBytes) == 0 {
-		return nil, fmt.Errorf("hf config.json not found in MCF (use --hf-config to override)")
+		return cleanup(fmt.Errorf("hf config.json not found in MCF (use --hf-config to override)"))
 	}
 
 	m, err := model.LoadModelMCF(mcfFile, cfgBytes, maxContext)
 	if err != nil {
-		return nil, err
+		return cleanup(err)
 	}
 
 	genDefaults := parseHFGenerationDefaults(mcfFile.SectionData(mcf.SectionHFGenerationConfigJSON))
 
 	tokJSON, tokCfg, err := l.loadTokenizerBytes(mcfFile)
 	if err != nil {
-		return nil, err
+		return cleanup(err)
 	}
 
 	hfTok, err := tokenizer.LoadHFTokenizerBytes(tokJSON, tokCfg)
 	if err != nil {
-		return nil, err
+		return cleanup(err)
 	}
 
 	tokCfgParsed, err := tokenizer.ParseHFTokenizerConfigBytes(tokJSON, tokCfg)
 	if err != nil {
-		return nil, err
+		return cleanup(err)
 	}
 	tokCfgParsed.BOSTokenID = hfTok.BOSID()
 	tokCfgParsed.AddBOS = hfTok.AddBOS()
@@ -89,6 +92,7 @@ func (l Loader) Load(modelPath string, maxContext int) (*LoadResult, error) {
 	stopTokens := BuildStopTokens(hfTok, tokCfgParsed)
 
 	engine := &EngineImpl{
+		mcfFile:          mcfFile,
 		model:            m,
 		tokenizer:        hfTok,
 		tokenizerConfig:  tokCfgParsed,

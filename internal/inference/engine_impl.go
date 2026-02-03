@@ -6,11 +6,13 @@ import (
 	"strings"
 
 	"github.com/samcharles93/mantle/internal/logits"
+	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
 type EngineImpl struct {
+	mcfFile          *mcfstore.File
 	model            *model.Instance
 	tokenizer        tokenizer.Tokenizer
 	tokenizerConfig  tokenizer.TokenizerConfig
@@ -21,7 +23,15 @@ type EngineImpl struct {
 }
 
 func (e *EngineImpl) Close() error {
-	return nil
+	if e == nil {
+		return nil
+	}
+	if e.mcfFile == nil {
+		return nil
+	}
+	err := e.mcfFile.Close()
+	e.mcfFile = nil
+	return err
 }
 
 func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFunc) (*Result, error) {
