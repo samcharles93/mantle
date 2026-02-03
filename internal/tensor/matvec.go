@@ -4,8 +4,9 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/samcharles93/mantle/pkg/mcf"
 	"simd/archsimd"
+
+	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
 type matVecTask struct {
@@ -24,10 +25,8 @@ type matVecWorker struct {
 	mu     sync.Mutex
 }
 
-// L1 and L2 cache sizes in bytes (conservative estimates)
 const (
-	l1CacheSize = 32 * 1024  // 32KB typical L1 cache
-	l2CacheSize = 256 * 1024 // 256KB typical L2 cache
+	l1CacheSize = 32 * 1024
 )
 
 // computeOptimalBatchSize calculates the optimal batch size for quantized matvec
@@ -36,23 +35,18 @@ func computeOptimalBatchSize(blocksPerRow int, totalRows int) int {
 	// Each row requires: blocksPerRow*32 bytes for qbuf + blocksPerRow*4 bytes for scales
 	bytesPerRow := blocksPerRow*32 + blocksPerRow*4
 
-	// Target fitting into L1 cache for best performance
-	// Reserve some space for other data (x vector, etc.)
-	const l1Reserved = 8 * 1024 // Reserve 8KB for other data
+	const l1Reserved = 8 * 1024
 	availableL1 := l1CacheSize - l1Reserved
 	if availableL1 <= 0 {
-		availableL1 = 8 * 1024 // Minimum 8KB
+		availableL1 = 8 * 1024
 	}
 
-	// Calculate maximum rows that fit in available L1 cache
 	maxRowsL1 := availableL1 / bytesPerRow
 	if maxRowsL1 <= 0 {
 		maxRowsL1 = 1
 	}
 
 	// Limit batch size to reasonable values
-	// Min batch size: 1 (for very large blocksPerRow)
-	// Max batch size: 16 (balance between cache efficiency and parallelization)
 	const minBatch = 1
 	const maxBatch = 16
 
