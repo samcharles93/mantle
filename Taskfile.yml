@@ -62,6 +62,14 @@ tasks:
     cmds:
       - bin/mantle run -m "$MANTLE_MODELS_DIR/{{.MODEL_NAME}}{{.MODEL_QUANT}}.mcf" --steps 128 --show-config --show-tokens --system "You are a helpful assistant." --prompt "In 100 words, tell me about you."
 
+  inspect:
+    desc: Inspect an MCF model container.
+    cmds:
+      - bin/mantle inspect -m "{{.MODEL_FILE}}"
+    preconditions:
+      - sh: '[ -n "{{.MODEL_FILE}}" ]'
+        msg: "Set MODEL_FILE=/path/to/model.mcf"
+
   run-interactive:
     env:
       MANTLE_MODELS_DIR: /work/models/mcf

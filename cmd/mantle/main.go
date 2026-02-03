@@ -19,6 +19,7 @@ func main() {
 			runCmd(),
 			packCmd(),
 			quantizeCmd(),
+			inspectCmd(),
 		},
 	}
 
