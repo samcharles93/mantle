@@ -113,7 +113,7 @@ func main() {
 	}
 
 	effectiveTemplate, _ := resolveChatTemplate(chatTemplate, tokCfg, arch, cfgBytes)
-	rendered := renderPrompt(prompt, system, tok, tokCfg, effectiveTemplate, noTemplate)
+	rendered := renderPrompt(prompt, system, tok, tokCfg, effectiveTemplate, noTemplate, arch)
 	if rendered == "" {
 		fmt.Fprintln(os.Stderr, "prompt is empty after rendering")
 		os.Exit(2)
@@ -364,7 +364,7 @@ func formatTop1Text(s string) string {
 	return fmt.Sprintf(" top1_text=%q", s)
 }
 
-func renderPrompt(prompt, system string, tok tokenizer.Tokenizer, cfg tokenizer.TokenizerConfig, template string, noTemplate bool) string {
+func renderPrompt(prompt, system string, tok tokenizer.Tokenizer, cfg tokenizer.TokenizerConfig, template string, noTemplate bool, arch string) string {
 	msgs := make([]tokenizer.Message, 0, 2)
 	if system != "" {
 		msgs = append(msgs, tokenizer.Message{Role: "system", Content: system})
@@ -373,18 +373,20 @@ func renderPrompt(prompt, system string, tok tokenizer.Tokenizer, cfg tokenizer.
 		msgs = append(msgs, tokenizer.Message{Role: "user", Content: prompt})
 	}
 
-	if !noTemplate && template != "" {
+	if !noTemplate {
 		bosToken := ""
 		if t, ok := tok.(interface{ TokenString(int) string }); ok {
 			bosToken = t.TokenString(cfg.BOSTokenID)
 		}
-		if s, ok := tokenizer.RenderPromptTemplate(template, bosToken, cfg.AddBOS, msgs, true); ok {
+		if s, ok, err := tokenizer.RenderPromptTemplate(template, bosToken, cfg.TokenString(cfg.EOSTokenID), cfg.AddBOS, msgs, nil, true, arch); err == nil && ok {
 			return s
 		}
 	}
 
 	if len(msgs) > 0 {
-		return msgs[len(msgs)-1].Content
+		if text, ok := tokenizer.MessageText(msgs[len(msgs)-1]); ok {
+			return text
+		}
 	}
 	return ""
 }
