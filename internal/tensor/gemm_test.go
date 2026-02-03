@@ -53,7 +53,8 @@ func TestGemmParMatchesNaive(t *testing.T) {
 	FillRand(&A, 1)
 	FillRand(&B, 2)
 	gemmNaive(&C0, &A, &B)
-	GemmPar(&C1, &A, &B, 1, 0, 4)
+	cfg := SelectGemmConfig(A.R, A.C, B.C)
+	GemmPar(cfg, &C1, &A, &B, 1, 0, 4)
 	if maxAbs := maxAbsDiff(C0.Data, C1.Data); maxAbs > 1e-3 {
 		t.Fatalf("max absolute difference too large: %g", maxAbs)
 	}
@@ -72,7 +73,8 @@ func TestGemmParAlphaBetaNonSquare(t *testing.T) {
 	alpha := float32(0.75)
 	beta := float32(0.6)
 	gemmNaiveAlphaBeta(&C0, &A, &B, alpha, beta)
-	GemmPar(&C1, &A, &B, alpha, beta, 3)
+	cfg := SelectGemmConfig(A.R, A.C, B.C)
+	GemmPar(cfg, &C1, &A, &B, alpha, beta, 3)
 
 	if maxAbs := maxAbsDiff(C0.Data, C1.Data); maxAbs > 1e-3 {
 		t.Fatalf("max absolute difference too large: %g", maxAbs)
@@ -83,11 +85,11 @@ func TestGemmParTileBoundaries(t *testing.T) {
 	cases := []struct {
 		m, k, n int
 	}{
-		{tileM - 1, tileK - 1, tileN - 1},
-		{tileM, tileK, tileN},
-		{tileM + 1, tileK + 1, tileN + 1},
-		{tileM - 1, tileK + 1, tileN + 1},
-		{tileM + 1, tileK - 1, tileN - 1},
+		{defaultTileM - 1, defaultTileK - 1, defaultTileN - 1},
+		{defaultTileM, defaultTileK, defaultTileN},
+		{defaultTileM + 1, defaultTileK + 1, defaultTileN + 1},
+		{defaultTileM - 1, defaultTileK + 1, defaultTileN + 1},
+		{defaultTileM + 1, defaultTileK - 1, defaultTileN - 1},
 	}
 
 	for _, tc := range cases {
@@ -102,7 +104,8 @@ func TestGemmParTileBoundaries(t *testing.T) {
 		FillRand(&B, 12)
 
 		gemmNaiveAlphaBeta(&C0, &A, &B, 1, 0)
-		GemmPar(&C1, &A, &B, 1, 0, 2)
+		cfg := SelectGemmConfig(A.R, A.C, B.C)
+		GemmPar(cfg, &C1, &A, &B, 1, 0, 2)
 
 		if maxAbs := maxAbsDiff(C0.Data, C1.Data); maxAbs > 1e-3 {
 			t.Fatalf("tile case m=%d k=%d n=%d max diff %g", tc.m, tc.k, tc.n, maxAbs)
@@ -119,8 +122,9 @@ func TestGemmParNoAllocs(t *testing.T) {
 	C := NewMat(16, 16)
 	FillRand(&A, 3)
 	FillRand(&B, 4)
+	cfg := SelectGemmConfig(A.R, A.C, B.C)
 	allocs := testing.AllocsPerRun(100, func() {
-		GemmPar(&C, &A, &B, 1, 0, 2)
+		GemmPar(cfg, &C, &A, &B, 1, 0, 2)
 	})
 	if allocs != 0 {
 		t.Fatalf("GemmPar allocated %v times (expected 0)", allocs)
@@ -140,11 +144,12 @@ func BenchmarkGemmPar(b *testing.B) {
 	C := NewMat(m, n)
 	FillRand(&A, 7)
 	FillRand(&B, 8)
+	cfg := SelectGemmConfig(A.R, A.C, B.C)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		GemmPar(&C, &A, &B, 1, 0, 0)
+		GemmPar(cfg, &C, &A, &B, 1, 0, 0)
 	}
 }
 
@@ -160,21 +165,19 @@ func BenchmarkGemmParTileKSweep(b *testing.B) {
 	FillRand(&A, 7)
 	FillRand(&B, 8)
 
-	origK := tileK
-	b.Cleanup(func() {
-		tileK = origK
-	})
+	cfg := SelectGemmConfig(A.R, A.C, B.C)
 
 	for _, tk := range []int{4, 8, 12, 16, 24, 32, 48, 64} {
 		if tk > maxTileK {
 			continue
 		}
 		b.Run("K"+itoa(tk), func(b *testing.B) {
-			tileK = tk
+			localCfg := cfg
+			localCfg.TileK = tk
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				GemmPar(&C, &A, &B, 1, 0, 0)
+				GemmPar(localCfg, &C, &A, &B, 1, 0, 0)
 			}
 		})
 	}
