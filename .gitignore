@@ -1,8 +1,5 @@
 bin/*
-./infer
 work/*
-bin/infer
-./bin/infer
-./bin/rlvr
-./bin/gguf_inspect
+.claude/
+.gemini/
 .task/
