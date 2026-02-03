@@ -37,6 +37,13 @@ tasks:
     generates:
       - bin/mantle
 
+  build-logdiff:
+    env:
+      GOEXPERIMENT: simd
+    desc: Build the logdiff tool for inspecting quantisation performance.
+    cmds:
+      - "{{.GO}} build -o bin/logdiff -ldflags=\"-w -s\" -trimpath ./cmd/logdiff"
+
   pack:
     desc: Pack a model into the model container format.
     cmds:
