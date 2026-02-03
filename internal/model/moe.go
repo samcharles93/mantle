@@ -98,7 +98,7 @@ func selectTopK(selScores, rawScores []float32, k int, routeScale float32, idxOu
 
 // selectTopKSmall uses partial selection for small k values (k <= 8).
 func selectTopKSmall(selScores, rawScores []float32, k int, routeScale float32, idxOut []int, wOut []float32) {
-	var bestIdx   [8]int
+	var bestIdx [8]int
 	var bestScore [8]float32
 
 	for i := range k {
