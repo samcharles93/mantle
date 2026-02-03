@@ -71,11 +71,10 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 
 	if layout.family == 'q' {
 		scalesRaw := m.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
-		scalesU16, scalesOK := rawUint16LE(scalesRaw)
 		data := m.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
 
-		for blockIdx := 0; blockIdx < totalBlocks; blockIdx++ {
-			scale := scaleAt(scalesU16, scalesRaw, blockIdx, scalesOK)
+		for blockIdx := range totalBlocks {
+			scale := scaleAtRawLE(scalesRaw, blockIdx)
 			scales[blockIdx] = scale
 			if scale == 0 {
 				continue
@@ -92,7 +91,6 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 	}
 
 	superRaw := m.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
-	superU16, superOK := rawUint16LE(superRaw)
 	subRaw := m.Raw[layout.subScaleOff : layout.subScaleOff+layout.subScaleCount]
 	data := m.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
 
@@ -102,7 +100,7 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 		for b := 0; b < layout.blocksPerRow; b++ {
 			blockIdx := blockBase + b
 			superIdx := superBase + (b / 8)
-			superScale := scaleAt(superU16, superRaw, superIdx, superOK)
+			superScale := scaleAtRawLE(superRaw, superIdx)
 			u6 := subRaw[blockIdx] & 0x3F
 			if superScale == 0 || u6 == 0 {
 				continue
