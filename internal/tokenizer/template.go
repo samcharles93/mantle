@@ -1,79 +1,49 @@
 package tokenizer
 
-import (
-	"strings"
-)
-
-// Message represents a chat message for template rendering.
-type Message struct {
-	Role    string
-	Content string
-}
+import "github.com/samcharles93/mantle/internal/tplparser"
 
 // RenderPrompt renders messages using the model's chat template.
-func RenderPrompt(cfg TokenizerConfig, msgs []Message, addGenerationPrompt bool) (string, bool) {
-	return RenderPromptTemplate(cfg.ChatTemplate, cfg.TokenString(cfg.BOSTokenID), cfg.AddBOS, msgs, addGenerationPrompt)
+func RenderPrompt(cfg TokenizerConfig, arch string, msgs []Message, tools []any, addGenerationPrompt bool) (string, bool, error) {
+	return RenderPromptTemplate(cfg.ChatTemplate, cfg.TokenString(cfg.BOSTokenID), cfg.TokenString(cfg.EOSTokenID), cfg.AddBOS, msgs, tools, addGenerationPrompt, arch)
 }
 
 // RenderPromptTemplate renders messages using a Jinja template string.
-func RenderPromptTemplate(tpl, bosToken string, addBOS bool, msgs []Message, addGenerationPrompt bool) (string, bool) {
-	if tpl == "" {
-		return "", false
+func RenderPromptTemplate(tpl, bosToken, eosToken string, addBOS bool, msgs []Message, tools []any, addGenerationPrompt bool, arch string) (string, bool, error) {
+	parserMsgs := make([]tplparser.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		parserMsgs = append(parserMsgs, tplparser.Message{
+			Role:      msg.Role,
+			Content:   msg.Content,
+			Name:      msg.Name,
+			ToolCalls: toTplToolCalls(msg.ToolCalls),
+		})
 	}
-	// Only handle the LFM2 ChatML-like template for now.
-	if !strings.Contains(tpl, "<|im_start|>") || !strings.Contains(tpl, "<|im_end|>") {
-		return "", false
-	}
-	if !strings.Contains(tpl, "messages") {
-		return "", false
-	}
-	return renderLFM2TemplateFromString(tpl, bosToken, addBOS, msgs, addGenerationPrompt), true
+	return tplparser.Render(tplparser.RenderOptions{
+		Template:            tpl,
+		Arch:                arch,
+		BOSToken:            bosToken,
+		EOSToken:            eosToken,
+		AddBOS:              addBOS,
+		AddGenerationPrompt: addGenerationPrompt,
+		Messages:            parserMsgs,
+		Tools:               tools,
+	})
 }
 
-func renderLFM2TemplateFromString(tpl string, bosToken string, addBOS bool, msgs []Message, addGenerationPrompt bool) string {
-	var b strings.Builder
-
-	// The template includes bos_token; avoid duplication if tokenizer already adds BOS.
-	if strings.Contains(tpl, "bos_token") && !addBOS && bosToken != "" {
-		b.WriteString(bosToken)
+func toTplToolCalls(calls []ToolCall) []tplparser.ToolCall {
+	if len(calls) == 0 {
+		return nil
 	}
-
-	// Extract system prompt if first message is system.
-	var systemPrompt string
-	if len(msgs) > 0 && msgs[0].Role == "system" {
-		systemPrompt = msgs[0].Content
-		msgs = msgs[1:]
+	out := make([]tplparser.ToolCall, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, tplparser.ToolCall{
+			ID:   call.ID,
+			Type: call.Type,
+			Function: tplparser.ToolCallFunction{
+				Name:      call.Function.Name,
+				Arguments: call.Function.Arguments,
+			},
+		})
 	}
-	if systemPrompt != "" {
-		b.WriteString("<|im_start|>system\n")
-		b.WriteString(systemPrompt)
-		b.WriteString("<|im_end|>\n")
-	}
-
-	// Find last assistant index for keep_past_thinking handling.
-	lastAssistant := -1
-	for i, m := range msgs {
-		if m.Role == "assistant" {
-			lastAssistant = i
-		}
-	}
-
-	for i, m := range msgs {
-		content := m.Content
-		// Apply the template's keep_past_thinking default (false).
-		if m.Role == "assistant" && i != lastAssistant {
-			if cut := strings.LastIndex(content, "</think>"); cut >= 0 {
-				content = strings.TrimSpace(content[cut+len("</think>"):])
-			}
-		}
-		b.WriteString("<|im_start|>")
-		b.WriteString(m.Role)
-		b.WriteString("\n")
-		b.WriteString(content)
-		b.WriteString("<|im_end|>\n")
-	}
-	if addGenerationPrompt && strings.Contains(tpl, "add_generation_prompt") {
-		b.WriteString("<|im_start|>assistant\n")
-	}
-	return b.String()
+	return out
 }
