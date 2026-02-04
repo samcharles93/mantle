@@ -2,6 +2,7 @@ package inference
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -13,7 +14,7 @@ import (
 
 type EngineImpl struct {
 	mcfFile          *mcfstore.File
-	model            *model.Instance
+	model            model.Model
 	tokenizer        tokenizer.Tokenizer
 	tokenizerConfig  tokenizer.TokenizerConfig
 	arch             string
@@ -26,12 +27,21 @@ func (e *EngineImpl) Close() error {
 	if e == nil {
 		return nil
 	}
-	if e.mcfFile == nil {
-		return nil
+	var errs []error
+	if e.model != nil {
+		if closer, ok := e.model.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil {
+				errs = append(errs, err)
+			}
+		}
 	}
-	err := e.mcfFile.Close()
-	e.mcfFile = nil
-	return err
+	if e.mcfFile != nil {
+		if err := e.mcfFile.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		e.mcfFile = nil
+	}
+	return errors.Join(errs...)
 }
 
 func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFunc) (*Result, error) {

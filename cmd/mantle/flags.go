@@ -6,6 +6,7 @@ var (
 	modelPath         string
 	modelsPath        string
 	maxContext        int64
+	backend           string
 	tokenizerJSONPath string
 	tokenizerConfig   string
 	chatTemplate      string
@@ -31,6 +32,12 @@ func commonModelFlags() []cli.Flag {
 			Usage:       "max context length",
 			Value:       4096,
 			Destination: &maxContext,
+		},
+		&cli.StringFlag{
+			Name:        "backend",
+			Usage:       "execution backend (auto, cpu, cuda)",
+			Value:       "auto",
+			Destination: &backend,
 		},
 	}
 }

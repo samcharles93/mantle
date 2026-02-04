@@ -59,7 +59,7 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 
 	// output norm
 	tensor.RMSNorm(m.scratch.tmp, x, m.OutputNorm, m.RMSEpsilon)
-	tensor.MatVec(m.scratch.logits, m.Output, m.scratch.tmp)
+	ensureOps(m.ops).MatVec(m.scratch.logits, m.Output, m.scratch.tmp)
 
 	m.Pos++
 	return m.scratch.logits, nil

@@ -84,6 +84,15 @@ To run the model *only on CPU* you just need to use the `mantle run` command wit
 GOEXPERIMENT=simd go1.26rc2 build -o bin/mantle ./cmd/mantle
 ````
 
+### CUDA Build Notes
+The CUDA CGO integration expects the CUDA runtime and cuBLAS to be discoverable by the linker. If your toolkit libraries live outside the default search path, set `CGO_LDFLAGS` and `LD_LIBRARY_PATH` before building or testing with `-tags=cuda`:
+
+```bash
+export CGO_LDFLAGS="-L/path/to/cuda/lib64"
+export LD_LIBRARY_PATH="/path/to/cuda/lib64:$LD_LIBRARY_PATH"
+GOEXPERIMENT=simd go1.26rc2 test -tags=cuda ./internal/backend/cuda/native
+```
+
 To use the CLI:
 ### Run
 

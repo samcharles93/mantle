@@ -6,6 +6,7 @@
     "go.toolsEnvVars": {
         "GOEXPERIMENT": "simd"
     },
+    "go.buildTags": "cuda",
     "gopls": {
         "build.env": {
             "GOEXPERIMENT": "simd"

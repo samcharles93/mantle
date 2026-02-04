@@ -15,12 +15,12 @@ func (m *Instance) ffnProject(up, gate, down *tensor.Mat, x []float32) []float32
 	gateBuf := m.scratch.ffnGate[:intermediate]
 	actBuf := m.scratch.ffnAct[:intermediate]
 
-	tensor.MatVec(upBuf, up, x)
-	tensor.MatVec(gateBuf, gate, x)
+	ensureOps(m.ops).MatVec(upBuf, up, x)
+	ensureOps(m.ops).MatVec(gateBuf, gate, x)
 	for i := range actBuf {
 		actBuf[i] = tensor.Silu(gateBuf[i]) * upBuf[i]
 	}
-	tensor.MatVec(m.scratch.tmp2, down, actBuf)
+	ensureOps(m.ops).MatVec(m.scratch.tmp2, down, actBuf)
 	return m.scratch.tmp2
 }
 
@@ -45,7 +45,7 @@ func (m *Instance) moe(layer *Layer, x []float32) []float32 {
 	if len(raw) != len(sel) || len(raw) != len(moe.Experts) {
 		panic("router scratch buffers do not match expert count")
 	}
-	tensor.MatVec(raw, moe.Router, x)
+	ensureOps(m.ops).MatVec(raw, moe.Router, x)
 	for i := range raw {
 		raw[i] = tensor.Sigmoid(raw[i])
 		bias := float32(0)

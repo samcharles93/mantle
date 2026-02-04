@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/samcharles93/mantle/internal/backend"
+	"github.com/samcharles93/mantle/internal/backend/cpu"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
@@ -17,11 +19,12 @@ type Loader struct {
 	TokenizerConfigPath string
 	ChatTemplatePath    string
 	HFConfigPath        string
+	Backend             string
 }
 
 type LoadResult struct {
 	Engine             Engine
-	Model              *model.Instance
+	Runtime            model.Runtime
 	Tokenizer          tokenizer.Tokenizer
 	TokenizerConfig    tokenizer.TokenizerConfig
 	HFConfigJSON       []byte
@@ -40,7 +43,6 @@ func (l Loader) Load(modelPath string, maxContext int) (*LoadResult, error) {
 	if strings.TrimSpace(modelPath) == "" {
 		return nil, fmt.Errorf("model path is required")
 	}
-
 	mcfFile, err := mcfstore.Open(modelPath)
 	if err != nil {
 		return nil, err
@@ -64,9 +66,43 @@ func (l Loader) Load(modelPath string, maxContext int) (*LoadResult, error) {
 		return cleanup(fmt.Errorf("hf config.json not found in MCF (use --hf-config to override)"))
 	}
 
-	m, err := model.LoadModelMCF(mcfFile, cfgBytes, maxContext)
+	backendName, err := backend.Normalize(l.Backend)
 	if err != nil {
 		return cleanup(err)
+	}
+
+	var runtime backend.Backend
+	switch backendName {
+	case backend.CPU:
+		runtime = cpu.New()
+	case backend.CUDA:
+		runtime, err = backend.NewCUDA()
+		if err != nil {
+			return cleanup(err)
+		}
+		fmt.Fprintln(os.Stderr, "CUDA backend active")
+	case backend.Auto:
+		runtime, err = backend.NewCUDA()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "CUDA backend unavailable (%v), using CPU\n", err)
+			runtime = cpu.New()
+		} else {
+			fmt.Fprintln(os.Stderr, "CUDA backend active")
+		}
+	default:
+		return cleanup(fmt.Errorf("unknown backend %q (expected auto, cpu, or cuda)", backendName))
+	}
+
+	modelRuntime, err := runtime.LoadModel(mcfFile, cfgBytes, maxContext)
+	if err != nil {
+		return cleanup(err)
+	}
+	if modelRuntime == nil {
+		return cleanup(fmt.Errorf("backend %q returned nil model runtime", runtime.Name()))
+	}
+	modelConfig := modelRuntime.ModelConfig()
+	if modelConfig == nil {
+		return cleanup(fmt.Errorf("backend %q returned nil model config", runtime.Name()))
 	}
 
 	genDefaults := parseHFGenerationDefaults(mcfFile.SectionData(mcf.SectionHFGenerationConfigJSON))
@@ -93,10 +129,10 @@ func (l Loader) Load(modelPath string, maxContext int) (*LoadResult, error) {
 
 	engine := &EngineImpl{
 		mcfFile:          mcfFile,
-		model:            m,
+		model:            modelRuntime,
 		tokenizer:        hfTok,
 		tokenizerConfig:  tokCfgParsed,
-		arch:             m.Config.Arch,
+		arch:             modelConfig.Arch,
 		hfConfigJSON:     cfgBytes,
 		chatTemplatePath: l.ChatTemplatePath,
 		stopTokens:       stopTokens,
@@ -104,12 +140,12 @@ func (l Loader) Load(modelPath string, maxContext int) (*LoadResult, error) {
 
 	return &LoadResult{
 		Engine:             engine,
-		Model:              m,
+		Runtime:            modelRuntime,
 		Tokenizer:          hfTok,
 		TokenizerConfig:    tokCfgParsed,
 		HFConfigJSON:       cfgBytes,
 		GenerationDefaults: genDefaults,
-		Arch:               m.Config.Arch,
+		Arch:               modelConfig.Arch,
 	}, nil
 }
 

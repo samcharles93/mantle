@@ -495,6 +495,7 @@ func loadModelFromSource(cfg *hfConfig, spec *archSpec, src tensorSource, maxCon
 		muPScale:      muPScale,
 		ropeLocalOnly: spec.RopeLocalOnly,
 	}
+	m.ops = defaultOps{}
 	m.initScratch()
 	m.UpdateRoPE()
 	return m, nil
@@ -973,9 +974,9 @@ func (m *Instance) attention(layer *Layer, x []float32, pos int) []float32 {
 		qx = tensor.PrepareQuantVec(x)
 		defer tensor.ReleaseQuantVec(qx)
 	}
-	tensor.MatVecWithQuant(q, layer.Wq, x, qx)
-	tensor.MatVecWithQuant(k, layer.Wk, x, qx)
-	tensor.MatVecWithQuant(v, layer.Wv, x, qx)
+	ensureOps(m.ops).MatVecWithQuant(q, layer.Wq, x, qx)
+	ensureOps(m.ops).MatVecWithQuant(k, layer.Wk, x, qx)
+	ensureOps(m.ops).MatVecWithQuant(v, layer.Wv, x, qx)
 
 	if len(layer.WqBias) > 0 {
 		tensor.Add(q, layer.WqBias)
@@ -1074,18 +1075,18 @@ func (m *Instance) attention(layer *Layer, x []float32, pos int) []float32 {
 
 	if layer.AttnGate != nil {
 		gate := m.scratch.attnGate[:nHead*headDim]
-		tensor.MatVecWithQuant(gate, layer.AttnGate, x, qx)
+		ensureOps(m.ops).MatVecWithQuant(gate, layer.AttnGate, x, qx)
 		for i := range gate {
 			attnOut[i] *= tensor.Sigmoid(gate[i])
 		}
 	}
-	tensor.MatVec(m.scratch.attnProj, layer.Wo, attnOut[:nHead*headDim])
+	ensureOps(m.ops).MatVec(m.scratch.attnProj, layer.Wo, attnOut[:nHead*headDim])
 	return m.scratch.attnProj
 }
 
 func (m *Instance) shortconv(layer *Layer, x []float32) []float32 {
 	embd := m.Config.Config.EmbeddingLength
-	tensor.MatVec(m.scratch.scProj, layer.ShortConvInProj, x)
+	ensureOps(m.ops).MatVec(m.scratch.scProj, layer.ShortConvInProj, x)
 	b := m.scratch.scProj[:embd]
 	c := m.scratch.scProj[embd : 2*embd]
 	xg := m.scratch.scProj[2*embd:]
@@ -1122,7 +1123,7 @@ func (m *Instance) shortconv(layer *Layer, x []float32) []float32 {
 	for i := range embd {
 		m.scratch.tmp2[i] = c[i] * convOut[i]
 	}
-	tensor.MatVec(m.scratch.tmp, layer.ShortConvOutProj, m.scratch.tmp2)
+	ensureOps(m.ops).MatVec(m.scratch.tmp, layer.ShortConvOutProj, m.scratch.tmp2)
 	return m.scratch.tmp
 }
 
@@ -1132,12 +1133,12 @@ func (m *Instance) ffn(layer *Layer, x []float32) []float32 {
 		qx = tensor.PrepareQuantVec(x)
 		defer tensor.ReleaseQuantVec(qx)
 	}
-	tensor.MatVecWithQuant(m.scratch.ffnUp, layer.FfnUp, x, qx)
-	tensor.MatVecWithQuant(m.scratch.ffnGate, layer.FfnGate, x, qx)
+	ensureOps(m.ops).MatVecWithQuant(m.scratch.ffnUp, layer.FfnUp, x, qx)
+	ensureOps(m.ops).MatVecWithQuant(m.scratch.ffnGate, layer.FfnGate, x, qx)
 	for i := range m.scratch.ffnAct {
 		m.scratch.ffnAct[i] = tensor.Silu(m.scratch.ffnGate[i]) * m.scratch.ffnUp[i]
 	}
-	tensor.MatVec(m.scratch.tmp2, layer.FfnDown, m.scratch.ffnAct)
+	ensureOps(m.ops).MatVec(m.scratch.tmp2, layer.FfnDown, m.scratch.ffnAct)
 	return m.scratch.tmp2
 }
 

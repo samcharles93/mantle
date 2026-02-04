@@ -86,6 +86,21 @@ type Instance struct {
 	attnPool     *attnPool
 
 	scratch scratchBuffers
+	ops     Ops
+}
+
+func (m *Instance) ModelConfig() *ModelConfig {
+	if m == nil {
+		return nil
+	}
+	return m.Config
+}
+
+func (m *Instance) SetOps(ops Ops) {
+	if m == nil {
+		return
+	}
+	m.ops = ops
 }
 
 type Layer struct {

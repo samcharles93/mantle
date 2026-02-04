@@ -270,27 +270,32 @@ func runCmd() *cli.Command {
 				TokenizerConfigPath: tokenizerConfig,
 				ChatTemplatePath:    chatTemplate,
 				HFConfigPath:        hfConfigFile,
+				Backend:             backend,
 			}
 			loadResult, err := loader.Load(modelPath, int(maxContext))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)
 			}
 			defer func() { _ = loadResult.Engine.Close() }()
-			m := loadResult.Model
-			m.Config.Config.CacheTypeK = c.String("cache-type-k")
-			m.Config.Config.CacheTypeV = c.String("cache-type-v")
+			runtimeModel := loadResult.Runtime
+			modelCfg := runtimeModel.ModelConfig()
+			if modelCfg == nil {
+				return cli.Exit("error: backend returned nil model config", 1)
+			}
+			modelCfg.Config.CacheTypeK = c.String("cache-type-k")
+			modelCfg.Config.CacheTypeV = c.String("cache-type-v")
 
 			// RoPE Scaling Overrides
 			ropeOverride := false
 			if c.IsSet("rope-freq-base") {
-				m.Config.Config.RopeFreqBase = c.Float("rope-freq-base")
+				modelCfg.Config.RopeFreqBase = c.Float("rope-freq-base")
 				ropeOverride = true
 			}
 			if c.IsSet("rope-scaling") || c.IsSet("rope-scale") || c.IsSet("yarn-orig-ctx") {
-				if m.Config.Config.RopeScaling == nil {
-					m.Config.Config.RopeScaling = &model.RopeScaling{}
+				if modelCfg.Config.RopeScaling == nil {
+					modelCfg.Config.RopeScaling = &model.RopeScaling{}
 				}
-				rs := m.Config.Config.RopeScaling
+				rs := modelCfg.Config.RopeScaling
 				if c.IsSet("rope-scaling") {
 					rs.Type = c.String("rope-scaling")
 				}
@@ -316,16 +321,16 @@ func runCmd() *cli.Command {
 			}
 
 			if ropeOverride {
-				m.UpdateRoPE()
+				runtimeModel.UpdateRoPE()
 			}
 
-			genConfig := &m.Config.Config
+			genConfig := &modelCfg.Config
 			tok := loadResult.Tokenizer
 			tokConfig := loadResult.TokenizerConfig
 			genDefaults := loadResult.GenerationDefaults
 
 			// Resolve effective chat template once for show-config and rendering.
-			effectiveTemplate, templateSource := inference.ResolveChatTemplate(chatTemplate, tokConfig, m.Config.Arch, loadResult.HFConfigJSON)
+			effectiveTemplate, templateSource := inference.ResolveChatTemplate(chatTemplate, tokConfig, modelCfg.Arch, loadResult.HFConfigJSON)
 			isSet := func(names ...string) bool {
 				for _, n := range names {
 					if c.IsSet(n) {
@@ -387,7 +392,7 @@ func runCmd() *cli.Command {
 			repeatPenalty = previewReq.RepeatPenalty
 
 			if showConfig {
-				fmt.Fprintf(os.Stderr, "MCF | arch=%s\n", m.Config.Arch)
+				fmt.Fprintf(os.Stderr, "MCF | arch=%s\n", modelCfg.Arch)
 
 				fmt.Fprintf(os.Stderr, "blocks=%d embd=%d ffn=%d heads=%d head_dim=%d vocab=%d ctx=%d\n",
 					genConfig.BlockCount,
@@ -493,7 +498,7 @@ func runCmd() *cli.Command {
 				rendered, err := inference.RenderPrompt(inference.PromptRenderInput{
 					TemplateOverride:    chatTemplate,
 					TokenizerConfig:     tokConfig,
-					Arch:                m.Config.Arch,
+					Arch:                modelCfg.Arch,
 					HFConfigJSON:        loadResult.HFConfigJSON,
 					Messages:            msgs,
 					Tools:               tools,

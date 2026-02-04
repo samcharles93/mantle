@@ -42,6 +42,7 @@ func serveCmd() *cli.Command {
 				TokenizerJSONPath:   tokenizerJSONPath,
 				TokenizerConfigPath: tokenizerConfig,
 				ChatTemplatePath:    chatTemplate,
+				Backend:             backend,
 			}
 			provider := api.NewCachedEngineProvider(api.EngineProviderConfig{
 				DefaultModelPath: modelPath,
