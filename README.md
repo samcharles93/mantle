@@ -11,6 +11,55 @@ There's 2 sides of this repo:
 - Mantle: the runtime and tooling for model execution
 - MCF: a single-file, random-access container format for model data (raw or quantised), designed to be efficient with mmap where available.
 
+## It works, but...
+
+
+Quantisation needs work to improve the speed.
+
+```shell
+bin/mantle run -m "$MANTLE_MODELS_DIR/Qwen3-0.6B.mcf" --steps 128 --show-config --show-tokens --system "You are a helpful assistant." --prompt "In 100 words, tell me about you."
+Loading MCF model: /work/models/mcf/Qwen3-0.6B.mcf
+Model loaded in 437.979357ms
+MCF | arch=qwen3
+blocks=28 embd=1024 ffn=3072 heads=16 head_dim=128 vocab=151936 ctx=40960
+rope: base=1e+06 scaling=none
+HeadCountKV: [8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8]
+sampling: temp=0.6 (generation_config) top_k=20 (generation_config) top_p=0.95 (generation_config) repeat_penalty=1.1 (default)
+chat_template: tokenizer_config
+
+Input tokens (31): [151644, 8948, 198, 2610, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 641, 220, 16, 15, 15, 4244, 11, 3291, 752, 911, 498, 13, 151645, 198, 151644, 77091, 198]
+<think>
+Okay, the user wants me to describe myself in 100 words. Let me start by recalling my role as an AI assistant. I'm designed to provide information, answer questions, and support users. I should mention my purpose clearly but keep it concise.
+
+I need to highlight that I'm here to help and assist. Also, emphasize that I don't have a physical form or personality, which is important for maintaining trust. Mentioning the variety of topics I can handle shows that I'm versatile. Finally, end with a friendly note to ensure the user feels comfortable using me.
+</think>
+
+I am an AI assistant designed
+Stats: 8.20 TPS (128 tokens in 15.606648717s)
+```
+
+```shell
+task run                                                                                                                                       (base)
+task: [run] bin/mantle run -m "$MANTLE_MODELS_DIR/Qwen3-0.6B.k4.mcf" --steps 128 --show-config --show-tokens --system "You are a helpful assistant." --prompt "In 100 words, tell me about you."
+Loading MCF model: /work/models/mcf/Qwen3-0.6B.k4.mcf
+Model loaded in 701.666565ms
+MCF | arch=qwen3
+blocks=28 embd=1024 ffn=3072 heads=16 head_dim=128 vocab=151936 ctx=40960
+rope: base=1e+06 scaling=none
+HeadCountKV: [8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8]
+sampling: temp=0.6 (generation_config) top_k=20 (generation_config) top_p=0.95 (generation_config) repeat_penalty=1.1 (default)
+chat_template: tokenizer_config
+
+Input tokens (31): [151644, 8948, 198, 2610, 525, 264, 10950, 17847, 13, 151645, 198, 151644, 872, 198, 641, 220, 16, 15, 15, 4244, 11, 3291, 752, 911, 498, 13, 151645, 198, 151644, 77091, 198]
+<think>
+Okay, the user wants to know something in 100 words about me. Let me start by identifying what I need here. Since I'm an AI assistant, my main task is to process and analyze data efficiently.
+
+First, I should mention that I am an AI system designed to assist with various tasks. Next, I can highlight how I process and understand information from different sources. It's important to note that I don't have personal experiences or feelings, which adds a professional touch. Also, emphasizing my ability to provide accurate information is key here.
+
+I need to keep the response concise but comprehensive within the word limit.
+Stats: 3.20 TPS (128 tokens in 40.039700112s)
+```
+
 ## This repo is:
 
 A big experiment to see what's possible in pure Go. and it was fun, it works!, and it's fairly decent for small models.
