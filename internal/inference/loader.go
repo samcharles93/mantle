@@ -1,6 +1,7 @@
 package inference
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/samcharles93/mantle/internal/backend"
 	"github.com/samcharles93/mantle/internal/backend/cpu"
+	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
@@ -39,7 +41,9 @@ type GenDefaults struct {
 	RepetitionPenalty *float64
 }
 
-func (l Loader) Load(modelPath string, maxContext int) (*LoadResult, error) {
+func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*LoadResult, error) {
+	log := logger.FromContext(ctx)
+
 	if strings.TrimSpace(modelPath) == "" {
 		return nil, fmt.Errorf("model path is required")
 	}
@@ -75,19 +79,20 @@ func (l Loader) Load(modelPath string, maxContext int) (*LoadResult, error) {
 	switch backendName {
 	case backend.CPU:
 		runtime = cpu.New()
+		log.Info("backend selected", "backend", "cpu")
 	case backend.CUDA:
 		runtime, err = backend.NewCUDA()
 		if err != nil {
 			return cleanup(err)
 		}
-		fmt.Fprintln(os.Stderr, "CUDA backend active")
+		log.Info("backend selected", "backend", "cuda")
 	case backend.Auto:
 		runtime, err = backend.NewCUDA()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "CUDA backend unavailable (%v), using CPU\n", err)
+			log.Warn("CUDA backend unavailable, using CPU", "error", err)
 			runtime = cpu.New()
 		} else {
-			fmt.Fprintln(os.Stderr, "CUDA backend active")
+			log.Info("backend selected", "backend", "cuda")
 		}
 	default:
 		return cleanup(fmt.Errorf("unknown backend %q (expected auto, cpu, or cuda)", backendName))

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -10,6 +9,7 @@ import (
 	"github.com/labstack/echo/v5/middleware"
 	"github.com/samcharles93/mantle/internal/api"
 	"github.com/samcharles93/mantle/internal/inference"
+	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/urfave/cli/v3"
 )
 
@@ -37,6 +37,8 @@ func serveCmd() *cli.Command {
 			},
 		),
 		Action: func(ctx context.Context, cmd *cli.Command) error {
+			log := logger.FromContext(ctx)
+
 			store := api.NewResponseStore()
 			loader := inference.Loader{
 				TokenizerJSONPath:   tokenizerJSONPath,
@@ -56,7 +58,7 @@ func serveCmd() *cli.Command {
 			e.Use(middleware.RequestLogger())
 			e.Use(middleware.Recover())
 			server.Register(e)
-			fmt.Printf("listening on %s\n", addr)
+			log.Info("starting server", "address", addr)
 			sc := echo.StartConfig{
 				Address: addr,
 				BeforeServeFunc: func(srv *http.Server) error {

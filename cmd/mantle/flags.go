@@ -10,6 +10,9 @@ var (
 	tokenizerJSONPath string
 	tokenizerConfig   string
 	chatTemplate      string
+	logLevel          string
+	logFormat         string
+	debug             bool
 )
 
 func commonModelFlags() []cli.Flag {
@@ -58,6 +61,28 @@ func commonTokenizerFlags() []cli.Flag {
 			Name:        "chat-template",
 			Usage:       "override path to chat_template.jinja",
 			Destination: &chatTemplate,
+		},
+	}
+}
+
+func loggingFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{
+			Name:        "log-level",
+			Usage:       "log level (debug, info, warn, error)",
+			Value:       "info",
+			Destination: &logLevel,
+		},
+		&cli.StringFlag{
+			Name:        "log-format",
+			Usage:       "log format (pretty, json, text)",
+			Value:       "pretty",
+			Destination: &logFormat,
+		},
+		&cli.BoolFlag{
+			Name:        "debug",
+			Usage:       "enable debug logging (shorthand for --log-level=debug)",
+			Destination: &debug,
 		},
 	}
 }

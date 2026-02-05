@@ -12,6 +12,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/tensor"
 	"github.com/samcharles93/mantle/pkg/mcf"
@@ -50,14 +51,15 @@ func quantizeCmd() *cli.Command {
 			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
-			_ = ctx
+			log := logger.FromContext(ctx)
+
 			inPath := cmd.String("input")
 			outPath, defaulted, err := resolveQuantOut(inPath, cmd.String("output"))
 			if err != nil {
 				return fmt.Errorf("quantize: resolve output: %w", err)
 			}
 			if defaulted {
-				_, _ = fmt.Fprintf(os.Stderr, "quantize: output not specified; using %s\n", outPath)
+				log.Info("using default output path", "path", outPath)
 			}
 			method, err := parseQuantMethod(cmd.String("method"))
 			if err != nil {
@@ -86,6 +88,7 @@ func quantizeCmd() *cli.Command {
 				MinClip:  minClip,
 				MaxClip:  maxClip,
 				Progress: 50,
+				Logger:   log,
 			}
 			return runQuantize(opts)
 		},
@@ -99,6 +102,7 @@ type quantizeOptions struct {
 	MinClip  *float32
 	MaxClip  *float32
 	Progress int
+	Logger   logger.Logger
 }
 
 type quantMethod struct {
@@ -245,7 +249,7 @@ func runQuantize(opts quantizeOptions) error {
 
 	for i, name := range names {
 		if opts.Progress > 0 && i%opts.Progress == 0 {
-			_, _ = fmt.Fprintf(os.Stderr, "quantize: %d/%d %s\n", i, len(names), name)
+			opts.Logger.Debug("quantizing tensor", "progress", fmt.Sprintf("%d/%d", i, len(names)), "name", name)
 		}
 
 		info, err := store.Tensor(name)

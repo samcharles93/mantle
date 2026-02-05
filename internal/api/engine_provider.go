@@ -48,7 +48,7 @@ func (p *CachedEngineProvider) WithEngine(ctx context.Context, modelID string, f
 	if err != nil {
 		return err
 	}
-	entry, err := p.getOrLoad(path)
+	entry, err := p.getOrLoad(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,7 @@ func (p *CachedEngineProvider) WithEngine(ctx context.Context, modelID string, f
 	return fn(entry.engine, entry.defaults)
 }
 
-func (p *CachedEngineProvider) getOrLoad(path string) (*engineEntry, error) {
+func (p *CachedEngineProvider) getOrLoad(ctx context.Context, path string) (*engineEntry, error) {
 	p.mu.Lock()
 	entry, ok := p.cache[path]
 	p.mu.Unlock()
@@ -69,7 +69,7 @@ func (p *CachedEngineProvider) getOrLoad(path string) (*engineEntry, error) {
 		return entry, nil
 	}
 
-	result, err := p.cfg.Loader.Load(path, p.cfg.MaxContext)
+	result, err := p.cfg.Loader.Load(ctx, path, p.cfg.MaxContext)
 	if err != nil {
 		return nil, err
 	}

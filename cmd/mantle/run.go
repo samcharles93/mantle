@@ -12,6 +12,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/samcharles93/mantle/internal/inference"
+	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 )
@@ -221,14 +222,18 @@ func runCmd() *cli.Command {
 		Usage: "Run inference for LLM models",
 		Flags: flags,
 		Action: func(ctx context.Context, c *cli.Command) error {
+			log := logger.FromContext(ctx)
+
 			if cpuProfile != "" {
 				f, err := os.Create(cpuProfile)
 				if err != nil {
-					return cli.Exit(fmt.Sprintf("could not create CPU profile: %v", err), 1)
+					log.Error("could not create CPU profile", "error", err)
+					return cli.Exit("could not create CPU profile", 1)
 				}
 				defer func() { _ = f.Close() }()
 				if err := pprof.StartCPUProfile(f); err != nil {
-					return cli.Exit(fmt.Sprintf("could not start CPU profile: %v", err), 1)
+					log.Error("could not start CPU profile", "error", err)
+					return cli.Exit("could not start CPU profile", 1)
 				}
 				defer pprof.StopCPUProfile()
 			}
@@ -237,12 +242,12 @@ func runCmd() *cli.Command {
 				defer func() {
 					f, err := os.Create(memProfile)
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "could not create memory profile: %v\n", err)
+						log.Error("could not create memory profile", "error", err)
 						return
 					}
 					defer func() { _ = f.Close() }()
 					if err := pprof.WriteHeapProfile(f); err != nil {
-						fmt.Fprintf(os.Stderr, "could not write memory profile: %v\n", err)
+						log.Error("could not write memory profile", "error", err)
 					}
 				}()
 			}
@@ -264,7 +269,7 @@ func runCmd() *cli.Command {
 
 			loadStart := time.Now()
 
-			fmt.Printf("Loading MCF model: %s\n", modelPath)
+			log.Info("loading MCF model", "path", modelPath)
 			loader := inference.Loader{
 				TokenizerJSONPath:   tokenizerJSONPath,
 				TokenizerConfigPath: tokenizerConfig,
@@ -272,7 +277,7 @@ func runCmd() *cli.Command {
 				HFConfigPath:        hfConfigFile,
 				Backend:             backend,
 			}
-			loadResult, err := loader.Load(modelPath, int(maxContext))
+			loadResult, err := loader.Load(ctx, modelPath, int(maxContext))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)
 			}
@@ -354,7 +359,7 @@ func runCmd() *cli.Command {
 			}
 
 			loadDuration := time.Since(loadStart)
-			fmt.Printf("Model loaded in %s\n", loadDuration)
+			log.Info("model loaded", "duration", loadDuration)
 
 			if seed == -1 {
 				seed = time.Now().UnixNano()
@@ -392,46 +397,50 @@ func runCmd() *cli.Command {
 			repeatPenalty = previewReq.RepeatPenalty
 
 			if showConfig {
-				fmt.Fprintf(os.Stderr, "MCF | arch=%s\n", modelCfg.Arch)
+				log.Info("model config",
+					"arch", modelCfg.Arch,
+					"blocks", genConfig.BlockCount,
+					"embd", genConfig.EmbeddingLength,
+					"ffn", genConfig.FFNLength,
+					"heads", genConfig.HeadCount,
+					"head_dim", genConfig.HeadDim,
+					"vocab", genConfig.VocabSize,
+					"ctx", genConfig.ContextLength,
+				)
 
-				fmt.Fprintf(os.Stderr, "blocks=%d embd=%d ffn=%d heads=%d head_dim=%d vocab=%d ctx=%d\n",
-					genConfig.BlockCount,
-					genConfig.EmbeddingLength,
-					genConfig.FFNLength,
-					genConfig.HeadCount,
-					genConfig.HeadDim,
-					genConfig.VocabSize,
-					genConfig.ContextLength)
 				if genConfig.RopeScaling != nil {
-					fmt.Fprintf(
-						os.Stderr,
-						"rope: base=%g scaling=%s factor=%g orig_ctx=%d low=%g high=%g attn=%g\n",
-						genConfig.RopeFreqBase,
-						genConfig.RopeScaling.Type,
-						genConfig.RopeScaling.Factor,
-						genConfig.RopeScaling.OrigMaxCtx,
-						genConfig.RopeScaling.LowFactor,
-						genConfig.RopeScaling.HighFactor,
-						genConfig.RopeScaling.AttentionFactor,
+					log.Info("rope config",
+						"base", genConfig.RopeFreqBase,
+						"scaling", genConfig.RopeScaling.Type,
+						"factor", genConfig.RopeScaling.Factor,
+						"orig_ctx", genConfig.RopeScaling.OrigMaxCtx,
+						"low", genConfig.RopeScaling.LowFactor,
+						"high", genConfig.RopeScaling.HighFactor,
+						"attn", genConfig.RopeScaling.AttentionFactor,
 					)
 				} else {
-					fmt.Fprintf(os.Stderr, "rope: base=%g scaling=none\n", genConfig.RopeFreqBase)
+					log.Info("rope config", "base", genConfig.RopeFreqBase, "scaling", "none")
 				}
 
 				if len(genConfig.HeadCountKV) > 0 {
-					fmt.Fprintf(os.Stderr, "HeadCountKV: %v\n", genConfig.HeadCountKV)
+					log.Info("kv heads", "head_count_kv", genConfig.HeadCountKV)
 				}
 
-				fmt.Fprintf(os.Stderr, "sampling: temp=%.3g (%s) top_k=%d (%s) top_p=%.3g (%s) repeat_penalty=%.3g (%s)\n",
-					temp, samplingSource(isSet("temp", "temperature", "t"), tempFromGen),
-					topK, samplingSource(isSet("top-k", "top_k", "topk"), topKFromGen),
-					topP, samplingSource(isSet("top-p", "top_p", "topp"), topPFromGen),
-					repeatPenalty, samplingSource(isSet("repeat-penalty", "repeat_penalty"), repeatFromGen),
+				log.Info("sampling config",
+					"temp", temp,
+					"temp_source", samplingSource(isSet("temp", "temperature", "t"), tempFromGen),
+					"top_k", topK,
+					"top_k_source", samplingSource(isSet("top-k", "top_k", "topk"), topKFromGen),
+					"top_p", topP,
+					"top_p_source", samplingSource(isSet("top-p", "top_p", "topp"), topPFromGen),
+					"repeat_penalty", repeatPenalty,
+					"repeat_penalty_source", samplingSource(isSet("repeat-penalty", "repeat_penalty"), repeatFromGen),
 				)
+
 				if effectiveTemplate == "" {
-					fmt.Fprintln(os.Stderr, "chat_template: none")
+					log.Info("chat template", "template", "none")
 				} else {
-					fmt.Fprintf(os.Stderr, "chat_template: %s\n", templateSource)
+					log.Info("chat template", "source", templateSource)
 				}
 			}
 
@@ -461,7 +470,7 @@ func runCmd() *cli.Command {
 				}
 				msgs = loaded
 				if prompt != "" || system != "" {
-					fmt.Fprintln(os.Stderr, "warning: --messages-json overrides --prompt/--system")
+					log.Warn("messages-json overrides prompt/system flags")
 				}
 			} else {
 				msgs = make([]tokenizer.Message, 0, 10)
@@ -472,7 +481,7 @@ func runCmd() *cli.Command {
 					msgs = append(msgs, tokenizer.Message{Role: "user", Content: prompt})
 				} else {
 					interactive = true
-					fmt.Fprintln(os.Stderr, "Interactive mode. Type /exit to quit.")
+					log.Info("interactive mode enabled", "hint", "type /exit to quit")
 				}
 			}
 
@@ -506,17 +515,17 @@ func runCmd() *cli.Command {
 					NoTemplate:          noTemplate,
 				})
 				if err != nil {
-					fmt.Fprintln(os.Stderr, "error: render prompt:", err)
+					log.Error("render prompt failed", "error", err)
 					break
 				}
 
 				if showTokens {
 					ids, err := tok.Encode(rendered)
 					if err != nil {
-						fmt.Fprintln(os.Stderr, "error: encode prompt:", err)
+						log.Error("encode prompt failed", "error", err)
 						break
 					}
-					fmt.Fprintf(os.Stderr, "\nInput tokens (%d): %s\n", len(ids), joinInts(ids))
+					log.Debug("input tokens", "count", len(ids), "tokens", joinInts(ids))
 				}
 
 				echoPromptVal := echoPrompt && !interactive
@@ -532,12 +541,16 @@ func runCmd() *cli.Command {
 					responseBuilder.WriteString(s)
 				})
 				if err != nil {
-					fmt.Fprintln(os.Stderr, "error: generation:", err)
+					log.Error("generation failed", "error", err)
 					break
 				}
 
 				fmt.Println() // Newline after generation
-				fmt.Fprintf(os.Stderr, "Stats: %.2f TPS (%d tokens in %s)\n", result.Stats.TPS, result.Stats.TokensGenerated, result.Stats.Duration)
+				log.Info("generation complete",
+					"tps", result.Stats.TPS,
+					"tokens", result.Stats.TokensGenerated,
+					"duration", result.Stats.Duration,
+				)
 
 				// Append assistant response to history
 				msgs = append(msgs, tokenizer.Message{Role: "assistant", Content: responseBuilder.String()})

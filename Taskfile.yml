@@ -7,7 +7,6 @@ vars:
   MCF_DIR: '{{.MCF_DIR | default (joinPath .MODELS_DIR "mcf")}}'
   RAW_MODELS_DIR: '{{.RAW_MODELS_DIR | default (joinPath .MODELS_DIR "raw")}}'
   BUILD_FLAGS: '-ldflags="-w -s" -trimpath'
-  BINARY_NAME: '{{if .CUDA}}mantle_cuda{{else}}mantle{{end}}'
   BUILD_TAGS: '{{if .CUDA}}-tags cuda{{end}}'
   CUDA_HOME_RESOLVED:
     sh: |
@@ -46,27 +45,19 @@ tasks:
       - "task: build"
 
   setup:
-    desc: Install Go 1.26rc2 toolchain
+    desc: Install Go 1.26rc3 toolchain
     cmds:
-      - "go install golang.org/dl/go1.26rc2@latest"
-      - "go1.26rc2 download"
-      - "go1.26rc2 version"
+      - "go install golang.org/dl/go1.26rc3@latest"
+      - "go1.26rc3 download"
+      - "go1.26rc3 version"
     status:
-      - "which go1.26rc2"
+      - "which go1.26rc3"
 
   build:
     desc: Build the mantle binary (use CUDA=1 for cuda backend)
     cmds:
-      - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}{{.GO}} build {{.BUILD_FLAGS}} {{.BUILD_TAGS}} -o bin/{{.BINARY_NAME}} ./cmd/mantle'
-      - 'echo "Build Complete: bin/{{.BINARY_NAME}}"'
-    sources:
-      - cmd/mantle/**/*.go
-      - internal/**/*.go
-      - pkg/**/*.go
-      - go.mod
-      - go.sum
-    generates:
-      - bin/{{.BINARY_NAME}}
+      - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}{{.GO}} build {{.BUILD_FLAGS}} {{.BUILD_TAGS}} -o bin/mantle ./cmd/mantle'
+      - 'echo "Build Complete: bin/mantle"'
     preconditions:
       - sh: '{{if .CUDA}}[ -n "{{.CUDA_HOME_RESOLVED}}" ] && [ -d "{{.CUDA_LIBDIR}}" ] && [ -f "{{.CUDA_LIBDIR}}/libcudart.so" ] && [ -f "{{.CUDA_LIBDIR}}/libcublas.so" ]{{else}}true{{end}}'
         msg: 'CUDA toolkit libraries not found. Set CUDA_HOME or ensure nvcc is in PATH so "{{.CUDA_LIBDIR}}" resolves with libcudart.so and libcublas.so.'
@@ -75,11 +66,6 @@ tasks:
     desc: Build the logdiff tool
     cmds:
       - "{{.GO}} build -o bin/logdiff {{.BUILD_FLAGS}} ./cmd/logdiff"
-    sources:
-      - cmd/logdiff/**/*.go
-      - internal/**/*.go
-    generates:
-      - bin/logdiff
 
   pack:
     desc: Pack a raw model into MCF format
@@ -118,12 +104,10 @@ tasks:
       MODEL_FILE: '{{.MCF_DIR}}/{{.MODEL_NAME}}{{.QUANT_SUFFIX}}.mcf'
       BACKEND: '{{.BACKEND | default "auto"}}'
     cmds:
-      - 'bin/{{.BINARY_NAME}} run --backend "{{.BACKEND}}" -m "{{.MODEL_FILE}}" --steps 128 --show-config --show-tokens --system "You are a helpful assistant." --prompt "In 100 words, tell me about you."'
+      - 'bin/mantle run --backend "{{.BACKEND}}" -m "{{.MODEL_FILE}}" --steps 128 --show-config --show-tokens --system "You are a helpful assistant." --prompt "In 100 words, tell me about you."'
     preconditions:
       - sh: '[ -f "{{.MODEL_FILE}}" ]'
         msg: "Model file {{.MODEL_FILE}} not found."
-      - sh: '[ -x "bin/{{.BINARY_NAME}}" ]'
-        msg: 'Binary bin/{{.BINARY_NAME}} not found. Build first with: task build{{if .CUDA}} CUDA=1{{end}}'
 
   inspect:
     desc: Inspect an MCF model container
@@ -137,10 +121,7 @@ tasks:
     vars:
       BACKEND: '{{.BACKEND | default "auto"}}'
     cmds:
-      - 'bin/{{.BINARY_NAME}} run --backend "{{.BACKEND}}" --system "You are a helpful AI assistant."'
-    preconditions:
-      - sh: '[ -x "bin/{{.BINARY_NAME}}" ]'
-        msg: 'Binary bin/{{.BINARY_NAME}} not found. Build first with: task build{{if .CUDA}} CUDA=1{{end}}'
+      - 'bin/mantle run --backend "{{.BACKEND}}" --system "You are a helpful AI assistant."'
 
   bench-simd-compare:
     desc: Run SIMD vs scalar benchmark comparisons

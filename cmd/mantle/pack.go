@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
@@ -65,13 +65,15 @@ func packCmd() *cli.Command {
 			&cli.StringFlag{Name: "merges-txt", Usage: "Override merges.txt path"},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
+			log := logger.FromContext(ctx)
+
 			inDir := cmd.String("input")
 			outPath, defaulted, err := resolvePackOut(inDir, cmd.String("output"))
 			if err != nil {
 				return fmt.Errorf("pack: resolve output: %w", err)
 			}
 			if defaulted {
-				_, _ = fmt.Fprintf(os.Stderr, "pack: output not specified; using %s\n", outPath)
+				log.Info("using default output path", "path", outPath)
 			}
 
 			modelST := cmd.String("model-safetensors")
@@ -90,7 +92,7 @@ func packCmd() *cli.Command {
 				IncludeResources: !cmd.Bool("no-resources"),
 				ProgressEvery:    cmd.Int("progress-every"),
 				Logf: func(format string, args ...any) {
-					_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
+					log.Info(fmt.Sprintf(format, args...))
 				},
 
 				ConfigJSONPath:           cmd.String("config-json"),

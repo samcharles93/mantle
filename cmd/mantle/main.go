@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
+
+	"github.com/samcharles93/mantle/internal/logger"
 
 	"github.com/urfave/cli/v3"
 )
@@ -12,6 +15,34 @@ func main() {
 	app := &cli.Command{
 		Name:  "mantle",
 		Usage: "Model execution substrate CLI",
+		Flags: loggingFlags(),
+		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+			// Initialize logger
+			level := slog.LevelInfo
+			if debug {
+				level = slog.LevelDebug
+			} else {
+				level = logger.ParseLevel(logLevel)
+			}
+
+			var log logger.Logger
+			switch logFormat {
+			case "json":
+				log = logger.JSON(os.Stderr, level)
+			case "text":
+				log = logger.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+					Level:     level,
+					AddSource: true,
+				}))
+			case "pretty":
+				log = logger.Pretty(os.Stderr, level)
+			default:
+				log = logger.Pretty(os.Stderr, level)
+			}
+
+			// Add logger to context
+			return logger.WithContext(ctx, log), nil
+		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			return cli.ShowAppHelp(cmd)
 		},
