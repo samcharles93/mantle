@@ -12,9 +12,9 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/mcfstore"
-	"github.com/samcharles93/mantle/internal/tensor"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
@@ -431,7 +431,7 @@ func quantizeQ(src []float32, rows, cols, bits int, minClip, maxClip float32) ([
 				if maxAbs > 0 {
 					scale = maxAbs / float32(qMax)
 				}
-				scales[blockIdx] = tensor.Float32ToFloat16(scale)
+				scales[blockIdx] = simd.Float32ToFloat16(scale)
 				inv := float32(0)
 				if scale != 0 {
 					inv = float32(1.0) / scale
@@ -478,7 +478,7 @@ func quantizeQ(src []float32, rows, cols, bits int, minClip, maxClip float32) ([
 				if maxAbs > 0 {
 					scale = maxAbs / float32(qMax)
 				}
-				scales[blockIdx] = tensor.Float32ToFloat16(scale)
+				scales[blockIdx] = simd.Float32ToFloat16(scale)
 				inv := float32(0)
 				if scale != 0 {
 					inv = float32(1.0) / scale
@@ -581,7 +581,7 @@ func quantizeK(src []float32, rows, cols, bits int, minClip, maxClip float32) ([
 
 			superScale := maxScale
 			superIdx := r*superBlocksPerRow + s
-			superScales[superIdx] = tensor.Float32ToFloat16(superScale)
+			superScales[superIdx] = simd.Float32ToFloat16(superScale)
 
 			for b := 0; b < superBlocks; b++ {
 				block := s*superBlocks + b

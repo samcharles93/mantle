@@ -8,10 +8,9 @@ import (
 	"strings"
 
 	"github.com/samcharles93/mantle/internal/backend"
-	"github.com/samcharles93/mantle/internal/backend/cpu"
+	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/mcfstore"
-	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
@@ -26,7 +25,7 @@ type Loader struct {
 
 type LoadResult struct {
 	Engine             Engine
-	Runtime            model.Runtime
+	Runtime            simd.Runtime
 	Tokenizer          tokenizer.Tokenizer
 	TokenizerConfig    tokenizer.TokenizerConfig
 	HFConfigJSON       []byte
@@ -78,19 +77,26 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	var runtime backend.Backend
 	switch backendName {
 	case backend.CPU:
-		runtime = cpu.New()
+		runtime, err = backend.New(backend.CPU)
+		if err != nil {
+			return cleanup(err)
+		}
 		log.Info("backend selected", "backend", "cpu")
 	case backend.CUDA:
-		runtime, err = backend.NewCUDA()
+		runtime, err = backend.New(backend.CUDA)
 		if err != nil {
 			return cleanup(err)
 		}
 		log.Info("backend selected", "backend", "cuda")
 	case backend.Auto:
-		runtime, err = backend.NewCUDA()
+		runtime, err = backend.New(backend.CUDA)
 		if err != nil {
 			log.Warn("CUDA backend unavailable, using CPU", "error", err)
-			runtime = cpu.New()
+			runtime, err = backend.New(backend.CPU)
+			if err != nil {
+				return cleanup(err)
+			}
+			log.Info("backend selected", "backend", "cpu")
 		} else {
 			log.Info("backend selected", "backend", "cuda")
 		}

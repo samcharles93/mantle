@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
@@ -95,12 +96,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	bfModel, err := model.LoadModelMCF(bf16File, bfCfgBytes, maxContext)
+	bfModel, err := simd.LoadModelMCF(bf16File, bfCfgBytes, maxContext)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "bf16 load:", err)
 		os.Exit(1)
 	}
-	k4Model, err := model.LoadModelMCF(k4File, k4CfgBytes, maxContext)
+	k4Model, err := simd.LoadModelMCF(k4File, k4CfgBytes, maxContext)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "k4 load:", err)
 		os.Exit(1)

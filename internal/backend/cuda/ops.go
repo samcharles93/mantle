@@ -10,7 +10,7 @@ import (
 	"unsafe"
 
 	"github.com/samcharles93/mantle/internal/backend/cuda/native"
-	"github.com/samcharles93/mantle/internal/tensor"
+	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
@@ -19,7 +19,7 @@ type Ops struct {
 	blas   native.BlasHandle
 
 	mu      sync.Mutex
-	weights map[*tensor.Mat]deviceMat
+	weights map[*simd.Mat]deviceMat
 
 	xHost native.HostBuffer
 	yHost native.HostBuffer
@@ -43,7 +43,7 @@ func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 	return &Ops{
 		stream:  stream,
 		blas:    blas,
-		weights: make(map[*tensor.Mat]deviceMat),
+		weights: make(map[*simd.Mat]deviceMat),
 	}
 }
 
@@ -57,7 +57,7 @@ func (o *Ops) Close() error {
 			err = e
 		}
 	}
-	o.weights = make(map[*tensor.Mat]deviceMat)
+	o.weights = make(map[*simd.Mat]deviceMat)
 
 	if e := o.xDev.Free(); e != nil && err == nil {
 		err = e
@@ -79,7 +79,7 @@ func (o *Ops) Close() error {
 	return err
 }
 
-func (o *Ops) MatVec(dst []float32, w *tensor.Mat, x []float32) {
+func (o *Ops) MatVec(dst []float32, w *simd.Mat, x []float32) {
 	if w == nil || w.R == 0 || w.C == 0 {
 		return
 	}
@@ -150,11 +150,11 @@ func (o *Ops) MatVec(dst []float32, w *tensor.Mat, x []float32) {
 	runtime.KeepAlive(dst)
 }
 
-func (o *Ops) MatVecWithQuant(dst []float32, w *tensor.Mat, x []float32, _ *tensor.QuantVec) {
+func (o *Ops) MatVecWithQuant(dst []float32, w *simd.Mat, x []float32, _ *simd.QuantVec) {
 	o.MatVec(dst, w, x)
 }
 
-func (o *Ops) deviceMat(w *tensor.Mat) (deviceMat, error) {
+func (o *Ops) deviceMat(w *simd.Mat) (deviceMat, error) {
 	if buf, ok := o.weights[w]; ok {
 		return buf, nil
 	}
@@ -189,7 +189,7 @@ func (o *Ops) deviceMat(w *tensor.Mat) (deviceMat, error) {
 	return info, nil
 }
 
-func weightUploadSpec(w *tensor.Mat) (native.BlasDataType, int64, unsafe.Pointer, error) {
+func weightUploadSpec(w *simd.Mat) (native.BlasDataType, int64, unsafe.Pointer, error) {
 	if w.Raw == nil || w.DType == mcf.DTypeF32 {
 		if len(w.Data) == 0 {
 			return 0, 0, nil, nil
@@ -281,7 +281,7 @@ func fillXBuffer(buf native.HostBuffer, dtype native.BlasDataType, x []float32) 
 	case native.BlasF16:
 		dst := unsafe.Slice((*uint16)(buf.Ptr()), len(x))
 		for i, v := range x {
-			dst[i] = tensor.Float32ToFloat16(v)
+			dst[i] = simd.Float32ToFloat16(v)
 		}
 		return nil
 	case native.BlasBF16:

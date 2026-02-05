@@ -5,16 +5,16 @@ import "fmt"
 // afmoeSpec maps AFMoE (for example Trinity-Nano) tensor names. Only
 // architecture-specific naming lives here; loading and runtime behavior remain
 // explicit in shared code.
-func afmoeSpec() *archSpec {
-	return &archSpec{
+func afmoeSpec() *ArchSpec {
+	return &ArchSpec{
 		Name:          "afmoe",
 		HasQKNorm:     true,
 		UseLayerTypes: false,
 		RopeLocalOnly: true,
-		Names: archNames{
-			embedding:  "model.embed_tokens.weight",
-			outputNorm: "model.norm.weight",
-			outputCandidates: func() []string {
+		Names: ArchNames{
+			Embedding:  "model.embed_tokens.weight",
+			OutputNorm: "model.norm.weight",
+			OutputCandidates: func() []string {
 				return []string{
 					"lm_head.weight",
 					"model.lm_head.weight",
@@ -23,82 +23,82 @@ func afmoeSpec() *archSpec {
 					"model.embed_tokens.weight",
 				}
 			},
-			attnNormCandidates: func(layer int) []string {
+			AttnNormCandidates: func(layer int) []string {
 				return []string{
 					fmt.Sprintf("model.layers.%d.input_layernorm.weight", layer),
 				}
 			},
-			postAttnNormCandidates: func(layer int) []string {
+			PostAttnNormCandidates: func(layer int) []string {
 				return []string{
 					fmt.Sprintf("model.layers.%d.post_attention_layernorm.weight", layer),
 				}
 			},
-			ffnNormCandidates: func(layer int) []string {
+			FfnNormCandidates: func(layer int) []string {
 				return []string{
 					fmt.Sprintf("model.layers.%d.pre_mlp_layernorm.weight", layer),
 				}
 			},
-			postFfnNormCandidates: func(layer int) []string {
+			PostFfnNormCandidates: func(layer int) []string {
 				return []string{
 					fmt.Sprintf("model.layers.%d.post_mlp_layernorm.weight", layer),
 				}
 			},
-			qNormCandidates: func(layer int) []string {
+			QNormCandidates: func(layer int) []string {
 				return []string{
 					fmt.Sprintf("model.layers.%d.self_attn.q_norm.weight", layer),
 				}
 			},
-			kNormCandidates: func(layer int) []string {
+			KNormCandidates: func(layer int) []string {
 				return []string{
 					fmt.Sprintf("model.layers.%d.self_attn.k_norm.weight", layer),
 				}
 			},
-			wq: func(layer int) string {
+			Wq: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.self_attn.q_proj.weight", layer)
 			},
-			wk: func(layer int) string {
+			Wk: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.self_attn.k_proj.weight", layer)
 			},
-			wv: func(layer int) string {
+			Wv: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.self_attn.v_proj.weight", layer)
 			},
-			wo: func(layer int) string {
+			Wo: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.self_attn.o_proj.weight", layer)
 			},
-			attnGate: func(layer int) string {
+			AttnGate: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.self_attn.gate_proj.weight", layer)
 			},
-			ffnUp: func(layer int) string {
+			FfnUp: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.up_proj.weight", layer)
 			},
-			ffnGate: func(layer int) string {
+			FfnGate: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.gate_proj.weight", layer)
 			},
-			ffnDown: func(layer int) string {
+			FfnDown: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.down_proj.weight", layer)
 			},
-			moeRouter: func(layer int) string {
+			MoERouter: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.router.gate.weight", layer)
 			},
-			moeExpertBias: func(layer int) string {
+			MoEExpertBias: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.expert_bias", layer)
 			},
-			moeSharedUp: func(layer int) string {
+			MoESharedUp: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.shared_experts.up_proj.weight", layer)
 			},
-			moeSharedGate: func(layer int) string {
+			MoESharedGate: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.shared_experts.gate_proj.weight", layer)
 			},
-			moeSharedDown: func(layer int) string {
+			MoESharedDown: func(layer int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.shared_experts.down_proj.weight", layer)
 			},
-			moeExpertUp: func(layer int, expert int) string {
+			MoEExpertUp: func(layer int, expert int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.experts.%d.up_proj.weight", layer, expert)
 			},
-			moeExpertGate: func(layer int, expert int) string {
+			MoEExpertGate: func(layer int, expert int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.experts.%d.gate_proj.weight", layer, expert)
 			},
-			moeExpertDown: func(layer int, expert int) string {
+			MoEExpertDown: func(layer int, expert int) string {
 				return fmt.Sprintf("model.layers.%d.mlp.experts.%d.down_proj.weight", layer, expert)
 			},
 		},

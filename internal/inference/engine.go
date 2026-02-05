@@ -6,8 +6,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/logits"
-	"github.com/samcharles93/mantle/internal/model"
 )
 
 type Stats struct {
@@ -17,8 +17,8 @@ type Stats struct {
 }
 
 // Generate runs the inference loop for a fixed number of steps.
-// It handles sampling and updates the model state.
-func Generate(model model.Model, sampler *logits.Sampler, promptTokens []int, steps int, callback func(string)) (Stats, error) {
+// It handles sampling and updates the simd state.
+func Generate(m simd.Model, sampler *logits.Sampler, promptTokens []int, steps int, callback func(string)) (Stats, error) {
 	var stats Stats
 
 	// Prefill
@@ -27,7 +27,7 @@ func Generate(model model.Model, sampler *logits.Sampler, promptTokens []int, st
 
 	// Process prompt tokens
 	for _, id := range promptTokens {
-		logitsVec, err = model.ForwardToken(id)
+		logitsVec, err = m.ForwardToken(id)
 		if err != nil {
 			return stats, fmt.Errorf("forward error during prefill: %w", err)
 		}
@@ -41,7 +41,7 @@ func Generate(model model.Model, sampler *logits.Sampler, promptTokens []int, st
 		next := sampler.Sample(logitsVec, toks, nil)
 		toks = append(toks, next)
 
-		logitsVec, err = model.ForwardToken(next)
+		logitsVec, err = m.ForwardToken(next)
 		if err != nil {
 			return stats, fmt.Errorf("forward error during generation step %d: %w", i, err)
 		}
@@ -58,7 +58,7 @@ func Generate(model model.Model, sampler *logits.Sampler, promptTokens []int, st
 
 // Generator manages the state of a generation session
 type Generator struct {
-	Model     model.Model
+	Model     simd.Model
 	Sampler   *logits.Sampler
 	Tokenizer interface {
 		Decode([]int) (string, error)

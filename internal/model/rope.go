@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func ropeScalingForConfig(cfg *hfConfig) *RopeScaling {
+func RopeScalingForConfig(cfg *HFConfig) *RopeScaling {
 	if cfg == nil {
 		return nil
 	}
@@ -136,7 +136,7 @@ func ropeScalingFromValues(
 	return out
 }
 
-func applyRopeScaling(invFreq []float64, base float64, ctxLen int, rs *RopeScaling) float64 {
+func ApplyRopeScaling(invFreq []float64, base float64, ctxLen int, rs *RopeScaling) float64 {
 	if len(invFreq) == 0 || rs == nil {
 		return 1
 	}

@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-type hfConfig struct {
+type HFConfig struct {
 	ModelType     string   `json:"model_type"`
 	Architectures []string `json:"architectures"`
 
@@ -38,6 +38,31 @@ type hfConfig struct {
 	LayerNormEps     float64 `json:"layer_norm_eps"`
 	VocabSize        int     `json:"vocab_size"`
 	RopeTheta        float64 `json:"rope_theta"`
+
+	EmbeddingMultiplier    float64   `json:"embedding_multiplier"`
+	LMHeadMultiplier       float64   `json:"lm_head_multiplier"`
+	AttentionInMultiplier  float64   `json:"attention_in_multiplier"`
+	AttentionOutMultiplier float64   `json:"attention_out_multiplier"`
+	SSMInMultiplier        float64   `json:"ssm_in_multiplier"`
+	SSMOutMultiplier       float64   `json:"ssm_out_multiplier"`
+	SSMMultipliers         []float64 `json:"ssm_multipliers"`
+	MambaChunkSize         int       `json:"mamba_chunk_size"`
+	MambaConvBias          bool      `json:"mamba_conv_bias"`
+	MambaDConv             int       `json:"mamba_d_conv"`
+	MambaDHead             int       `json:"mamba_d_head"`
+	MambaDSSM              int       `json:"mamba_d_ssm"`
+	MambaDState            int       `json:"mamba_d_state"`
+	MambaExpand            float64   `json:"mamba_expand"`
+	MambaNGroups           int       `json:"mamba_n_groups"`
+	MambaNHeads            int       `json:"mamba_n_heads"`
+	MambaNormBeforeGate    bool      `json:"mamba_norm_before_gate"`
+	MambaProjBias          bool      `json:"mamba_proj_bias"`
+	MambaRMSNorm           bool      `json:"mamba_rms_norm"`
+	MambaUseMLP            bool      `json:"mamba_use_mlp"`
+	TimeStepFloor          float64   `json:"time_step_floor"`
+	TimeStepMax            float64   `json:"time_step_max"`
+	TimeStepMin            float64   `json:"time_step_min"`
+	TimeStepRank           string    `json:"time_step_rank"`
 
 	NumLocalExperts   int `json:"num_local_experts"`
 	NumExperts        int `json:"num_experts"`
@@ -84,62 +109,72 @@ type ropeParams struct {
 	Llama4ScalingBeta float64 `json:"llama_4_scaling_beta"`
 }
 
-type archNames struct {
-	embedding        string
-	outputNorm       string
-	outputCandidates func() []string
+type ArchNames struct {
+	Embedding        string
+	OutputNorm       string
+	OutputCandidates func() []string
 
-	attnNorm               func(layer int) string
-	ffnNorm                func(layer int) string
-	attnNormCandidates     func(layer int) []string
-	ffnNormCandidates      func(layer int) []string
-	postAttnNormCandidates func(layer int) []string
-	postFfnNormCandidates  func(layer int) []string
+	AttnNorm               func(layer int) string
+	FfnNorm                func(layer int) string
+	AttnNormCandidates     func(layer int) []string
+	FfnNormCandidates      func(layer int) []string
+	PostAttnNormCandidates func(layer int) []string
+	PostFfnNormCandidates  func(layer int) []string
 
-	qNormCandidates func(layer int) []string
-	kNormCandidates func(layer int) []string
+	QNormCandidates func(layer int) []string
+	KNormCandidates func(layer int) []string
 
-	wq       func(layer int) string
-	wk       func(layer int) string
-	wv       func(layer int) string
-	wo       func(layer int) string
-	attnGate func(layer int) string
+	Wq       func(layer int) string
+	Wk       func(layer int) string
+	Wv       func(layer int) string
+	Wo       func(layer int) string
+	AttnGate func(layer int) string
 
 	// Optional bias tensor names.
-	wqBias func(layer int) string
-	wkBias func(layer int) string
-	wvBias func(layer int) string
+	WqBias func(layer int) string
+	WkBias func(layer int) string
+	WvBias func(layer int) string
 
-	ffnUp   func(layer int) string
-	ffnGate func(layer int) string
-	ffnDown func(layer int) string
+	FfnUp   func(layer int) string
+	FfnGate func(layer int) string
+	FfnDown func(layer int) string
 
 	// MoE tensors (optional).
-	moeRouter     func(layer int) string
-	moeExpertBias func(layer int) string
-	moeSharedUp   func(layer int) string
-	moeSharedGate func(layer int) string
-	moeSharedDown func(layer int) string
-	moeExpertUp   func(layer int, expert int) string
-	moeExpertGate func(layer int, expert int) string
-	moeExpertDown func(layer int, expert int) string
+	MoERouter     func(layer int) string
+	MoEExpertBias func(layer int) string
+	MoESharedUp   func(layer int) string
+	MoESharedGate func(layer int) string
+	MoESharedDown func(layer int) string
+	MoEExpertUp   func(layer int, expert int) string
+	MoEExpertGate func(layer int, expert int) string
+	MoEExpertDown func(layer int, expert int) string
 
-	shortConvKernel  func(layer int) string
-	shortConvInProj  func(layer int) string
-	shortConvOutProj func(layer int) string
+	ShortConvKernel  func(layer int) string
+	ShortConvInProj  func(layer int) string
+	ShortConvOutProj func(layer int) string
+
+	// Mamba/SSM tensors (optional).
+	MambaInProj   func(layer int) string
+	MambaOutProj  func(layer int) string
+	MambaConv     func(layer int) string
+	MambaConvBias func(layer int) string
+	MambaALog     func(layer int) string
+	MambaD        func(layer int) string
+	MambaDTBias   func(layer int) string
+	MambaNorm     func(layer int) string
 }
 
-type archSpec struct {
+type ArchSpec struct {
 	Name          string
 	HasQKNorm     bool
 	UseLayerTypes bool
 	RopeLocalOnly bool
 
-	Names archNames
+	Names ArchNames
 }
 
-func loadHFConfigBytes(raw []byte) (*hfConfig, error) {
-	var cfg hfConfig
+func LoadHFConfigBytes(raw []byte) (*HFConfig, error) {
+	var cfg HFConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, err
 	}
@@ -155,7 +190,7 @@ func loadHFConfigBytes(raw []byte) (*hfConfig, error) {
 // mergeTextConfigMissing fills missing hfConfig fields from a nested text_config
 // object when present. This is needed for multimodal configs (for example
 // mistral3) that place text model parameters under text_config.
-func mergeTextConfigMissing(dst *hfConfig, raw []byte) error {
+func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	if dst == nil || len(raw) == 0 {
 		return nil
 	}
@@ -169,7 +204,7 @@ func mergeTextConfigMissing(dst *hfConfig, raw []byte) error {
 		return nil
 	}
 
-	var textCfg hfConfig
+	var textCfg HFConfig
 	if err := json.Unmarshal(textRaw, &textCfg); err != nil {
 		return err
 	}
@@ -277,7 +312,7 @@ func mergeTextConfigMissing(dst *hfConfig, raw []byte) error {
 	return nil
 }
 
-func detectArch(cfg *hfConfig) (*archSpec, error) {
+func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("nil config")
 	}
@@ -306,6 +341,8 @@ func detectArch(cfg *hfConfig) (*archSpec, error) {
 	}
 
 	switch {
+	case hasArch("falcon_h1"):
+		return falconH1Spec(), nil
 	case hasArch("lfm"):
 		return lfm2Spec(), nil
 	case hasArch("qwen3"):
@@ -327,7 +364,7 @@ func detectArch(cfg *hfConfig) (*archSpec, error) {
 	}
 }
 
-func hasMoE(cfg *hfConfig) bool {
+func hasMoE(cfg *HFConfig) bool {
 	if cfg == nil {
 		return false
 	}

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/mcfstore"
-	"github.com/samcharles93/mantle/internal/model"
 )
 
 const (
@@ -16,7 +16,43 @@ const (
 
 type Backend interface {
 	Name() string
-	LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int) (model.Runtime, error)
+	LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int) (simd.Runtime, error)
+}
+
+func Has(name string) bool {
+	switch name {
+	case CPU:
+		return true
+	case CUDA:
+		return cudaEnabled
+	default:
+		return false
+	}
+}
+
+func New(name string) (Backend, error) {
+	normalized, err := Normalize(name)
+	if err != nil {
+		return nil, err
+	}
+
+	switch normalized {
+	case CPU:
+		return newCPU()
+	case CUDA:
+		return newCUDA()
+	default:
+		return nil, fmt.Errorf("unknown backend %q", normalized)
+	}
+}
+
+// Available returns a comma-separated list of available backends.
+func Available() string {
+	entries := []string{CPU}
+	if Has(CUDA) {
+		entries = append(entries, CUDA)
+	}
+	return strings.Join(entries, ",")
 }
 
 func Normalize(name string) (string, error) {

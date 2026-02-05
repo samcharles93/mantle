@@ -11,9 +11,9 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/inference"
 	"github.com/samcharles93/mantle/internal/logger"
-	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
@@ -298,7 +298,7 @@ func runCmd() *cli.Command {
 			}
 			if c.IsSet("rope-scaling") || c.IsSet("rope-scale") || c.IsSet("yarn-orig-ctx") {
 				if modelCfg.Config.RopeScaling == nil {
-					modelCfg.Config.RopeScaling = &model.RopeScaling{}
+					modelCfg.Config.RopeScaling = &simd.RopeScaling{}
 				}
 				rs := modelCfg.Config.RopeScaling
 				if c.IsSet("rope-scaling") {

@@ -1,0 +1,148 @@
+package simd
+
+import "fmt"
+
+// ForwardToken runs one autoregressive step for the provided token id.
+// It returns a logits slice owned by the model (overwritten on next call).
+// Implements model.Model interface.
+func (m *Instance) ForwardToken(tok int) ([]float32, error) {
+	if tok < 0 || tok >= m.Config.Config.VocabSize {
+		return nil, fmt.Errorf("token id out of range: %d", tok)
+	}
+	if m.Pos >= m.MaxContext {
+		return nil, fmt.Errorf("context length exceeded: %d >= %d", m.Pos, m.MaxContext)
+	}
+
+	x := m.Scratch.X
+	m.Embeddings.RowTo(x, tok)
+	if scale := m.Config.Config.EmbeddingMultiplier; scale != 0 && scale != 1 {
+		s := float32(scale)
+		for i := range x {
+			x[i] *= s
+		}
+	}
+	if m.Config.Config.MuPEnabled && m.MuPScale != 1 {
+		for i := range x {
+			x[i] *= m.MuPScale
+		}
+	}
+
+	for i := range m.Layers {
+		layer := &m.Layers[i]
+
+		// Attention block: pre-norm, attention, optional post-norm, residual
+		RMSNorm(m.Scratch.Tmp, x, layer.AttnNorm, m.RMSEpsilon)
+
+		var opOut []float32
+		if layer.Mamba != nil {
+			var attnOut []float32
+			attnIn := m.Scratch.Tmp
+			if scale := m.Config.Config.AttentionInMultiplier; scale != 0 && scale != 1 {
+				buf := m.Scratch.Tmp2
+				s := float32(scale)
+				for i := range attnIn {
+					buf[i] = attnIn[i] * s
+				}
+				attnIn = buf
+			}
+			if layer.IsRecurrent {
+				attnOut = ShortConv(m, layer, attnIn)
+			} else {
+				attnOut = Attention(m, layer, attnIn, m.Pos)
+			}
+			if scale := m.Config.Config.AttentionOutMultiplier; scale != 0 && scale != 1 {
+				s := float32(scale)
+				for i := range attnOut {
+					attnOut[i] *= s
+				}
+			}
+			mambaOut := Mamba(m, layer, m.Scratch.Tmp)
+			if attnOut == nil {
+				opOut = mambaOut
+			} else if mambaOut == nil {
+				opOut = attnOut
+			} else {
+				opOut = m.Scratch.Tmp2
+				copy(opOut, attnOut)
+				Add(opOut, mambaOut)
+			}
+		} else if layer.IsRecurrent {
+			opOut = ShortConv(m, layer, m.Scratch.Tmp)
+		} else {
+			opOut = Attention(m, layer, m.Scratch.Tmp, m.Pos)
+		}
+		if len(layer.PostAttnNorm) > 0 {
+			RMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
+			opOut = m.Scratch.Tmp2
+		}
+		Add(x, opOut)
+
+		// FFN block: pre-norm, dense/MoE, optional post-norm, residual
+		RMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon)
+		var ffnOut []float32
+		if layer.MoE != nil {
+			ffnOut = MoE(m, layer, m.Scratch.Tmp)
+		} else {
+			ffnOut = FFN(m, layer, m.Scratch.Tmp)
+		}
+		if len(layer.PostFfnNorm) > 0 {
+			RMSNorm(m.Scratch.Tmp, ffnOut, layer.PostFfnNorm, m.RMSEpsilon)
+			ffnOut = m.Scratch.Tmp
+		}
+		Add(x, ffnOut)
+	}
+
+	// Output norm
+	RMSNorm(m.Scratch.Tmp, x, m.OutputNorm, m.RMSEpsilon)
+	m.Ops().MatVec(m.Scratch.Logits, m.Output, m.Scratch.Tmp)
+	if scale := m.Config.Config.LMHeadMultiplier; scale != 0 && scale != 1 {
+		s := float32(scale)
+		for i := range m.Scratch.Logits {
+			m.Scratch.Logits[i] *= s
+		}
+	}
+
+	m.Pos++
+	return m.Scratch.Logits, nil
+}
+
+// Reset clears the model's internal state (KV cache, etc.).
+// Implements model.Model interface.
+func (m *Instance) Reset() {
+	m.Pos = 0
+	for i := range m.Layers {
+		layer := &m.Layers[i]
+		if layer.AttnCache.K != nil {
+			for j := range layer.AttnCache.K {
+				layer.AttnCache.K[j] = 0
+			}
+			for j := range layer.AttnCache.V {
+				layer.AttnCache.V[j] = 0
+			}
+		}
+		if layer.ShortConvState.Buf != nil {
+			for j := range layer.ShortConvState.Buf {
+				layer.ShortConvState.Buf[j] = 0
+			}
+		}
+		if layer.Mamba != nil {
+			if layer.Mamba.ConvState != nil {
+				for j := range layer.Mamba.ConvState {
+					layer.Mamba.ConvState[j] = 0
+				}
+			}
+			if layer.Mamba.SSMState != nil {
+				for j := range layer.Mamba.SSMState {
+					layer.Mamba.SSMState[j] = 0
+				}
+			}
+		}
+	}
+}
+
+// UpdateRoPE recomputes RoPE frequency scaling.
+// Implements model.Runtime interface.
+func (m *Instance) UpdateRoPE() {
+	// Implementation will be moved from model/loader.go
+	// For now, this is a placeholder
+}

@@ -18,11 +18,9 @@ func main() {
 		Flags: loggingFlags(),
 		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
 			// Initialize logger
-			level := slog.LevelInfo
+			level := logger.ParseLevel(logLevel)
 			if debug {
 				level = slog.LevelDebug
-			} else {
-				level = logger.ParseLevel(logLevel)
 			}
 
 			var log logger.Logger

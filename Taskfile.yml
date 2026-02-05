@@ -1,7 +1,7 @@
 version: "3"
 
 vars:
-  GO: go1.26rc2
+  GO: go1.26rc3
   WORK_DIR: '{{.WORK_DIR | default "/work"}}'
   MODELS_DIR: '{{.MODELS_DIR | default (joinPath .WORK_DIR "models")}}'
   MCF_DIR: '{{.MCF_DIR | default (joinPath .MODELS_DIR "mcf")}}'
@@ -126,7 +126,7 @@ tasks:
   bench-simd-compare:
     desc: Run SIMD vs scalar benchmark comparisons
     cmds:
-      - "{{.GO}} test -bench='(SIMD|Scalar)$' -benchtime=3s ./internal/tensor/"
+      - "{{.GO}} test -bench='(SIMD|Scalar)$' -benchtime=3s ./internal/backend/simd/"
 
   fmt:
     desc: Format all Go code
