@@ -12,6 +12,7 @@ type AttnContext struct {
 	Q, CacheK, CacheV  []float32
 	CacheK16, CacheV16 []uint16
 	AttnOut            []float32
+	Ops                Ops
 
 	Pos, Start        int
 	KvStride, HeadDim int
@@ -104,7 +105,11 @@ func RunAttnHeads(ctx *AttnContext, scoresBuf []float32, rs, re int) {
 				scores[t-ctx.Start] = Dot(qh, kv) * ctx.Scale
 			}
 		}
-		Softmax(scores)
+		if ctx.Ops != nil {
+			ctx.Ops.Softmax(scores)
+		} else {
+			Softmax(scores)
+		}
 		out := ctx.AttnOut[h*ctx.HeadDim : (h+1)*ctx.HeadDim]
 		for d := range ctx.HeadDim {
 			var sum float32

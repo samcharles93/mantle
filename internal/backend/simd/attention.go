@@ -6,10 +6,15 @@ import (
 	"simd/archsimd"
 )
 
+type attentionQKVFastPath interface {
+	MatVecQKV(q, k, v []float32, wq, wk, wv *Mat, x []float32) bool
+}
+
 // Attention performs multi-head attention with optional RoPE, KV caching, and sliding window.
 // Implements the full attention mechanism including Q/K/V projections, attention computation,
 // and output projection.
 func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
+	ops := m.Ops()
 	nHead := m.HeadCount
 	headDim := m.HeadDim
 	kvHeads := layer.HeadKV
@@ -24,13 +29,17 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	attnOut := m.Scratch.AttnOut
 
 	var qx *QuantVec
-	if CanUseQuantVec(layer.Wq) || CanUseQuantVec(layer.Wk) || CanUseQuantVec(layer.Wv) {
-		qx = PrepareQuantVec(x)
-		defer ReleaseQuantVec(qx)
+	if fp, ok := ops.(attentionQKVFastPath); ok && fp.MatVecQKV(q, k, v, layer.Wq, layer.Wk, layer.Wv, x) {
+		qx = nil
+	} else {
+		if CanUseQuantVec(layer.Wq) || CanUseQuantVec(layer.Wk) || CanUseQuantVec(layer.Wv) {
+			qx = PrepareQuantVec(x)
+			defer ReleaseQuantVec(qx)
+		}
+		ops.MatVecWithQuant(q, layer.Wq, x, qx)
+		ops.MatVecWithQuant(k, layer.Wk, x, qx)
+		ops.MatVecWithQuant(v, layer.Wv, x, qx)
 	}
-	m.Ops().MatVecWithQuant(q, layer.Wq, x, qx)
-	m.Ops().MatVecWithQuant(k, layer.Wk, x, qx)
-	m.Ops().MatVecWithQuant(v, layer.Wv, x, qx)
 
 	if len(layer.WqBias) > 0 {
 		Add(q, layer.WqBias)
@@ -44,12 +53,12 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 
 	if len(layer.AttnQNorm) > 0 {
 		for h := range nHead {
-			RMSNorm(q[h*headDim:(h+1)*headDim], q[h*headDim:(h+1)*headDim], layer.AttnQNorm, m.RMSEpsilon)
+			ops.RMSNorm(q[h*headDim:(h+1)*headDim], q[h*headDim:(h+1)*headDim], layer.AttnQNorm, m.RMSEpsilon)
 		}
 	}
 	if len(layer.AttnKNorm) > 0 {
 		for h := range kvHeads {
-			RMSNorm(k[h*headDim:(h+1)*headDim], k[h*headDim:(h+1)*headDim], layer.AttnKNorm, m.RMSEpsilon)
+			ops.RMSNorm(k[h*headDim:(h+1)*headDim], k[h*headDim:(h+1)*headDim], layer.AttnKNorm, m.RMSEpsilon)
 		}
 	}
 
@@ -61,17 +70,8 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			invFreq = m.RopeInvFreqLocal
 			attnScale = m.RopeAttnScaleLocal
 		}
-		ApplyRoPE(q, nHead, headDim, pos, invFreq, attnScale)
-		ApplyRoPE(k, kvHeads, headDim, pos, invFreq, attnScale)
-	}
-
-	// Helper for F16 cache
-	storeCache := func(src []float32, f32Dest []float32, f16Dest []uint16, offset int) {
-		if f32Dest != nil {
-			copy(f32Dest[offset:], src)
-		} else if f16Dest != nil {
-			Float32ToFloat16Slice(src, f16Dest[offset:])
-		}
+		ops.ApplyRoPE(q, nHead, headDim, pos, invFreq, attnScale)
+		ops.ApplyRoPE(k, kvHeads, headDim, pos, invFreq, attnScale)
 	}
 
 	cacheLen := layer.AttnCache.CacheLen
@@ -79,9 +79,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	if cacheLen > 0 {
 		cachePos = pos % cacheLen
 	}
-	offset := cachePos * kvStride
-	storeCache(k, layer.AttnCache.K, layer.AttnCache.K16, offset)
-	storeCache(v, layer.AttnCache.V, layer.AttnCache.V16, offset)
+	ops.StoreKV(-1, cachePos, kvStride, layer.AttnCache.K, layer.AttnCache.V, layer.AttnCache.K16, layer.AttnCache.V16, k, v)
 
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 	start := 0
@@ -106,6 +104,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		KvHeads:  kvHeads,
 		Scale:    scale,
 		CacheLen: layer.AttnCache.CacheLen,
+		Ops:      ops,
 	}
 
 	pool := m.GetAttnPool()
@@ -141,7 +140,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 
 	if layer.AttnGate != nil {
 		gate := m.Scratch.AttnGate[:nHead*headDim]
-		m.Ops().MatVecWithQuant(gate, layer.AttnGate, x, qx)
+		ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
 
 		// Vectorized Sigmoid with multiplication
 		n := len(gate)
@@ -158,6 +157,6 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			attnOut[i] *= Sigmoid(gate[i])
 		}
 	}
-	m.Ops().MatVec(m.Scratch.AttnProj, layer.Wo, attnOut[:nHead*headDim])
+	ops.MatVec(m.Scratch.AttnProj, layer.Wo, attnOut[:nHead*headDim])
 	return m.Scratch.AttnProj
 }

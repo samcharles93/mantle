@@ -82,6 +82,52 @@ func TestRunAttnHeadsMatchesReferenceSlidingWindow(t *testing.T) {
 	compareSlices(t, ctx.AttnOut, want, 1e-5)
 }
 
+func TestRunAttnHeadsUsesContextSoftmaxOps(t *testing.T) {
+	const (
+		nHead   = 2
+		kvHeads = 1
+		headDim = 4
+		pos     = 3
+	)
+	kvStride := kvHeads * headDim
+	ctx := AttnContext{
+		Q:        make([]float32, nHead*headDim),
+		CacheK:   make([]float32, (pos+1)*kvStride),
+		CacheV:   make([]float32, (pos+1)*kvStride),
+		AttnOut:  make([]float32, nHead*headDim),
+		Pos:      pos,
+		Start:    0,
+		KvStride: kvStride,
+		HeadDim:  headDim,
+		NHead:    nHead,
+		KvHeads:  kvHeads,
+		Scale:    float32(1.0 / math.Sqrt(float64(headDim))),
+		CacheLen: pos + 1,
+	}
+	fillTestData(ctx.Q, 0.03)
+	fillTestData(ctx.CacheK, 0.05)
+	fillTestData(ctx.CacheV, 0.07)
+
+	rec := &softmaxRecorderOps{}
+	ctx.Ops = rec
+
+	RunAttnHeads(&ctx, make([]float32, pos+1), 0, nHead)
+
+	if rec.calls == 0 {
+		t.Fatalf("expected ctx.Ops.Softmax to be used")
+	}
+}
+
+type softmaxRecorderOps struct {
+	DefaultOps
+	calls int
+}
+
+func (s *softmaxRecorderOps) Softmax(x []float32) {
+	s.calls++
+	Softmax(x)
+}
+
 func BenchmarkRunAttnHeadsFull(b *testing.B) {
 	benchRunAttnHeads(b, 16, 4, 64, 256, 0)
 }
