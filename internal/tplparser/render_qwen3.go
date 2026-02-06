@@ -48,7 +48,7 @@ func renderQwen3(opts RenderOptions) (string, bool, error) {
 		switch msg.Role {
 		case "user":
 			b.WriteString("<|im_start|>user\n")
-			if err := writeQwenUserContent(&b, msg.Content, &imageCount, &videoCount, opts.AddVisionID); err != nil {
+			if err := writeQwenUserContent(&b, msg.Content, &imageCount, &videoCount); err != nil {
 				return "", false, err
 			}
 			b.WriteString("<|im_end|>\n")
@@ -89,7 +89,7 @@ func renderQwen3(opts RenderOptions) (string, bool, error) {
 				b.WriteString("<|im_start|>user")
 			}
 			b.WriteString("\n<tool_response>\n")
-			if err := writeQwenToolContent(&b, msg.Content, &imageCount, &videoCount, opts.AddVisionID); err != nil {
+			if err := writeQwenToolContent(&b, msg.Content, &imageCount, &videoCount); err != nil {
 				return "", false, err
 			}
 			b.WriteString("\n</tool_response>")
@@ -131,7 +131,7 @@ func writeQwenSystemContent(b *strings.Builder, content any) error {
 	return fmt.Errorf("qwen3: invalid system content")
 }
 
-func writeQwenUserContent(b *strings.Builder, content any, imageCount, videoCount *int, addVisionID bool) error {
+func writeQwenUserContent(b *strings.Builder, content any, imageCount, videoCount *int) error {
 	if s, ok := asString(content); ok {
 		b.WriteString(s)
 		return nil
@@ -145,17 +145,11 @@ func writeQwenUserContent(b *strings.Builder, content any, imageCount, videoCoun
 			t, _ := asString(m["type"])
 			if t == "image" || m["image"] != nil || m["image_url"] != nil {
 				*imageCount++
-				if addVisionID {
-					b.WriteString(fmt.Sprintf("Picture %d: ", *imageCount))
-				}
 				b.WriteString("<|vision_start|><|image_pad|><|vision_end|>\n")
 				continue
 			}
 			if t == "video" || m["video"] != nil {
 				*videoCount++
-				if addVisionID {
-					b.WriteString(fmt.Sprintf("Video %d: ", *videoCount))
-				}
 				b.WriteString("<|vision_start|><|video_pad|><|vision_end|>\n")
 				continue
 			}
@@ -195,7 +189,7 @@ func writeQwenAssistantContent(b *strings.Builder, content any) error {
 	return fmt.Errorf("qwen3: invalid assistant content")
 }
 
-func writeQwenToolContent(b *strings.Builder, content any, imageCount, videoCount *int, addVisionID bool) error {
+func writeQwenToolContent(b *strings.Builder, content any, imageCount, videoCount *int) error {
 	if s, ok := asString(content); ok {
 		b.WriteString(s)
 		return nil
@@ -209,17 +203,11 @@ func writeQwenToolContent(b *strings.Builder, content any, imageCount, videoCoun
 			t, _ := asString(m["type"])
 			if t == "image" || m["image"] != nil || m["image_url"] != nil {
 				*imageCount++
-				if addVisionID {
-					b.WriteString(fmt.Sprintf("Picture %d: ", *imageCount))
-				}
 				b.WriteString("<|vision_start|><|image_pad|><|vision_end|>\n")
 				continue
 			}
 			if t == "video" || m["video"] != nil {
 				*videoCount++
-				if addVisionID {
-					b.WriteString(fmt.Sprintf("Video %d: ", *videoCount))
-				}
 				b.WriteString("<|vision_start|><|video_pad|><|vision_end|>\n")
 				continue
 			}

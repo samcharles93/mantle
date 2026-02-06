@@ -1,21 +1,21 @@
 package tplparser
 
 type Message struct {
-	Role      string
-	Content   any
-	ToolCalls []ToolCall
-	Name      string
+	Role      string     `json:"role"`
+	Content   any        `json:"content,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Name      string     `json:"name,omitempty"`
 }
 
 type ToolCall struct {
-	ID       string
-	Type     string
-	Function ToolCallFunction
+	ID       string           `json:"id,omitempty"`
+	Type     string           `json:"type,omitempty"`
+	Function ToolCallFunction `json:"function"`
 }
 
 type ToolCallFunction struct {
-	Name      string
-	Arguments any
+	Name      string `json:"name"`
+	Arguments any    `json:"arguments,omitempty"`
 }
 
 type RenderOptions struct {
@@ -25,8 +25,6 @@ type RenderOptions struct {
 	EOSToken            string
 	AddBOS              bool
 	AddGenerationPrompt bool
-	KeepPastThinking    bool
-	AddVisionID         bool
 	Messages            []Message
 	Tools               []any
 }

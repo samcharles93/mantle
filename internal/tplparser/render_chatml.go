@@ -81,7 +81,7 @@ func renderChatML(opts RenderOptions) (string, bool, error) {
 		if s, ok := content.(string); ok {
 			text = s
 		}
-		if m.Role == "assistant" && !opts.KeepPastThinking && i != lastAssistant {
+		if m.Role == "assistant" && i != lastAssistant {
 			if cut := strings.LastIndex(text, "</think>"); cut >= 0 {
 				text = strings.TrimSpace(text[cut+len("</think>"):])
 			}

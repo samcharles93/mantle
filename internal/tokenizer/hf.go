@@ -3,7 +3,6 @@ package tokenizer
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -189,20 +188,6 @@ func (c chainPretok) Split(text string) []string {
 		return []string{text}
 	}
 	return out
-}
-
-func LoadHFTokenizer(tokJSON, tokConfig string) (*HFTokenizer, error) {
-	data, err := os.ReadFile(tokJSON)
-	if err != nil {
-		return nil, err
-	}
-	var cfg []byte
-	if tokConfig != "" {
-		if raw, err := os.ReadFile(tokConfig); err == nil {
-			cfg = raw
-		}
-	}
-	return LoadHFTokenizerBytes(data, cfg)
 }
 
 func parseHFTokenizerJSON(tokJSON []byte) (hfTokenizerJSON, map[string]int, error) {

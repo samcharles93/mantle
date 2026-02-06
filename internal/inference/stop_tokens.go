@@ -24,11 +24,9 @@ func BuildStopTokens(tok tokenizer.Tokenizer, cfg tokenizer.TokenizerConfig) []i
 		stopTokens = append(stopTokens, id)
 	}
 
-	if t, ok := tok.(interface{ TokenString(int) string }); ok {
-		token2 := strings.ToLower(strings.TrimSpace(t.TokenString(2)))
-		if token2 == "<|endoftext|>" || token2 == "<|end_of_text|>" || token2 == "</s>" {
-			addUnique(2)
-		}
+	token2 := strings.ToLower(strings.TrimSpace(tok.TokenString(2)))
+	if token2 == "<|endoftext|>" || token2 == "<|end_of_text|>" || token2 == "</s>" {
+		addUnique(2)
 	}
 
 	for id, token := range cfg.Tokens {
@@ -38,12 +36,10 @@ func BuildStopTokens(tok tokenizer.Tokenizer, cfg tokenizer.TokenizerConfig) []i
 		}
 	}
 
-	if t, ok := tok.(interface{ Decoder() []string }); ok {
-		for id, token := range t.Decoder() {
-			if token == "<|im_end|>" {
-				addUnique(id)
-				break
-			}
+	for id, token := range tok.Decoder() {
+		if token == "<|im_end|>" {
+			addUnique(id)
+			break
 		}
 	}
 	return stopTokens

@@ -23,6 +23,10 @@ func (f fakeTokenizer) TokenString(id int) string {
 	return f.tokens[id]
 }
 
+func (f fakeTokenizer) Decoder() []string {
+	return nil
+}
+
 func TestBuildStopTokensLegacyID2(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -101,6 +105,12 @@ type fakeDecoderTokenizer struct {
 func (f fakeDecoderTokenizer) Encode(text string) ([]int, error) { return nil, nil }
 func (f fakeDecoderTokenizer) Decode(ids []int) (string, error)  { return "", nil }
 func (f fakeDecoderTokenizer) Decoder() []string                 { return f.decoder }
+func (f fakeDecoderTokenizer) TokenString(id int) string {
+	if id < 0 || id >= len(f.decoder) {
+		return ""
+	}
+	return f.decoder[id]
+}
 
 func TestBuildStopTokensAddsImEndFromDecoder(t *testing.T) {
 	cfg := tokenizer.TokenizerConfig{

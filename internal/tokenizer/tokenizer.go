@@ -4,4 +4,6 @@ package tokenizer
 type Tokenizer interface {
 	Encode(text string) ([]int, error)
 	Decode(ids []int) (string, error)
+	TokenString(id int) string
+	Decoder() []string
 }

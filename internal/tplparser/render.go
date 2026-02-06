@@ -7,7 +7,7 @@ func Render(opts RenderOptions) (string, bool, error) {
 	if opts.Template == "" {
 		return renderByArchDefault(opts)
 	}
-	if out, ok, err := renderByArch(opts); ok || err != nil {
+	if out, ok, err := renderByArchDefault(opts); ok || err != nil {
 		return out, ok, err
 	}
 	if out, ok, err := renderByTemplateSignature(opts); ok || err != nil {
@@ -17,23 +17,6 @@ func Render(opts RenderOptions) (string, bool, error) {
 }
 
 func renderByArchDefault(opts RenderOptions) (string, bool, error) {
-	switch strings.ToLower(strings.TrimSpace(opts.Arch)) {
-	case "lfm2":
-		return renderChatML(opts)
-	case "gemma":
-		return renderGemma3(opts)
-	case "gemma3_text", "gemma3":
-		return renderGemma3(opts)
-	case "qwen3":
-		return renderQwen3(opts)
-	case "mistral3":
-		return renderMistral3(opts)
-	default:
-		return "", false, nil
-	}
-}
-
-func renderByArch(opts RenderOptions) (string, bool, error) {
 	switch strings.ToLower(strings.TrimSpace(opts.Arch)) {
 	case "lfm2":
 		return renderChatML(opts)
