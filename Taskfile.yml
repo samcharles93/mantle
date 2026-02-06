@@ -60,9 +60,18 @@ tasks:
     status:
       - "which go1.26rc3"
 
+  cuda:build-kernels:
+    desc: Build optional CUDA kernel objects/static library
+    cmds:
+      - 'bash scripts/build_cuda_softmax.sh'
+    preconditions:
+      - sh: '[ -n "{{.CUDA_HOME_RESOLVED}}" ] && [ -d "{{.CUDA_LIBDIR}}" ] && [ -f "{{.CUDA_LIBDIR}}/libcudart.so" ] && [ -f "{{.CUDA_LIBDIR}}/libcublas.so" ]'
+        msg: 'CUDA toolkit libraries not found. Set CUDA_HOME or ensure nvcc is in PATH so "{{.CUDA_LIBDIR}}" resolves with libcudart.so and libcublas.so.'
+
   build:
     desc: Build the mantle binary (use CUDA=1 for cuda backend)
     cmds:
+      - '{{if .CUDA}}task cuda:build-kernels{{end}}'
       - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}{{.GO}} build {{if .VERSION_LDFLAGS}}{{.VERSION_LDFLAGS}}{{else}}{{.BUILD_FLAGS}}{{end}} {{.BUILD_TAGS}} -o bin/mantle ./cmd/mantle'
       - 'echo "Build Complete: bin/mantle"'
     preconditions:
@@ -77,6 +86,7 @@ tasks:
       BUILD_TIME:
         sh: 'date -u +%Y%m%dT%H%M%SZ'
     cmds:
+      - '{{if .CUDA}}task cuda:build-kernels{{end}}'
       - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}{{.GO}} build {{if .VERSION_LDFLAGS}}{{.VERSION_LDFLAGS}}{{else}}{{.BUILD_FLAGS}}{{end}} {{.BUILD_TAGS}} -o bin/mantle ./cmd/mantle'
       - 'echo "Build Complete: bin/mantle"'
     preconditions:
