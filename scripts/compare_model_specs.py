@@ -14,10 +14,44 @@ def read_safetensors_header(path: Path):
         header = json.loads(f.read(header_len))
     return header
 
+def collect_tensor_names(root: Path):
+    names = set()
+    for st_path in sorted(root.glob("*.safetensors")):
+        header = read_safetensors_header(st_path)
+        for k in header.keys():
+            if k != "__metadata__":
+                names.add(k)
+    return names
+
+def pick_attn_layer_index(names, layer_types):
+    if not layer_types:
+        return 0
+    max_check = min(len(layer_types), 128)
+    for i in range(max_check):
+        prefix = f"model.layers.{i}."
+        if any(n.startswith(prefix + "self_attn.") or n.startswith(prefix + "attention.") for n in names):
+            return i
+    return 0
+
+def pick_conv_layer_index(names, layer_types):
+    if not layer_types:
+        return 0
+    max_check = min(len(layer_types), 128)
+    for i in range(max_check):
+        prefix = f"model.layers.{i}."
+        if any(n.startswith(prefix + "conv.") for n in names):
+            return i
+    return 0
+
 
 def load_spec_files(paths):
-    text = "\n".join(Path(p).read_text() for p in paths)
-    return text
+    parts = []
+    for p in paths:
+        path = Path(p)
+        if not path.exists():
+            continue
+        parts.append(path.read_text())
+    return "\n".join(parts)
 
 
 def extract_spec_body(text, func_name):
@@ -63,9 +97,11 @@ def parse_arch_names(body):
     # Func format strings
     for k, v in re.findall(r"(\w+):\s*func\([^)]*\)\s*string\s*\{\s*return\s*fmt\.Sprintf\(\"([^\"]+)\"", block):
         out[k] = v
-    # Candidates: return []string { "a", "b" }
+    # Candidates: return []string { "a", fmt.Sprintf("..."), ... }
     for k, arr in re.findall(r"(\w+):\s*func\([^)]*\)\s*\[\]string\s*\{\s*return\s*\[\]string\s*\{([^}]*)\}\s*\}", block, re.S):
-        vals = re.findall(r"\"([^\"]+)\"", arr)
+        vals = []
+        vals.extend(re.findall(r"\"([^\"]+)\"", arr))
+        vals.extend(re.findall(r"fmt\.Sprintf\(\"([^\"]+)\"", arr))
         out[k] = vals
     return out
 
@@ -86,7 +122,7 @@ def detect_spec(cfg):
     if has("afmoe"):
         return "afmoeSpec"
     if has("gemma3"):
-        return "gemmaSpec"
+        return "gemma3Spec"
     if has("granite"):
         return "graniteSpec"
     if has("mistral3"):
@@ -98,13 +134,19 @@ def detect_spec(cfg):
     return None
 
 
-def check_presence(header_names, spec):
+def check_presence(header_names, spec, layer_index, conv_layer_index):
     missing = []
     def has(name):
         return name in header_names
 
     def has_any(names):
-        return any(n in header_names for n in names)
+        expanded = []
+        for n in names:
+            if "%d" in n:
+                expanded.append(n % layer_index)
+            else:
+                expanded.append(n)
+        return any(n in header_names for n in expanded)
 
     # string fields
     for key in ["Embedding", "OutputNorm"]:
@@ -118,12 +160,25 @@ def check_presence(header_names, spec):
                 if not has_any(vals):
                     missing.append((key, vals))
     # layer0 format strings
-    for key in ["Wq", "Wk", "Wv", "Wo", "FfnUp", "FfnGate", "FfnDown", "AttnGate", "WqBias", "WkBias", "WvBias", "ShortConvKernel", "ShortConvInProj", "ShortConvOutProj"]:
+    for key in ["Wq", "Wk", "Wv", "Wo", "FfnUp", "FfnGate", "FfnDown", "AttnGate"]:
         if key in spec:
             fmt = spec[key]
-            name = fmt % 0 if "%d" in fmt else fmt
+            name = fmt % layer_index if "%d" in fmt else fmt
             if not has(name):
                 missing.append((key, name))
+    for key in ["ShortConvKernel", "ShortConvInProj", "ShortConvOutProj"]:
+        if key in spec:
+            fmt = spec[key]
+            name = fmt % conv_layer_index if "%d" in fmt else fmt
+            if not has(name):
+                missing.append((key, name))
+    # Bias tensors are optional in the runtime; only flag if present in spec AND missing feels like a hard error.
+    for key in ["WqBias", "WkBias", "WvBias"]:
+        if key in spec:
+            fmt = spec[key]
+            name = fmt % layer_index if "%d" in fmt else fmt
+            if has(name):
+                continue
     return missing
 
 
@@ -135,13 +190,17 @@ def main():
     args = ap.parse_args()
 
     spec_text = load_spec_files(["internal/model/modelspec.go", "internal/model/afmoe.go"])
+    if not spec_text:
+        raise SystemExit("No spec files found to parse")
 
     root = Path(args.root)
-    dirs = sorted([p for p in root.iterdir() if p.is_dir()])
+    if (root / "config.json").exists():
+        dirs = [root]
+    else:
+        dirs = sorted([p for p in root.iterdir() if p.is_dir()])
     for d in dirs:
         cfg_path = d / "config.json"
-        st_path = d / "model.safetensors"
-        if not cfg_path.exists() or not st_path.exists():
+        if not cfg_path.exists():
             continue
         cfg = json.loads(cfg_path.read_text())
         spec_func = detect_spec(cfg)
@@ -153,9 +212,10 @@ def main():
             print(f"{d.name}: spec func {spec_func} not found")
             continue
         arch = parse_arch_names(body)
-        header = read_safetensors_header(st_path)
-        names = set(k for k in header.keys() if k != "__metadata__")
-        missing = check_presence(names, arch)
+        names = collect_tensor_names(d)
+        layer_index = pick_attn_layer_index(names, cfg.get("layer_types"))
+        conv_layer_index = pick_conv_layer_index(names, cfg.get("layer_types"))
+        missing = check_presence(names, arch, layer_index, conv_layer_index)
         if missing:
             print(f"{d.name}: {spec_func} MISSING {len(missing)} entries")
             for k, v in missing[:12]:

@@ -13,10 +13,10 @@ from collections import defaultdict
 # Heuristics to map suffixes to ArchNames fields
 # We look for these substrings (or exact matches) in the layer-level suffixes.
 LAYER_MAPPINGS = {
-    "Wq": ["q_proj", "self_attn.q_proj", "query.weight"],
-    "Wk": ["k_proj", "self_attn.k_proj", "key.weight"],
-    "Wv": ["v_proj", "self_attn.v_proj", "value.weight"],
-    "Wo": ["o_proj", "self_attn.o_proj", "self_attn.out_proj", "dense.weight"],
+    "Wq": ["q_proj", "self_attn.q_proj", "query.weight", "attention.wq.weight"],
+    "Wk": ["k_proj", "self_attn.k_proj", "key.weight", "attention.wk.weight"],
+    "Wv": ["v_proj", "self_attn.v_proj", "value.weight", "attention.wv.weight"],
+    "Wo": ["o_proj", "self_attn.o_proj", "self_attn.out_proj", "dense.weight", "attention.wo.weight"],
     "WqBias": ["q_proj.bias", "self_attn.q_proj.bias"],
     "WkBias": ["k_proj.bias", "self_attn.k_proj.bias"],
     "WvBias": ["v_proj.bias", "self_attn.v_proj.bias"],
@@ -26,7 +26,7 @@ LAYER_MAPPINGS = {
     "FfnGate": ["gate_proj", "w1", "mlp.gate_proj", "feed_forward.w1"],
     "FfnDown": ["down_proj", "w2", "mlp.down_proj", "feed_forward.w2"],
     
-    "AttnNorm": ["input_layernorm", "attn_norm", "ln_1", "operator_norm"],
+    "AttnNorm": ["input_layernorm", "attn_norm", "ln_1", "operator_norm", "attention_norm"],
     "FfnNorm": ["post_attention_layernorm", "ffn_norm", "ln_2", "pre_mlp_layernorm", "pre_feedforward_layernorm"],
     "PostAttnNorm": ["post_attention_layernorm", "post_attn_norm", "post_attention_norm"],
     "PostFfnNorm": ["post_feedforward_layernorm", "post_mlp_layernorm", "post_ffn_norm"],
@@ -136,6 +136,51 @@ def find_layer_pattern(names):
     print(f"// Detected layer prefix: '{best_prefix}' with {max_layers} layers.", file=sys.stderr)
     return best_prefix, max_layers
 
+def find_all_layer_prefixes(names):
+    prefixes = defaultdict(set)
+    regex = re.compile(r"^(.*?)(\d+)\.(.*)$")
+    for n in names:
+        m = regex.match(n)
+        if m:
+            prefix, num, _ = m.groups()
+            prefixes[prefix].add(int(num))
+    return prefixes
+
+def choose_primary_prefix(prefixes, names):
+    # Prefer language_model.* if present, then largest layer count.
+    best = None
+    best_count = -1
+    for prefix, layers in prefixes.items():
+        count = len(layers)
+        if "language_model" in prefix:
+            if count > best_count or (best and "language_model" not in best):
+                best = prefix
+                best_count = count
+            continue
+        if best is None or (count > best_count and "language_model" not in best):
+            best = prefix
+            best_count = count
+    if best is None:
+        return None, None
+    return best, best_count
+
+def pick_layer_index(prefix, names, layer_types):
+    if not prefix:
+        return 0
+    # If layer_types exist, pick a layer that looks like attention.
+    # Otherwise, use layer 0.
+    if not layer_types:
+        return 0
+    max_check = min(len(layer_types), 128)
+    for i in range(max_check):
+        layer_prefix = f"{prefix}{i}."
+        if any(n.startswith(layer_prefix + "self_attn.") or n.startswith(layer_prefix + "attention.") for n in names):
+            return i
+    return 0
+
+def layer_suffix(prefix, layer_index, name):
+    return name[len(prefix)+len(str(layer_index))+1:]
+
 def to_go_func_name(name):
     # simple camelCase
     parts = re.split(r'[_\-.]', name)
@@ -174,16 +219,20 @@ def main():
     print(f"// Architectures: {archs}")
     
     # 1. Identify Layer Pattern
-    prefix, num_layers = find_layer_pattern(names)
+    prefixes = find_all_layer_prefixes(names)
+    prefix, num_layers = choose_primary_prefix(prefixes, names)
+    if prefix is None:
+        prefix, num_layers = find_layer_pattern(names)
     
     found_layer_map = {} # GoField -> Suffix
     found_global_map = {} # GoField -> FullName
     
     # 2. Analyze Layer Tensors
     if prefix:
-        # Get all suffixes that exist for layer 0 (or layer 1 if 0 missing, but usually 0)
+        layer_index = pick_layer_index(prefix, names, layer_types)
+        # Get all suffixes that exist for chosen layer
         layer_0_suffixes = []
-        regex = re.compile(fr"^{re.escape(prefix)}0\.(.*)$")
+        regex = re.compile(fr"^{re.escape(prefix)}{layer_index}\.(.*)$")
         for n in names:
             m = regex.match(n)
             if m:
@@ -213,13 +262,14 @@ def main():
     # For each desired field, search through available suffixes
     final_layer_map = {}
     if prefix:
-        # Gather all layer 0 names again
-        l0_names = [n for n in names if n.startswith(f"{prefix}0.")]
+        # Gather chosen layer names again
+        layer_index = pick_layer_index(prefix, names, layer_types)
+        l0_names = [n for n in names if n.startswith(f"{prefix}{layer_index}.")]
         
         for field, candidates in LAYER_MAPPINGS.items():
             best_match = None
             for n in l0_names:
-                suffix = n[len(prefix)+2:] # remove "prefix" + "0."
+                suffix = layer_suffix(prefix, layer_index, n)
                 
                 for c in candidates:
                     # Exact match of keyword to suffix part (ignoring .weight)
@@ -234,6 +284,15 @@ def main():
                 if best_match: break
             if best_match:
                 final_layer_map[field] = best_match
+
+        # Norm disambiguation for models that expose pre/post norms explicitly.
+        suffixes = set(layer_suffix(prefix, layer_index, n) for n in l0_names)
+        if "pre_feedforward_layernorm.weight" in suffixes:
+            final_layer_map["FfnNorm"] = "pre_feedforward_layernorm.weight"
+        if "post_attention_layernorm.weight" in suffixes:
+            final_layer_map["PostAttnNorm"] = "post_attention_layernorm.weight"
+        if "post_feedforward_layernorm.weight" in suffixes:
+            final_layer_map["PostFfnNorm"] = "post_feedforward_layernorm.weight"
 
     # 3. Analyze Global Tensors
     # Remove layer tensors from consideration roughly
@@ -403,9 +462,10 @@ def main():
     unmapped_global = []
     unmapped_layer_0 = []
     
+    layer_index = pick_layer_index(prefix, names, layer_types)
     for n in names:
-        if prefix and n.startswith(f"{prefix}0."):
-            suffix = n[len(prefix)+2:] # remove "model.layers.0."
+        if prefix and n.startswith(f"{prefix}{layer_index}."):
+            suffix = layer_suffix(prefix, layer_index, n)
             if suffix not in mapped_suffixes:
                 # double check if we mapped it but logic above missed adding to set? no
                 unmapped_layer_0.append(suffix)
@@ -413,6 +473,14 @@ def main():
                 # Other layers, assume same pattern
                 pass
         else:
+                # Ignore tensors that belong to other layer prefixes (e.g. multimodal blocks).
+                other_prefix = False
+                for p in prefixes.keys():
+                    if p != prefix and n.startswith(p):
+                        other_prefix = True
+                        break
+                if other_prefix:
+                    continue
                 # Global
                 if n not in mapped_globals:
                     unmapped_global.append(n)
