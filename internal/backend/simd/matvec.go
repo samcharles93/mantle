@@ -264,26 +264,54 @@ func matVecRangeF32Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 // Uses a single accumulator to minimize register pressure.
 func matVecRangeF32SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 	c := w.C
-	for i := rs; i < re; i++ {
-		row := w.Data[i*w.Stride : i*w.Stride+w.C]
+	i := rs
+	for ; i+1 < re; i += 2 {
+		row0 := w.Data[i*w.Stride : i*w.Stride+w.C]
+		row1 := w.Data[(i+1)*w.Stride : (i+1)*w.Stride+w.C]
 
-		// Single accumulator - reduces register pressure
+		var acc0 archsimd.Float32x8
+		var acc1 archsimd.Float32x8
+		j := 0
+		for ; j+8 <= c; j += 8 {
+			vx := archsimd.LoadFloat32x8Slice(x[j:])
+			vrow0 := archsimd.LoadFloat32x8Slice(row0[j:])
+			vrow1 := archsimd.LoadFloat32x8Slice(row1[j:])
+			acc0 = acc0.Add(vrow0.Mul(vx))
+			acc1 = acc1.Add(vrow1.Mul(vx))
+		}
+
+		var tmp0 [8]float32
+		var tmp1 [8]float32
+		acc0.Store(&tmp0)
+		acc1.Store(&tmp1)
+		var sum0 float32
+		var sum1 float32
+		sum0 += tmp0[0] + tmp0[1] + tmp0[2] + tmp0[3] + tmp0[4] + tmp0[5] + tmp0[6] + tmp0[7]
+		sum1 += tmp1[0] + tmp1[1] + tmp1[2] + tmp1[3] + tmp1[4] + tmp1[5] + tmp1[6] + tmp1[7]
+
+		for ; j < c; j++ {
+			xv := x[j]
+			sum0 += row0[j] * xv
+			sum1 += row1[j] * xv
+		}
+		dst[i] = sum0
+		dst[i+1] = sum1
+	}
+	if i < re {
+		row := w.Data[i*w.Stride : i*w.Stride+w.C]
 		var acc archsimd.Float32x8
 		j := 0
-		// Process 8 elements at a time
 		for ; j+8 <= c; j += 8 {
 			vrow := archsimd.LoadFloat32x8Slice(row[j:])
 			vx := archsimd.LoadFloat32x8Slice(x[j:])
 			acc = acc.Add(vrow.Mul(vx))
 		}
 
-		// Horizontal reduction: store to array and sum scalarly
 		var tmp [8]float32
 		acc.Store(&tmp)
 		var sum float32
 		sum += tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 
-		// Handle remaining elements
 		for ; j < c; j++ {
 			sum += row[j] * x[j]
 		}
