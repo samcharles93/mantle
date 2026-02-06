@@ -3,7 +3,6 @@ package inference
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -70,6 +69,10 @@ type Generator struct {
 	tokenCache    []string
 	tokenCacheOK  []bool
 	tokenCacheMap map[int]string
+
+	stopTokenSet   []bool
+	stopTokenMap   map[int]struct{}
+	stopTokenReady bool
 }
 
 func (g *Generator) Run(allTokens []int, steps int, stream func(string)) ([]int, Stats, error) {
@@ -136,7 +139,7 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		}
 		next := g.Sampler.Sample(logitsVec, toks, g.StopTokens)
 
-		stop := slices.Contains(g.StopTokens, next)
+		stop := g.isStopToken(next)
 		if stop {
 			break
 		}
@@ -165,6 +168,44 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 
 	flush()
 	return g.ContextTokens, stats, nil
+}
+
+func (g *Generator) isStopToken(id int) bool {
+	if !g.stopTokenReady {
+		g.initStopTokenSet()
+	}
+	if len(g.stopTokenSet) > 0 {
+		if id >= 0 && id < len(g.stopTokenSet) {
+			return g.stopTokenSet[id]
+		}
+		return false
+	}
+	_, ok := g.stopTokenMap[id]
+	return ok
+}
+
+func (g *Generator) initStopTokenSet() {
+	g.stopTokenReady = true
+	if len(g.StopTokens) == 0 {
+		return
+	}
+	if t, ok := g.Tokenizer.(interface{ Decoder() []string }); ok {
+		if dec := t.Decoder(); len(dec) > 0 {
+			g.stopTokenSet = make([]bool, len(dec))
+			for _, id := range g.StopTokens {
+				if id >= 0 && id < len(g.stopTokenSet) {
+					g.stopTokenSet[id] = true
+				}
+			}
+			return
+		}
+	}
+	g.stopTokenMap = make(map[int]struct{}, len(g.StopTokens))
+	for _, id := range g.StopTokens {
+		if id >= 0 {
+			g.stopTokenMap[id] = struct{}{}
+		}
+	}
 }
 
 func (g *Generator) initTokenCache() {
