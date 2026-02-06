@@ -19,9 +19,11 @@ func Render(opts RenderOptions) (string, bool, error) {
 func renderByArchDefault(opts RenderOptions) (string, bool, error) {
 	switch strings.ToLower(strings.TrimSpace(opts.Arch)) {
 	case "lfm2":
-		return renderLFM2(opts)
+		return renderChatML(opts)
 	case "gemma":
-		return renderFunctionGemma(opts)
+		return renderGemma3(opts)
+	case "gemma3_text", "gemma3":
+		return renderGemma3(opts)
 	case "qwen3":
 		return renderQwen3(opts)
 	case "mistral3":
@@ -34,9 +36,11 @@ func renderByArchDefault(opts RenderOptions) (string, bool, error) {
 func renderByArch(opts RenderOptions) (string, bool, error) {
 	switch strings.ToLower(strings.TrimSpace(opts.Arch)) {
 	case "lfm2":
-		return renderLFM2(opts)
+		return renderChatML(opts)
 	case "gemma":
-		return renderFunctionGemma(opts)
+		return renderGemma3(opts)
+	case "gemma3_text", "gemma3":
+		return renderGemma3(opts)
 	case "qwen3":
 		return renderQwen3(opts)
 	case "mistral3":
@@ -50,13 +54,13 @@ func renderByTemplateSignature(opts RenderOptions) (string, bool, error) {
 	tpl := opts.Template
 	switch {
 	case strings.Contains(tpl, "<start_of_turn>") && strings.Contains(tpl, "<start_function_declaration>"):
-		return renderFunctionGemma(opts)
+		return renderGemma3(opts)
 	case strings.Contains(tpl, "[SYSTEM_PROMPT]") && strings.Contains(tpl, "[INST]"):
 		return renderMistral3(opts)
 	case strings.Contains(tpl, "<tools>") || strings.Contains(tpl, "<tool_call>"):
 		return renderQwen3(opts)
 	case strings.Contains(tpl, "<|im_start|>") && strings.Contains(tpl, "<|im_end|>") && strings.Contains(tpl, "messages"):
-		return renderLFM2(opts)
+		return renderChatML(opts)
 	default:
 		return "", false, nil
 	}

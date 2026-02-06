@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func renderFunctionGemma(opts RenderOptions) (string, bool, error) {
+func renderGemma3(opts RenderOptions) (string, bool, error) {
 	var b strings.Builder
 
 	if !opts.AddBOS && opts.BOSToken != "" {
@@ -90,7 +90,7 @@ func renderFunctionGemma(opts RenderOptions) (string, bool, error) {
 				prevType = "tool_call"
 			}
 		} else {
-			if err := writeToolResponseForGemma(&b, msg); err != nil {
+			if err := writeGemmaToolResponse(&b, msg); err != nil {
 				return "", false, err
 			}
 			prevType = "tool_response"
@@ -139,7 +139,7 @@ func writeGemmaSystemContent(b *strings.Builder, content any) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("function_gemma: invalid system content type")
+	return fmt.Errorf("gemma: invalid system content type")
 }
 
 func writeGemmaMessageContent(b *strings.Builder, content any) error {
@@ -151,7 +151,7 @@ func writeGemmaMessageContent(b *strings.Builder, content any) error {
 		for _, item := range seq {
 			m, ok := asMap(item)
 			if !ok {
-				return fmt.Errorf("function_gemma: invalid content item")
+				return fmt.Errorf("gemma: invalid content item")
 			}
 			t, _ := asString(m["type"])
 			switch t {
@@ -161,15 +161,15 @@ func writeGemmaMessageContent(b *strings.Builder, content any) error {
 				txt, _ := asString(m["text"])
 				b.WriteString(trimString(txt))
 			default:
-				return fmt.Errorf("function_gemma: unsupported content type %q", t)
+				return fmt.Errorf("gemma: unsupported content type %q", t)
 			}
 		}
 		return nil
 	}
-	return fmt.Errorf("function_gemma: invalid content type")
+	return fmt.Errorf("gemma: invalid content type")
 }
 
-func writeToolResponseForGemma(b *strings.Builder, msg Message) error {
+func writeGemmaToolResponse(b *strings.Builder, msg Message) error {
 	content := msg.Content
 	if content == nil {
 		return nil
@@ -182,12 +182,12 @@ func writeToolResponseForGemma(b *strings.Builder, msg Message) error {
 		if msg.Name != "" {
 			return writeNamedResponseMap(b, msg.Name, m)
 		}
-		return fmt.Errorf("function_gemma: tool response mapping missing name")
+		return fmt.Errorf("gemma: tool response mapping missing name")
 	}
 
 	if s, ok := asString(content); ok {
 		if msg.Name == "" {
-			return fmt.Errorf("function_gemma: tool response string missing name")
+			return fmt.Errorf("gemma: tool response string missing name")
 		}
 		b.WriteString("<start_function_response>response:")
 		b.WriteString(trimString(msg.Name))
@@ -205,7 +205,7 @@ func writeToolResponseForGemma(b *strings.Builder, msg Message) error {
 		for _, item := range seq {
 			m, ok := asMap(item)
 			if !ok {
-				return fmt.Errorf("function_gemma: invalid tool response item")
+				return fmt.Errorf("gemma: invalid tool response item")
 			}
 			if name, ok := m["name"]; ok && m["response"] != nil {
 				if err := writeNamedResponseMap(b, name, m["response"]); err != nil {
@@ -219,21 +219,21 @@ func writeToolResponseForGemma(b *strings.Builder, msg Message) error {
 				}
 				continue
 			}
-			return fmt.Errorf("function_gemma: tool response item missing name")
+			return fmt.Errorf("gemma: tool response item missing name")
 		}
 		return nil
 	}
-	return fmt.Errorf("function_gemma: invalid tool response content")
+	return fmt.Errorf("gemma: invalid tool response content")
 }
 
 func writeNamedResponseMap(b *strings.Builder, name any, response any) error {
 	nameStr, ok := asString(name)
 	if !ok {
-		return fmt.Errorf("function_gemma: tool response name must be string")
+		return fmt.Errorf("gemma: tool response name must be string")
 	}
 	respMap, ok := asMap(response)
 	if !ok {
-		return fmt.Errorf("function_gemma: tool response must be mapping")
+		return fmt.Errorf("gemma: tool response must be mapping")
 	}
 
 	b.WriteString("<start_function_response>response:")
@@ -262,15 +262,15 @@ func writeNamedResponseMap(b *strings.Builder, name any, response any) error {
 func formatFunctionDeclaration(tool any) (string, error) {
 	toolMap, ok := asMap(tool)
 	if !ok {
-		return "", fmt.Errorf("function_gemma: tool must be mapping")
+		return "", fmt.Errorf("gemma: tool must be mapping")
 	}
 	fnRaw, ok := toolMap["function"]
 	if !ok {
-		return "", fmt.Errorf("function_gemma: tool missing function")
+		return "", fmt.Errorf("gemma: tool missing function")
 	}
 	fn, ok := asMap(fnRaw)
 	if !ok {
-		return "", fmt.Errorf("function_gemma: tool function must be mapping")
+		return "", fmt.Errorf("gemma: tool function must be mapping")
 	}
 
 	name, _ := asString(fn["name"])
@@ -287,13 +287,13 @@ func formatFunctionDeclaration(tool any) (string, error) {
 	if paramsRaw, ok := fn["parameters"]; ok && paramsRaw != nil {
 		params, ok := asMap(paramsRaw)
 		if !ok {
-			return "", fmt.Errorf("function_gemma: function parameters must be mapping")
+			return "", fmt.Errorf("gemma: function parameters must be mapping")
 		}
 		b.WriteString("\n,parameters:{")
 		if propsRaw, ok := params["properties"]; ok && propsRaw != nil {
 			props, ok := asMap(propsRaw)
 			if !ok {
-				return "", fmt.Errorf("function_gemma: parameters.properties must be mapping")
+				return "", fmt.Errorf("gemma: parameters.properties must be mapping")
 			}
 			formatted, err := formatParameters(props)
 			if err != nil {
@@ -306,7 +306,7 @@ func formatFunctionDeclaration(tool any) (string, error) {
 		if reqRaw, ok := params["required"]; ok && reqRaw != nil {
 			reqList, ok := asSlice(reqRaw)
 			if !ok {
-				return "", fmt.Errorf("function_gemma: parameters.required must be array")
+				return "", fmt.Errorf("gemma: parameters.required must be array")
 			}
 			b.WriteString("required:[")
 			for i, item := range reqList {
