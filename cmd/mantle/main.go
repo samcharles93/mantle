@@ -7,15 +7,17 @@ import (
 	"os"
 
 	"github.com/samcharles93/mantle/internal/logger"
+	"github.com/samcharles93/mantle/internal/version"
 
 	"github.com/urfave/cli/v3"
 )
 
 func main() {
 	app := &cli.Command{
-		Name:  "mantle",
-		Usage: "Model execution substrate CLI",
-		Flags: loggingFlags(),
+		Name:    "mantle",
+		Usage:   "Model execution substrate CLI",
+		Version: version.String(),
+		Flags:   loggingFlags(),
 		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
 			// Initialize logger
 			level := logger.ParseLevel(logLevel)
@@ -50,6 +52,7 @@ func main() {
 			quantizeCmd(),
 			inspectCmd(),
 			serveCmd(),
+			versionCmd(),
 		},
 	}
 

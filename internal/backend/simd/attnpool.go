@@ -17,6 +17,7 @@ type AttnContext struct {
 	KvStride, HeadDim int
 	NHead, KvHeads    int
 	Scale             float32
+	CacheLen          int
 }
 
 type AttnPool struct {
@@ -83,12 +84,18 @@ func RunAttnHeads(ctx *AttnContext, scoresBuf []float32, rs, re int) {
 	if winLen > len(scoresBuf) {
 		panic("attention scores buffer too small")
 	}
+	cacheLen := ctx.CacheLen
+	useRing := cacheLen > 0 && cacheLen < ctx.Pos+1
 	scores := scoresBuf[:winLen]
 	for h := rs; h < re; h++ {
 		kvHead := h * ctx.KvHeads / ctx.NHead
 		qh := ctx.Q[h*ctx.HeadDim : (h+1)*ctx.HeadDim]
 		for t := ctx.Start; t <= ctx.Pos; t++ {
-			koff := t*ctx.KvStride + kvHead*ctx.HeadDim
+			cachePos := t
+			if useRing {
+				cachePos = t % cacheLen
+			}
+			koff := cachePos*ctx.KvStride + kvHead*ctx.HeadDim
 			if ctx.CacheK16 != nil {
 				kv := ctx.CacheK16[koff : koff+ctx.HeadDim]
 				scores[t-ctx.Start] = DotF16(qh, kv) * ctx.Scale
@@ -103,12 +110,20 @@ func RunAttnHeads(ctx *AttnContext, scoresBuf []float32, rs, re int) {
 			var sum float32
 			if ctx.CacheV16 != nil {
 				for t := ctx.Start; t <= ctx.Pos; t++ {
-					voff := t*ctx.KvStride + kvHead*ctx.HeadDim + d
+					cachePos := t
+					if useRing {
+						cachePos = t % cacheLen
+					}
+					voff := cachePos*ctx.KvStride + kvHead*ctx.HeadDim + d
 					sum += scores[t-ctx.Start] * Float16ToFloat32(ctx.CacheV16[voff])
 				}
 			} else {
 				for t := ctx.Start; t <= ctx.Pos; t++ {
-					voff := t*ctx.KvStride + kvHead*ctx.HeadDim + d
+					cachePos := t
+					if useRing {
+						cachePos = t % cacheLen
+					}
+					voff := cachePos*ctx.KvStride + kvHead*ctx.HeadDim + d
 					sum += scores[t-ctx.Start] * ctx.CacheV[voff]
 				}
 			}

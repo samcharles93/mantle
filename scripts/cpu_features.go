@@ -19,22 +19,22 @@ type output struct {
 
 func main() {
 	features := map[string]bool{
-		"AVX":                archsimd.X86.AVX(),
-		"AVX2":               archsimd.X86.AVX2(),
-		"FMA":                archsimd.X86.FMA(),
-		"AVXAES":             archsimd.X86.AVXAES(),
-		"VAES":               archsimd.X86.VAES(),
-		"SHA":                archsimd.X86.SHA(),
-		"AVX512":             archsimd.X86.AVX512(),
-		"AVX512BITALG":       archsimd.X86.AVX512BITALG(),
-		"AVX512GFNI":         archsimd.X86.AVX512GFNI(),
-		"AVX512VAES":         archsimd.X86.AVX512VAES(),
-		"AVX512VBMI":         archsimd.X86.AVX512VBMI(),
-		"AVX512VBMI2":        archsimd.X86.AVX512VBMI2(),
-		"AVX512VNNI":         archsimd.X86.AVX512VNNI(),
-		"AVX512VPCLMULQDQ":   archsimd.X86.AVX512VPCLMULQDQ(),
-		"AVX512VPOPCNTDQ":    archsimd.X86.AVX512VPOPCNTDQ(),
-		"AVXVNNI":            archsimd.X86.AVXVNNI(),
+		"AVX":              archsimd.X86.AVX(),
+		"AVX2":             archsimd.X86.AVX2(),
+		"FMA":              archsimd.X86.FMA(),
+		"AVXAES":           archsimd.X86.AVXAES(),
+		"VAES":             archsimd.X86.VAES(),
+		"SHA":              archsimd.X86.SHA(),
+		"AVX512":           archsimd.X86.AVX512(),
+		"AVX512BITALG":     archsimd.X86.AVX512BITALG(),
+		"AVX512GFNI":       archsimd.X86.AVX512GFNI(),
+		"AVX512VAES":       archsimd.X86.AVX512VAES(),
+		"AVX512VBMI":       archsimd.X86.AVX512VBMI(),
+		"AVX512VBMI2":      archsimd.X86.AVX512VBMI2(),
+		"AVX512VNNI":       archsimd.X86.AVX512VNNI(),
+		"AVX512VPCLMULQDQ": archsimd.X86.AVX512VPCLMULQDQ(),
+		"AVX512VPOPCNTDQ":  archsimd.X86.AVX512VPOPCNTDQ(),
+		"AVXVNNI":          archsimd.X86.AVXVNNI(),
 	}
 
 	out := output{

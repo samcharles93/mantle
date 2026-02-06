@@ -5,21 +5,23 @@ import "sync"
 // Instance holds the CPU backend runtime state for a loaded model.
 // It implements model.Runtime interface.
 type Instance struct {
-	Config        *ModelConfig
-	Embeddings    *Mat
-	OutputNorm    []float32
-	Output        *Mat
-	Layers        []Layer
-	MaxContext    int
-	Pos           int
-	RMSEpsilon    float32
-	HeadDim       int
-	HeadCount     int
-	MaxHeadKV     int
-	RopeInvFreq   []float64
-	RopeAttnScale float32
-	MuPScale      float32
-	RopeLocalOnly bool
+	Config             *ModelConfig
+	Embeddings         *Mat
+	OutputNorm         []float32
+	Output             *Mat
+	Layers             []Layer
+	MaxContext         int
+	Pos                int
+	RMSEpsilon         float32
+	HeadDim            int
+	HeadCount          int
+	MaxHeadKV          int
+	RopeInvFreq        []float64
+	RopeAttnScale      float32
+	RopeInvFreqLocal   []float64
+	RopeAttnScaleLocal float32
+	MuPScale           float32
+	RopeLocalOnly      bool
 
 	attnPoolOnce sync.Once
 	attnPool     *AttnPool
@@ -77,6 +79,7 @@ type AttnCache struct {
 	K16      []uint16
 	V16      []uint16
 	KvStride int
+	CacheLen int
 }
 
 // ShortConvState holds state for recurrent attention convolution.

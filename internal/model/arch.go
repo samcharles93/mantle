@@ -20,24 +20,26 @@ type HFConfig struct {
 	RopeScaling       *ropeScaling `json:"rope_scaling"`
 	RopeParameters    *ropeParams  `json:"rope_parameters"`
 
-	// MoE / AFMoE-specific fields.
-	MoEIntermediateSize int     `json:"moe_intermediate_size"`
-	NumDenseLayers      int     `json:"num_dense_layers"`
-	NumSharedExperts    int     `json:"num_shared_experts"`
-	RouteScale          float64 `json:"route_scale"`
-	SlidingWindow       int     `json:"sliding_window"`
-	GlobalAttnEveryN    int     `json:"global_attn_every_n_layers"`
-	AttentionBias       bool    `json:"attention_bias"`
-	MuPEnabled          bool    `json:"mup_enabled"`
+	// MoE specific fields.
+	MoEIntermediateSize  int     `json:"moe_intermediate_size"`
+	NumDenseLayers       int     `json:"num_dense_layers"`
+	NumSharedExperts     int     `json:"num_shared_experts"`
+	RouteScale           float64 `json:"route_scale"`
+	SlidingWindow        int     `json:"sliding_window"`
+	SlidingWindowPattern int     `json:"sliding_window_pattern"`
+	GlobalAttnEveryN     int     `json:"global_attn_every_n_layers"`
+	AttentionBias        bool    `json:"attention_bias"`
+	MuPEnabled           bool    `json:"mup_enabled"`
 
-	HiddenSize       int     `json:"hidden_size"`
-	IntermediateSize int     `json:"intermediate_size"`
-	NumHiddenLayers  int     `json:"num_hidden_layers"`
-	HeadDim          int     `json:"head_dim"`
-	RMSNormEps       float64 `json:"rms_norm_eps"`
-	LayerNormEps     float64 `json:"layer_norm_eps"`
-	VocabSize        int     `json:"vocab_size"`
-	RopeTheta        float64 `json:"rope_theta"`
+	HiddenSize        int     `json:"hidden_size"`
+	IntermediateSize  int     `json:"intermediate_size"`
+	NumHiddenLayers   int     `json:"num_hidden_layers"`
+	HeadDim           int     `json:"head_dim"`
+	RMSNormEps        float64 `json:"rms_norm_eps"`
+	LayerNormEps      float64 `json:"layer_norm_eps"`
+	VocabSize         int     `json:"vocab_size"`
+	RopeTheta         float64 `json:"rope_theta"`
+	RopeLocalBaseFreq float64 `json:"rope_local_base_freq"`
 
 	EmbeddingMultiplier    float64   `json:"embedding_multiplier"`
 	LMHeadMultiplier       float64   `json:"lm_head_multiplier"`
@@ -181,6 +183,9 @@ func LoadHFConfigBytes(raw []byte) (*HFConfig, error) {
 	if err := mergeTextConfigMissing(&cfg, raw); err != nil {
 		return nil, err
 	}
+	if cfg.GlobalAttnEveryN == 0 && cfg.SlidingWindowPattern > 0 {
+		cfg.GlobalAttnEveryN = cfg.SlidingWindowPattern
+	}
 	if cfg.HiddenSize == 0 && cfg.BlockDim > 0 {
 		cfg.HiddenSize = cfg.BlockDim
 	}
@@ -264,6 +269,9 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	if dst.RopeTheta == 0 && textCfg.RopeParameters != nil && textCfg.RopeParameters.RopeTheta > 0 {
 		dst.RopeTheta = textCfg.RopeParameters.RopeTheta
 	}
+	if dst.RopeLocalBaseFreq == 0 && textCfg.RopeLocalBaseFreq > 0 {
+		dst.RopeLocalBaseFreq = textCfg.RopeLocalBaseFreq
+	}
 
 	if dst.MoEIntermediateSize == 0 && textCfg.MoEIntermediateSize > 0 {
 		dst.MoEIntermediateSize = textCfg.MoEIntermediateSize
@@ -279,6 +287,9 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	}
 	if dst.SlidingWindow == 0 && textCfg.SlidingWindow > 0 {
 		dst.SlidingWindow = textCfg.SlidingWindow
+	}
+	if dst.SlidingWindowPattern == 0 && textCfg.SlidingWindowPattern > 0 {
+		dst.SlidingWindowPattern = textCfg.SlidingWindowPattern
 	}
 	if dst.GlobalAttnEveryN == 0 && textCfg.GlobalAttnEveryN > 0 {
 		dst.GlobalAttnEveryN = textCfg.GlobalAttnEveryN

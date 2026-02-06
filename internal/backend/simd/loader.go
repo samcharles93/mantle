@@ -178,6 +178,10 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	if ropeBase == 0 {
 		ropeBase = 10000
 	}
+	ropeLocalBase := cfg.RopeLocalBaseFreq
+	if ropeLocalBase == 0 {
+		ropeLocalBase = ropeBase
+	}
 	ropeScaling := model.RopeScalingForConfig(cfg)
 	routeScale := cfg.RouteScale
 	if routeScale == 0 {
@@ -194,6 +198,15 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	if len(cfg.LayerTypes) == blockCount {
 		layerTypes = make([]string, blockCount)
 		copy(layerTypes, cfg.LayerTypes)
+	} else if cfg.GlobalAttnEveryN > 0 && cfg.SlidingWindow > 0 {
+		layerTypes = make([]string, blockCount)
+		for i := 0; i < blockCount; i++ {
+			if (i+1)%cfg.GlobalAttnEveryN == 0 {
+				layerTypes[i] = "full_attention"
+			} else {
+				layerTypes[i] = "sliding_attention"
+			}
+		}
 	}
 
 	modelCfg := &ModelConfig{
@@ -207,6 +220,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			HeadCountKV:            headKVArr,
 			RMSEpsilon:             rmsEps,
 			RopeFreqBase:           ropeBase,
+			RopeFreqBaseLocal:      ropeLocalBase,
 			RopeScaling:            toSIMDRopeScaling(ropeScaling),
 			ContextLength:          cfg.MaxPosition,
 			VocabSize:              cfg.VocabSize,
@@ -472,7 +486,13 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			kvStride := layer.HeadKV * headDim
 
 			// Initialize cache based on type
-			cache := AttnCache{KvStride: kvStride}
+			cacheLen := maxContext
+			if layer.AttnType == "sliding_attention" && layer.AttnWindow > 0 {
+				if layer.AttnWindow < cacheLen {
+					cacheLen = layer.AttnWindow
+				}
+			}
+			cache := AttnCache{KvStride: kvStride, CacheLen: cacheLen}
 
 			// Key cache
 			kt := modelCfg.Config.CacheTypeK
@@ -480,9 +500,9 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 				kt = CacheTypeF32 // Default for now, CLI will override
 			}
 			if kt == CacheTypeF16 {
-				cache.K16 = make([]uint16, maxContext*kvStride)
+				cache.K16 = make([]uint16, cacheLen*kvStride)
 			} else {
-				cache.K = make([]float32, maxContext*kvStride)
+				cache.K = make([]float32, cacheLen*kvStride)
 			}
 
 			// Value cache
@@ -491,9 +511,9 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 				vt = CacheTypeF32
 			}
 			if vt == CacheTypeF16 {
-				cache.V16 = make([]uint16, maxContext*kvStride)
+				cache.V16 = make([]uint16, cacheLen*kvStride)
 			} else {
-				cache.V = make([]float32, maxContext*kvStride)
+				cache.V = make([]float32, cacheLen*kvStride)
 			}
 
 			layer.AttnCache = cache
@@ -1179,17 +1199,35 @@ func updateInstanceRoPE(m *Instance) {
 	if headDim == 0 {
 		headDim = m.Config.Config.EmbeddingLength / m.Config.Config.HeadCount
 	}
-	ropeInvFreq := make([]float64, headDim/2)
-	for i := 0; i < len(ropeInvFreq); i++ {
-		power := float64(2*i) / float64(headDim)
-		ropeInvFreq[i] = 1.0 / math.Pow(m.Config.Config.RopeFreqBase, power)
+	calc := func(base float64) ([]float64, float32) {
+		if base <= 0 {
+			base = 10000
+		}
+		ropeInvFreq := make([]float64, headDim/2)
+		for i := 0; i < len(ropeInvFreq); i++ {
+			power := float64(2*i) / float64(headDim)
+			ropeInvFreq[i] = 1.0 / math.Pow(base, power)
+		}
+		attnScale := 1.0
+		if rs := m.Config.Config.RopeScaling; rs != nil {
+			attnScale = model.ApplyRopeScaling(ropeInvFreq, base, m.Config.Config.ContextLength, toModelRopeScaling(rs))
+		}
+		return ropeInvFreq, float32(attnScale)
 	}
-	attnScale := 1.0
-	if rs := m.Config.Config.RopeScaling; rs != nil {
-		attnScale = model.ApplyRopeScaling(ropeInvFreq, m.Config.Config.RopeFreqBase, m.Config.Config.ContextLength, toModelRopeScaling(rs))
-	}
+
+	ropeInvFreq, attnScale := calc(m.Config.Config.RopeFreqBase)
 	m.RopeInvFreq = ropeInvFreq
-	m.RopeAttnScale = float32(attnScale)
+	m.RopeAttnScale = attnScale
+
+	localBase := m.Config.Config.RopeFreqBaseLocal
+	if localBase == 0 || localBase == m.Config.Config.RopeFreqBase {
+		m.RopeInvFreqLocal = nil
+		m.RopeAttnScaleLocal = m.RopeAttnScale
+		return
+	}
+	ropeInvFreqLocal, localScale := calc(localBase)
+	m.RopeInvFreqLocal = ropeInvFreqLocal
+	m.RopeAttnScaleLocal = localScale
 }
 
 func toSIMDRopeScaling(rs *model.RopeScaling) *RopeScaling {

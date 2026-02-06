@@ -3,18 +3,19 @@ package simd
 import "github.com/samcharles93/mantle/internal/tokenizer"
 
 type Config struct {
-	BlockCount      int
-	EmbeddingLength int
-	FFNLength       int
-	HeadCount       int
-	HeadDim         int
-	HeadCountKV     []int
-	RMSEpsilon      float64
-	RopeFreqBase    float64
-	RopeScaling     *RopeScaling
-	ContextLength   int
-	VocabSize       int
-	ShortConvLCache int
+	BlockCount        int
+	EmbeddingLength   int
+	FFNLength         int
+	HeadCount         int
+	HeadDim           int
+	HeadCountKV       []int
+	RMSEpsilon        float64
+	RopeFreqBase      float64
+	RopeFreqBaseLocal float64
+	RopeScaling       *RopeScaling
+	ContextLength     int
+	VocabSize         int
+	ShortConvLCache   int
 
 	EmbeddingMultiplier    float64
 	LMHeadMultiplier       float64

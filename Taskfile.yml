@@ -7,6 +7,13 @@ vars:
   MCF_DIR: '{{.MCF_DIR | default (joinPath .MODELS_DIR "mcf")}}'
   RAW_MODELS_DIR: '{{.RAW_MODELS_DIR | default (joinPath .MODELS_DIR "raw")}}'
   BUILD_FLAGS: '-ldflags="-w -s" -trimpath'
+  VERSION: '{{.VERSION | default ""}}'
+  COMMIT: '{{.COMMIT | default ""}}'
+  BUILD_TIME: '{{.BUILD_TIME | default ""}}'
+  VERSION_LDFLAGS: |
+    {{- if or .VERSION .COMMIT .BUILD_TIME -}}
+    -ldflags="-w -s{{if .VERSION}} -X 'github.com/samcharles93/mantle/internal/version.Version={{.VERSION}}'{{end}}{{if .COMMIT}} -X 'github.com/samcharles93/mantle/internal/version.Commit={{.COMMIT}}'{{end}}{{if .BUILD_TIME}} -X 'github.com/samcharles93/mantle/internal/version.BuildTime={{.BUILD_TIME}}'{{end}}"
+    {{- end -}}
   BUILD_TAGS: '{{if .CUDA}}-tags cuda{{end}}'
   CUDA_HOME_RESOLVED:
     sh: |
@@ -56,7 +63,21 @@ tasks:
   build:
     desc: Build the mantle binary (use CUDA=1 for cuda backend)
     cmds:
-      - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}{{.GO}} build {{.BUILD_FLAGS}} {{.BUILD_TAGS}} -o bin/mantle ./cmd/mantle'
+      - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}{{.GO}} build {{if .VERSION_LDFLAGS}}{{.VERSION_LDFLAGS}}{{else}}{{.BUILD_FLAGS}}{{end}} {{.BUILD_TAGS}} -o bin/mantle ./cmd/mantle'
+      - 'echo "Build Complete: bin/mantle"'
+    preconditions:
+      - sh: '{{if .CUDA}}[ -n "{{.CUDA_HOME_RESOLVED}}" ] && [ -d "{{.CUDA_LIBDIR}}" ] && [ -f "{{.CUDA_LIBDIR}}/libcudart.so" ] && [ -f "{{.CUDA_LIBDIR}}/libcublas.so" ]{{else}}true{{end}}'
+        msg: 'CUDA toolkit libraries not found. Set CUDA_HOME or ensure nvcc is in PATH so "{{.CUDA_LIBDIR}}" resolves with libcudart.so and libcublas.so.'
+
+  build:release:
+    desc: Build the mantle binary with version metadata (auto commit/time)
+    vars:
+      COMMIT:
+        sh: 'git rev-parse HEAD'
+      BUILD_TIME:
+        sh: 'date -u +%Y%m%dT%H%M%SZ'
+    cmds:
+      - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}{{.GO}} build {{if .VERSION_LDFLAGS}}{{.VERSION_LDFLAGS}}{{else}}{{.BUILD_FLAGS}}{{end}} {{.BUILD_TAGS}} -o bin/mantle ./cmd/mantle'
       - 'echo "Build Complete: bin/mantle"'
     preconditions:
       - sh: '{{if .CUDA}}[ -n "{{.CUDA_HOME_RESOLVED}}" ] && [ -d "{{.CUDA_LIBDIR}}" ] && [ -f "{{.CUDA_LIBDIR}}/libcudart.so" ] && [ -f "{{.CUDA_LIBDIR}}/libcublas.so" ]{{else}}true{{end}}'

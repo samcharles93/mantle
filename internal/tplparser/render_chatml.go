@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func renderLFM2(opts RenderOptions) (string, bool, error) {
+func renderChatML(opts RenderOptions) (string, bool, error) {
 	var b strings.Builder
 
 	if !opts.AddBOS && opts.BOSToken != "" {
@@ -21,7 +21,7 @@ func renderLFM2(opts RenderOptions) (string, bool, error) {
 		default:
 			j, err := jsonString(v)
 			if err != nil {
-				return "", false, fmt.Errorf("lfm2: system content tojson: %w", err)
+				return "", false, fmt.Errorf("chatml: system content tojson: %w", err)
 			}
 			systemPrompt = j
 		}
@@ -37,7 +37,7 @@ func renderLFM2(opts RenderOptions) (string, bool, error) {
 			}
 			j, err := jsonString(tool)
 			if err != nil {
-				return "", false, fmt.Errorf("lfm2: tool tojson: %w", err)
+				return "", false, fmt.Errorf("chatml: tool tojson: %w", err)
 			}
 			toolParts = append(toolParts, j)
 		}
@@ -72,7 +72,7 @@ func renderLFM2(opts RenderOptions) (string, bool, error) {
 		} else {
 			j, err := jsonString(content)
 			if err != nil {
-				return "", false, fmt.Errorf("lfm2: content tojson: %w", err)
+				return "", false, fmt.Errorf("chatml: content tojson: %w", err)
 			}
 			content = j
 		}

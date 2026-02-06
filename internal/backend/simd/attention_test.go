@@ -34,6 +34,7 @@ func TestRunAttnHeadsMatchesReferenceFull(t *testing.T) {
 		NHead:    nHead,
 		KvHeads:  kvHeads,
 		Scale:    float32(1.0 / math.Sqrt(float64(headDim))),
+		CacheLen: pos + 1,
 	}
 
 	RunAttnHeads(&ctx, make([]float32, pos+1), 0, nHead)
@@ -72,6 +73,7 @@ func TestRunAttnHeadsMatchesReferenceSlidingWindow(t *testing.T) {
 		NHead:    nHead,
 		KvHeads:  kvHeads,
 		Scale:    float32(1.0 / math.Sqrt(float64(headDim))),
+		CacheLen: pos + 1,
 	}
 
 	RunAttnHeads(&ctx, make([]float32, window), 0, nHead)
@@ -114,6 +116,7 @@ func benchRunAttnHeads(b *testing.B, nHead, kvHeads, headDim, pos, window int) {
 		NHead:    nHead,
 		KvHeads:  kvHeads,
 		Scale:    float32(1.0 / math.Sqrt(float64(headDim))),
+		CacheLen: pos + 1,
 	}
 	scores := make([]float32, window)
 

@@ -41,6 +41,7 @@ func runCmd() *cli.Command {
 		showConfig bool
 		showTokens bool
 		rawOutput  bool
+		noSWA      bool
 		// Profiling
 		cpuProfile string
 		memProfile string
@@ -80,6 +81,7 @@ func runCmd() *cli.Command {
 		},
 		&cli.Float64Flag{
 			Name:        "temp",
+			Category:    "Sampling",
 			Aliases:     []string{"temperature", "t"},
 			Usage:       "sampling temperature",
 			Value:       0.8,
@@ -87,6 +89,7 @@ func runCmd() *cli.Command {
 		},
 		&cli.Int64Flag{
 			Name:        "top-k",
+			Category:    "Sampling",
 			Aliases:     []string{"top_k", "topk"},
 			Usage:       "top-k sampling parameter",
 			Value:       40,
@@ -94,19 +97,22 @@ func runCmd() *cli.Command {
 		},
 		&cli.Float64Flag{
 			Name:        "top-p",
+			Category:    "Sampling",
 			Aliases:     []string{"top_p", "topp"},
 			Usage:       "top_p sampling parameter",
 			Value:       0.95,
 			Destination: &topP,
 		},
 		&cli.Float64Flag{
-			Name:    "min-p",
-			Aliases: []string{"min_p", "minp"},
-			Usage:   "min_p sampling parameter (0.0 = disabled)",
-			Value:   0.05,
+			Name:     "min-p",
+			Category: "Sampling",
+			Aliases:  []string{"min_p", "minp"},
+			Usage:    "min_p sampling parameter (0.0 = disabled)",
+			Value:    0.05,
 		},
 		&cli.Float64Flag{
 			Name:        "repeat-penalty",
+			Category:    "Sampling",
 			Aliases:     []string{"repeat_penalty"},
 			Usage:       "repetition penalty (1.0 = disabled)",
 			Value:       1.1,
@@ -114,6 +120,7 @@ func runCmd() *cli.Command {
 		},
 		&cli.Int64Flag{
 			Name:        "repeat-last-n",
+			Category:    "Sampling",
 			Aliases:     []string{"repeat_last_n"},
 			Usage:       "last n tokens to penalize",
 			Value:       64,
@@ -121,6 +128,7 @@ func runCmd() *cli.Command {
 		},
 		&cli.Int64Flag{
 			Name:        "seed",
+			Category:    "Sampling",
 			Usage:       "sampling RNG seed (default -1 = random)",
 			Value:       -1,
 			Destination: &seed,
@@ -196,29 +204,39 @@ func runCmd() *cli.Command {
 		// Debug flags
 		&cli.BoolFlag{
 			Name:        "show-config",
+			Category:    "Debugging",
 			Usage:       "print model + tokenizer summary",
-			Value:       true,
+			Value:       false,
 			Destination: &showConfig,
 		},
 		&cli.BoolFlag{
 			Name:        "show-tokens",
+			Category:    "Debugging",
 			Usage:       "print prompt token ids",
-			Value:       true,
+			Value:       false,
 			Destination: &showTokens,
 		},
 		&cli.BoolFlag{
 			Name:        "raw-output",
+			Category:    "Debugging",
 			Usage:       "print escaped output chunks without extra formatting",
 			Destination: &rawOutput,
+		},
+		&cli.BoolFlag{
+			Name:        "no-swa",
+			Usage:       "disable sliding window attention (force full-size KV cache)",
+			Destination: &noSWA,
 		},
 		// Profiling flags
 		&cli.StringFlag{
 			Name:        "cpuprofile",
+			Category:    "Profiling",
 			Usage:       "write cpu profile to file",
 			Destination: &cpuProfile,
 		},
 		&cli.StringFlag{
 			Name:        "memprofile",
+			Category:    "Profiling",
 			Usage:       "write memory profile to file",
 			Destination: &memProfile,
 		},
@@ -283,6 +301,7 @@ func runCmd() *cli.Command {
 				ChatTemplatePath:    chatTemplate,
 				HFConfigPath:        hfConfigFile,
 				Backend:             backend,
+				DisableSWA:          noSWA,
 			}
 			loadResult, err := loader.Load(ctx, modelPath, int(maxContext))
 			if err != nil {
@@ -428,9 +447,29 @@ func runCmd() *cli.Command {
 				} else {
 					log.Info("rope config", "base", genConfig.RopeFreqBase, "scaling", "none")
 				}
+				if genConfig.RopeFreqBaseLocal != 0 && genConfig.RopeFreqBaseLocal != genConfig.RopeFreqBase {
+					log.Info("rope local config", "base", genConfig.RopeFreqBaseLocal)
+				}
 
 				if len(genConfig.HeadCountKV) > 0 {
 					log.Info("kv heads", "head_count_kv", genConfig.HeadCountKV)
+				}
+
+				if runtimeModel, ok := loadResult.Runtime.(*simd.Instance); ok {
+					swaModes := make([]string, 0, len(runtimeModel.Layers))
+					swaCacheLens := make([]int, 0, len(runtimeModel.Layers))
+					for _, layer := range runtimeModel.Layers {
+						mode := "full"
+						if layer.AttnType == "sliding_attention" && layer.AttnWindow > 0 {
+							mode = "sliding"
+						}
+						swaModes = append(swaModes, mode)
+						swaCacheLens = append(swaCacheLens, layer.AttnCache.CacheLen)
+					}
+					log.Info("swa config",
+						"layer_mode", swaModes,
+						"cache_len", swaCacheLens,
+					)
 				}
 
 				log.Info("sampling config",

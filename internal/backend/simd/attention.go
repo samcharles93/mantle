@@ -51,8 +51,14 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 
 	applyRoPE := !m.RopeLocalOnly || layer.AttnType != "full_attention"
 	if applyRoPE {
-		ApplyRoPE(q, nHead, headDim, pos, m.RopeInvFreq, m.RopeAttnScale)
-		ApplyRoPE(k, kvHeads, headDim, pos, m.RopeInvFreq, m.RopeAttnScale)
+		invFreq := m.RopeInvFreq
+		attnScale := m.RopeAttnScale
+		if layer.AttnType == "sliding_attention" && len(m.RopeInvFreqLocal) > 0 {
+			invFreq = m.RopeInvFreqLocal
+			attnScale = m.RopeAttnScaleLocal
+		}
+		ApplyRoPE(q, nHead, headDim, pos, invFreq, attnScale)
+		ApplyRoPE(k, kvHeads, headDim, pos, invFreq, attnScale)
 	}
 
 	// Helper for F16 cache
@@ -64,7 +70,12 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		}
 	}
 
-	offset := pos * kvStride
+	cacheLen := layer.AttnCache.CacheLen
+	cachePos := pos
+	if cacheLen > 0 {
+		cachePos = pos % cacheLen
+	}
+	offset := cachePos * kvStride
 	storeCache(k, layer.AttnCache.K, layer.AttnCache.K16, offset)
 	storeCache(v, layer.AttnCache.V, layer.AttnCache.V16, offset)
 
@@ -90,6 +101,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		NHead:    nHead,
 		KvHeads:  kvHeads,
 		Scale:    scale,
+		CacheLen: layer.AttnCache.CacheLen,
 	}
 
 	pool := m.GetAttnPool()
