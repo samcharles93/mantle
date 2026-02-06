@@ -1,6 +1,11 @@
 package mcf
 
+import "encoding/binary"
+
 type SectionType uint32
+
+// mcfSectionSize is the fixed on-disk size of MCFSection in bytes.
+const mcfSectionSize = 24
 
 const (
 	SectionModelInfo   SectionType = 0x0001
@@ -29,4 +34,27 @@ type Section struct {
 
 func (s *Section) End() uint64 {
 	return s.Offset + s.Size
+}
+
+func decodeSection(data []byte) (MCFSection, bool) {
+	if len(data) < mcfSectionSize {
+		return MCFSection{}, false
+	}
+	return MCFSection{
+		Type:    binary.LittleEndian.Uint32(data[0:4]),
+		Version: binary.LittleEndian.Uint32(data[4:8]),
+		Offset:  binary.LittleEndian.Uint64(data[8:16]),
+		Size:    binary.LittleEndian.Uint64(data[16:24]),
+	}, true
+}
+
+func encodeSection(dst []byte, s MCFSection) bool {
+	if len(dst) < mcfSectionSize {
+		return false
+	}
+	binary.LittleEndian.PutUint32(dst[0:4], s.Type)
+	binary.LittleEndian.PutUint32(dst[4:8], s.Version)
+	binary.LittleEndian.PutUint64(dst[8:16], s.Offset)
+	binary.LittleEndian.PutUint64(dst[16:24], s.Size)
+	return true
 }

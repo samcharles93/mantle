@@ -6,7 +6,6 @@ import (
 	"os"
 	"sort"
 	"sync"
-	"unsafe"
 )
 
 const (
@@ -68,9 +67,8 @@ func NewWriter(f *os.File) (*Writer, error) {
 		copyBuf: make([]byte, writerCopyBufSize),
 	}
 
-	// Reserve header bytes (actual bytes, not a seek hole).
-	hdrSize := int(unsafe.Sizeof(MCFHeader{}))
-	if err := w.writeZeros(hdrSize); err != nil {
+	// Reserve fixed header bytes (actual bytes, not a seek hole).
+	if err := w.writeZeros(mcfHeaderSize); err != nil {
 		return nil, err
 	}
 
@@ -390,9 +388,13 @@ func (w *Writer) Finalise() error {
 		return err
 	}
 
-	// Write section directory as raw struct bytes (matches the reader's expectations).
+	// Write section directory using explicit little-endian encoding.
+	var secBuf [mcfSectionSize]byte
 	for i := range w.sections {
-		if err := writeFull(w.f, structBytes(&w.sections[i])); err != nil {
+		if !encodeSection(secBuf[:], w.sections[i]) {
+			return errors.New("mcf: encode section failed")
+		}
+		if err := writeFull(w.f, secBuf[:]); err != nil {
 			return err
 		}
 	}
@@ -411,7 +413,7 @@ func (w *Writer) Finalise() error {
 	copy(header.Magic[:], MagicMCF)
 	header.Major = CurrentMajor
 	header.Minor = CurrentMinor
-	header.HeaderSize = uint32(unsafe.Sizeof(MCFHeader{}))
+	header.HeaderSize = mcfHeaderSize
 	header.SectionCount = uint32(len(w.sections))
 	header.SectionDirOffset = uint64(sectionDirOffset)
 	header.FileSize = uint64(fileSize)
@@ -421,7 +423,11 @@ func (w *Writer) Finalise() error {
 	if _, err := w.f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	if err := writeFull(w.f, structBytes(&header)); err != nil {
+	var hdrBuf [mcfHeaderSize]byte
+	if !encodeHeader(hdrBuf[:], header) {
+		return errors.New("mcf: encode header failed")
+	}
+	if err := writeFull(w.f, hdrBuf[:]); err != nil {
 		return err
 	}
 

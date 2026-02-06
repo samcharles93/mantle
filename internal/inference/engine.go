@@ -35,7 +35,7 @@ func Generate(m simd.Model, sampler *logits.Sampler, promptTokens []int, steps i
 	// Process prompt tokens
 	promptStart := time.Now()
 	for _, id := range promptTokens {
-		logitsVec, err = m.ForwardToken(id)
+		logitsVec, err = safeForwardToken(m, id)
 		if err != nil {
 			return stats, fmt.Errorf("forward error during prefill: %w", err)
 		}
@@ -51,10 +51,13 @@ func Generate(m simd.Model, sampler *logits.Sampler, promptTokens []int, steps i
 	// Generation loop
 	genStart := time.Now()
 	for i := 0; i < steps; i++ {
-		next := sampler.Sample(logitsVec, toks, nil)
+		next, sampleErr := safeSample(sampler, logitsVec, toks, nil)
+		if sampleErr != nil {
+			return stats, fmt.Errorf("sample error during generation step %d: %w", i, sampleErr)
+		}
 		toks = append(toks, next)
 
-		logitsVec, err = m.ForwardToken(next)
+		logitsVec, err = safeForwardToken(m, next)
 		if err != nil {
 			return stats, fmt.Errorf("forward error during generation step %d: %w", i, err)
 		}
@@ -121,7 +124,7 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 	var err error
 	promptStart := time.Now()
 	for _, id := range newInTokens {
-		logitsVec, err = g.Model.ForwardToken(id)
+		logitsVec, err = safeForwardToken(g.Model, id)
 		if err != nil {
 			return nil, stats, err
 		}
@@ -171,7 +174,11 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		if err := ctx.Err(); err != nil {
 			return g.ContextTokens, stats, err
 		}
-		next := g.Sampler.Sample(logitsVec, toks, g.StopTokens)
+		next, sampleErr := safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
+		if sampleErr != nil {
+			flush()
+			return g.ContextTokens, stats, sampleErr
+		}
 
 		stop := g.isStopToken(next)
 		if stop {
@@ -194,9 +201,10 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 			}
 		}
 
-		logitsVec, err = g.Model.ForwardToken(next)
+		logitsVec, err = safeForwardToken(g.Model, next)
 		if err != nil {
-			break
+			flush()
+			return g.ContextTokens, stats, err
 		}
 		stats.TokensGenerated++
 	}
@@ -212,6 +220,24 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 
 	flush()
 	return g.ContextTokens, stats, nil
+}
+
+func safeForwardToken(m simd.Model, id int) (logits []float32, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic in ForwardToken(%d): %v", id, rec)
+		}
+	}()
+	return m.ForwardToken(id)
+}
+
+func safeSample(sampler *logits.Sampler, logitsVec []float32, toks []int, excludePenalty []int) (next int, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic in Sample: %v", rec)
+		}
+	}()
+	return sampler.Sample(logitsVec, toks, excludePenalty), nil
 }
 
 func (g *Generator) isStopToken(id int) bool {

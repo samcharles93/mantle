@@ -2,8 +2,8 @@ package mcf
 
 import (
 	"fmt"
+	"io"
 	"os"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -12,10 +12,12 @@ type File struct {
 	Data     []byte
 	Header   *MCFHeader
 	Sections []MCFSection
+	mmapped  bool
 }
 
 // Open maps an MCF file read-only and validates its structure.
-// The returned file must be closed to release the mapping.
+// If mmap is unavailable, it falls back to ReadAt-based loading.
+// The returned file must be closed to release any mapping.
 func Open(path string) (*File, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -33,16 +35,15 @@ func Open(path string) (*File, error) {
 		return nil, ErrCorruptFile
 	}
 	if size64 > int64(int(^uint(0)>>1)) {
-		// cannot mmap into a []byte on this architecture
+		// cannot index this file safely as []byte on this architecture.
 		return nil, ErrCorruptFile
 	}
 	size := int(size64)
-
-	hdrSize := int(unsafe.Sizeof(MCFHeader{}))
-	if size < hdrSize {
+	if size < mcfHeaderSize {
 		return nil, ErrCorruptFile
 	}
 
+	// Prefer mmap where available for zero-copy section slices.
 	data, err := unix.Mmap(
 		int(f.Fd()),
 		0,
@@ -50,55 +51,109 @@ func Open(path string) (*File, error) {
 		unix.PROT_READ,
 		unix.MAP_SHARED,
 	)
+	if err == nil {
+		mf, parseErr := parseFileData(data, true)
+		if parseErr != nil {
+			_ = unix.Munmap(data)
+			return nil, parseErr
+		}
+		return mf, nil
+	}
+
+	// Fallback path that does not require mmap support.
+	data, err = readAllAt(f, size)
 	if err != nil {
 		return nil, err
 	}
+	return parseFileData(data, false)
+}
 
-	cleanup := func(e error) (*File, error) {
-		_ = unix.Munmap(data)
-		return nil, e
+// OpenReaderAt loads and validates an MCF from a random-access reader without mmap.
+func OpenReaderAt(r io.ReaderAt, size int64) (*File, error) {
+	if size < 0 || size > int64(int(^uint(0)>>1)) {
+		return nil, ErrCorruptFile
 	}
+	data, err := readAllAt(r, int(size))
+	if err != nil {
+		return nil, err
+	}
+	return parseFileData(data, false)
+}
 
-	// Copy header out of the mmap so File.Header remains valid even after Close().
-	var hdr MCFHeader
-	copy(structBytes(&hdr), data[:hdrSize])
+func readAllAt(r io.ReaderAt, size int) ([]byte, error) {
+	if size < 0 {
+		return nil, ErrCorruptFile
+	}
+	if size == 0 {
+		return []byte{}, nil
+	}
+	out := make([]byte, size)
+	var off int64
+	for off < int64(size) {
+		n, err := r.ReadAt(out[off:], off)
+		off += int64(n)
+		if err == nil {
+			continue
+		}
+		if err == io.EOF && off == int64(size) {
+			break
+		}
+		return nil, err
+	}
+	return out, nil
+}
 
+func parseFileData(data []byte, mmapped bool) (*File, error) {
+	if len(data) < mcfHeaderSize {
+		return nil, ErrCorruptFile
+	}
+	hdr, ok := decodeHeader(data[:mcfHeaderSize])
+	if !ok {
+		return nil, ErrCorruptFile
+	}
 	if !hdr.Valid() {
-		return cleanup(ErrInvalidMagic)
+		return nil, ErrInvalidMagic
 	}
 	if !hdr.Compatible() {
-		return cleanup(ErrUnsupportedMajor)
+		return nil, ErrUnsupportedMajor
 	}
-	if hdr.FileSize != uint64(size) {
-		return cleanup(ErrCorruptFile)
+	if hdr.FileSize != uint64(len(data)) {
+		return nil, ErrCorruptFile
 	}
 
-	// Basic header sanity. HeaderSize must at least cover the header struct.
-	if hdr.HeaderSize < uint32(hdrSize) {
-		return cleanup(ErrCorruptFile)
+	// Basic header sanity. HeaderSize must at least cover the fixed header bytes.
+	if hdr.HeaderSize < mcfHeaderSize {
+		return nil, ErrCorruptFile
 	}
 	if uint64(hdr.HeaderSize) > uint64(len(data)) {
-		return cleanup(ErrCorruptFile)
+		return nil, ErrCorruptFile
 	}
 
 	// Section directory bounds check
-	secSize := uint64(unsafe.Sizeof(MCFSection{}))
+	secSize := uint64(mcfSectionSize)
 	dirSize := uint64(hdr.SectionCount) * secSize
 	dirStart := hdr.SectionDirOffset
 	dirEnd := dirStart + dirSize
 
 	if dirStart < uint64(hdr.HeaderSize) {
-		return cleanup(ErrCorruptFile)
+		return nil, ErrCorruptFile
 	}
 	if dirEnd < dirStart || dirEnd > uint64(len(data)) {
-		return cleanup(ErrCorruptFile)
+		return nil, ErrCorruptFile
 	}
 
-	// Copy the section directory out of the mmap (keeps File.Sections valid after Close()).
+	// Copy and decode the section directory out of file data.
 	sections := make([]MCFSection, hdr.SectionCount)
 	if hdr.SectionCount > 0 {
-		raw := data[dirStart:dirEnd]
-		copy(structSliceBytes(sections), raw)
+		for i := range sections {
+			start := int(dirStart) + i*mcfSectionSize
+			end := start + mcfSectionSize
+			sec, ok := decodeSection(data[start:end])
+			if !ok {
+				return nil, ErrCorruptFile
+			}
+			sections[i] = sec
+		}
 	}
 
 	// Validate section bounds and ensure they do not overlap the section directory.
@@ -107,26 +162,25 @@ func Open(path string) (*File, error) {
 
 		// Basic overflow-safe end calculation
 		if s.Size > uint64(len(data)) {
-			return cleanup(fmt.Errorf("%w: section %d size out of range", ErrCorruptFile, i))
+			return nil, fmt.Errorf("%w: section %d size out of range", ErrCorruptFile, i)
 		}
 		end := s.Offset + s.Size
 		if end < s.Offset {
-			return cleanup(fmt.Errorf("%w: section %d offset overflow", ErrCorruptFile, i))
+			return nil, fmt.Errorf("%w: section %d offset overflow", ErrCorruptFile, i)
 		}
 		if end > uint64(len(data)) {
-			return cleanup(fmt.Errorf("%w: section %d out of bounds", ErrCorruptFile, i))
+			return nil, fmt.Errorf("%w: section %d out of bounds", ErrCorruptFile, i)
 		}
 		if s.Offset < uint64(hdr.HeaderSize) {
-			return cleanup(fmt.Errorf("%w: section %d overlaps header", ErrCorruptFile, i))
+			return nil, fmt.Errorf("%w: section %d overlaps header", ErrCorruptFile, i)
 		}
 		if rangesOverlap(s.Offset, end, dirStart, dirEnd) {
-			return cleanup(fmt.Errorf("%w: section %d overlaps section directory", ErrCorruptFile, i))
+			return nil, fmt.Errorf("%w: section %d overlaps section directory", ErrCorruptFile, i)
 		}
 
-		// Optional but strongly recommended: keep sections aligned for safe casting by consumers.
-		// If you want to allow arbitrary alignment, delete these two checks.
+		// Keep section starts aligned for consumers that use aligned views.
 		if (s.Offset % mcfAlign) != 0 {
-			return cleanup(fmt.Errorf("%w: section %d offset not %d-byte aligned", ErrCorruptFile, i, mcfAlign))
+			return nil, fmt.Errorf("%w: section %d offset not %d-byte aligned", ErrCorruptFile, i, mcfAlign)
 		}
 	}
 
@@ -134,23 +188,29 @@ func Open(path string) (*File, error) {
 		Data:     data,
 		Header:   &hdr,
 		Sections: sections,
+		mmapped:  mmapped,
 	}, nil
 }
 
-// Close releases the mmap backing this file.
+// Close releases file resources and any mmap backing.
 func (f *File) Close() error {
 	if f == nil {
 		return nil
 	}
 	if f.Data != nil {
-		err := unix.Munmap(f.Data)
+		var err error
+		if f.mmapped {
+			err = unix.Munmap(f.Data)
+		}
 		f.Data = nil
 		f.Header = nil
 		f.Sections = nil
+		f.mmapped = false
 		return err
 	}
 	f.Header = nil
 	f.Sections = nil
+	f.mmapped = false
 	return nil
 }
 
