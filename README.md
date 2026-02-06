@@ -68,7 +68,7 @@ It started out just creating the kernels in pure go and trying to work with Go a
 Now, I didn't need the model container format (MCF). But, trying to decode GGUF was just stupidly difficult (tokenisers not being recognised, spewing stop tokens, model didn't produce cohesive responses), and safetensors, while possible and it worked, was slow.
 therefore, I decided to embark on stuffing up another containerised model format. and here we are, MCF and Mantle...
 
-Anyway, If you'd like to test this out now, You must have Go v1.26rc2 and enable the GOEXPERIMENT=simd env for all build/run/test commands or just infer the usage from the Taskfile (or use `task installGoRC`).
+Anyway, If you'd like to test this out now, You must have Go v1.26rc3 and enable the GOEXPERIMENT=simd env for all build/run/test commands or just infer the usage from the Taskfile (or use `task installGoRC`).
 
 You will need to clone a safetensors model from HF and pack it using the CLI `bin/mantle pack -in /path/to/safetensors/ -out /path/to/model.mcf`,
 You can also add the `--dedup` flag to remove duplicated tensors from the resulting model container. For most models, this does nothing, but in testing, Qwen3-0.6B has a duplicated tensor in attn and embd. and it reduced the model file by 300mb with no quality hit.
@@ -76,12 +76,12 @@ You can also add the `--dedup` flag to remove duplicated tensors from the result
 To run the model *only on CPU* you just need to use the `mantle run` command with `-m/--model`, or alternatively, pass in a directory of models to use with `MANTLE_MODELS_DIR=/path/to/models mantle run`.
 
 ### Build Requirements
-- Go 1.26rc2
+- Go 1.26rc3
 - AMD64 CPU (simd/archsimd will only compile for amd64)
 
 ### Build
 ```shell
-GOEXPERIMENT=simd go1.26rc2 build -o bin/mantle ./cmd/mantle
+GOEXPERIMENT=simd go1.26rc3 build -o bin/mantle ./cmd/mantle
 ````
 
 ### CUDA Build Notes
@@ -90,7 +90,7 @@ The CUDA CGO integration expects the CUDA runtime and cuBLAS to be discoverable 
 ```bash
 export CGO_LDFLAGS="-L/path/to/cuda/lib64"
 export LD_LIBRARY_PATH="/path/to/cuda/lib64:$LD_LIBRARY_PATH"
-GOEXPERIMENT=simd go1.26rc2 test -tags=cuda ./internal/backend/cuda/native
+GOEXPERIMENT=simd go1.26rc3 test -tags=cuda ./internal/backend/cuda/native
 ```
 
 To use the CLI:
