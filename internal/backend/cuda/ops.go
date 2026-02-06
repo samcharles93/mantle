@@ -921,6 +921,31 @@ func (o *Ops) RMSNorm(dst, src, weight []float32, eps float32) {
 	copy(dst[:n], unsafe.Slice((*float32)(o.yHost.Ptr()), n))
 }
 
+// rmsNormDevice computes RMSNorm on device buffers.
+// Requires o.mu locked, and buffers allocated.
+func (o *Ops) rmsNormDevice(srcDev native.DeviceBuffer, weightDev native.DeviceBuffer, dstDev native.DeviceBuffer, n int, eps float32) error {
+	// Compute sum of squares
+	sumSq, err := native.DotF32(o.blas, n, srcDev, 1, srcDev, 1)
+	if err != nil {
+		return fmt.Errorf("cuda rmsnorm dot failed (n=%d): %w", n, err)
+	}
+	mean := sumSq / float32(n)
+	scale := float32(1.0 / math.Sqrt(float64(mean+eps)))
+
+	// Copy srcDev to yDev (temporary) and scale
+	if err := native.CopyF32(o.blas, n, srcDev, 1, o.yDev, 1); err != nil {
+		return fmt.Errorf("cuda rmsnorm copy failed (n=%d): %w", n, err)
+	}
+	if err := native.ScalF32(o.blas, n, scale, o.yDev, 1); err != nil {
+		return fmt.Errorf("cuda rmsnorm scale failed (n=%d): %w", n, err)
+	}
+	// Multiply by weight (dgmm)
+	if err := native.DgmmF32(o.blas, native.BlasSideLeft, n, 1, o.yDev, n, weightDev, 1, dstDev, n); err != nil {
+		return fmt.Errorf("cuda rmsnorm dgmm failed (n=%d): %w", n, err)
+	}
+	return nil
+}
+
 func (o *Ops) ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {
 	if headDim%2 != 0 {
 		panic("headDim must be even for RoPE")
