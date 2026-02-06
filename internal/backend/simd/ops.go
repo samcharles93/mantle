@@ -48,7 +48,7 @@ func Dot(a, b []float32) float32 {
 }
 
 func DotF16(a []float32, b []uint16) float32 {
-	// TODO: SIMD implementation for F16
+	// F16 dot currently uses scalar conversion.
 	return dotScalarF16(a, b)
 }
 
