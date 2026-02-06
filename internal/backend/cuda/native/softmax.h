@@ -67,6 +67,20 @@ int mantleCudaConvertF32ToF16(
     uint16_t* out,
     int n,
     cudaStream_t stream);
+int mantleCudaAttentionInnerF16CacheF32(
+    const float* q,
+    const uint16_t* cacheK,
+    const uint16_t* cacheV,
+    float* out,
+    int pos,
+    int start,
+    int kvStride,
+    int headDim,
+    int nHead,
+    int kvHeads,
+    int cacheLen,
+    float scale,
+    cudaStream_t stream);
 
 #ifdef __cplusplus
 }

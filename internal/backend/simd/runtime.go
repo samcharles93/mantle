@@ -31,7 +31,7 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 		layer := &m.Layers[i]
 
 		// Attention block: pre-norm, attention, optional post-norm, residual
-		RMSNorm(m.Scratch.Tmp, x, layer.AttnNorm, m.RMSEpsilon)
+		m.Ops().RMSNorm(m.Scratch.Tmp, x, layer.AttnNorm, m.RMSEpsilon)
 
 		var opOut []float32
 		if layer.Mamba != nil {
@@ -72,13 +72,13 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 			opOut = Attention(m, layer, m.Scratch.Tmp, m.Pos)
 		}
 		if len(layer.PostAttnNorm) > 0 {
-			RMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
+			m.Ops().RMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
 			opOut = m.Scratch.Tmp2
 		}
 		Add(x, opOut)
 
 		// FFN block: pre-norm, dense/MoE, optional post-norm, residual
-		RMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon)
+		m.Ops().RMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon)
 		var ffnOut []float32
 		if layer.MoE != nil {
 			ffnOut = MoE(m, layer, m.Scratch.Tmp)
@@ -86,14 +86,14 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 			ffnOut = FFN(m, layer, m.Scratch.Tmp)
 		}
 		if len(layer.PostFfnNorm) > 0 {
-			RMSNorm(m.Scratch.Tmp, ffnOut, layer.PostFfnNorm, m.RMSEpsilon)
+			m.Ops().RMSNorm(m.Scratch.Tmp, ffnOut, layer.PostFfnNorm, m.RMSEpsilon)
 			ffnOut = m.Scratch.Tmp
 		}
 		Add(x, ffnOut)
 	}
 
 	// Output norm
-	RMSNorm(m.Scratch.Tmp, x, m.OutputNorm, m.RMSEpsilon)
+	m.Ops().RMSNorm(m.Scratch.Tmp, x, m.OutputNorm, m.RMSEpsilon)
 	m.Ops().MatVec(m.Scratch.Logits, m.Output, m.Scratch.Tmp)
 	if scale := m.Config.Config.LMHeadMultiplier; scale != 0 && scale != 1 {
 		s := float32(scale)

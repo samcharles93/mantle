@@ -3,8 +3,7 @@
 package native
 
 /*
-#cgo LDFLAGS: -lcudart -lcublas
-
+#cgo LDFLAGS: -L${SRCDIR}/build -lmantle_cuda_kernels -lcudart -lcublas -lstdc++
 // Minimal CUDA runtime forward declarations to avoid requiring headers at compile time.
 // Linker will still require libcudart when building with the cuda tag.
 typedef void* cudaStream_t;
@@ -16,14 +15,17 @@ extern cudaError_t cudaStreamCreate(cudaStream_t* stream);
 extern cudaError_t cudaStreamDestroy(cudaStream_t stream);
 extern cudaError_t cudaStreamSynchronize(cudaStream_t stream);
 extern cudaError_t cudaMalloc(void** ptr, unsigned long long size);
+extern cudaError_t cudaMallocManaged(void** ptr, unsigned long long size, unsigned int flags);
 extern cudaError_t cudaFree(void* ptr);
 extern cudaError_t cudaMemcpy(void* dst, const void* src, unsigned long long size, int kind);
 extern cudaError_t cudaMemcpyAsync(void* dst, const void* src, unsigned long long size, int kind, cudaStream_t stream);
 extern cudaError_t cudaMallocHost(void** ptr, unsigned long long size);
 extern cudaError_t cudaFreeHost(void* ptr);
+extern cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device);
 
 #define MANTLE_CUDA_MEMCPY_HOST_TO_DEVICE 1
 #define MANTLE_CUDA_MEMCPY_DEVICE_TO_HOST 2
+#define MANTLE_CUDA_MEMCPY_DEFAULT 4
 
 typedef struct cublasContext* cublasHandle_t;
 typedef int cublasStatus_t;
@@ -65,6 +67,95 @@ extern cublasStatus_t cublasSgemv_v2(
 	const float* beta,
 	float* y,
 	int incy);
+extern cublasStatus_t cublasSdot_v2(
+	cublasHandle_t handle,
+	int n,
+	const float* x,
+	int incx,
+	const float* y,
+	int incy,
+	float* result);
+extern cublasStatus_t cublasScopy_v2(
+	cublasHandle_t handle,
+	int n,
+	const float* x,
+	int incx,
+	float* y,
+	int incy);
+extern cublasStatus_t cublasSscal_v2(
+	cublasHandle_t handle,
+	int n,
+	const float* alpha,
+	float* x,
+	int incx);
+extern cublasStatus_t cublasSdgmm(
+	cublasHandle_t handle,
+	int mode,
+	int m,
+	int n,
+	const float* A,
+	int lda,
+	const float* x,
+	int incx,
+	float* C,
+	int ldc);
+extern int mantleCudaSoftmaxRowsF32(float* data, int rows, int cols, cudaStream_t stream);
+extern int mantleCudaQuantMatVecInt8BlocksF32(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	float* y,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream);
+extern int mantleCudaQuantMatVecQ4F32(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	const float* x,
+	float* y,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream);
+extern int mantleCudaQuantMatVecK4F32(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	const float* x,
+	float* y,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream);
+extern int mantleCudaDequantizeQ4ToF16(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	unsigned short* outF16,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream);
+extern int mantleCudaDequantizeK4ToF16(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	unsigned short* outF16,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream);
+extern int mantleCudaSiluMulF32(
+	const float* gate,
+	const float* up,
+	float* out,
+	int n,
+	cudaStream_t stream);
+extern int mantleCudaConvertF32ToF16(
+	const float* in,
+	unsigned short* out,
+	int n,
+	cudaStream_t stream);
 
 static const char* mantleCudaGetErrorString(cudaError_t err) {
 	return cudaGetErrorString(err);
@@ -95,6 +186,12 @@ static int mantleCudaMalloc(void** ptr, unsigned long long size) {
 	return (int)err;
 }
 
+static int mantleCudaMallocManaged(void** ptr, unsigned long long size) {
+	// 1 == cudaMemAttachGlobal
+	cudaError_t err = cudaMallocManaged(ptr, size, 1u);
+	return (int)err;
+}
+
 static int mantleCudaFree(void* ptr) {
 	cudaError_t err = cudaFree(ptr);
 	return (int)err;
@@ -117,6 +214,11 @@ static int mantleCudaMallocHost(void** ptr, unsigned long long size) {
 
 static int mantleCudaFreeHost(void* ptr) {
 	cudaError_t err = cudaFreeHost(ptr);
+	return (int)err;
+}
+
+static int mantleCudaDeviceGetAttribute(int* value, int attr, int device) {
+	cudaError_t err = cudaDeviceGetAttribute(value, attr, device);
 	return (int)err;
 }
 
@@ -175,11 +277,144 @@ static int mantleCublasSgemv(
 	cublasStatus_t st = cublasSgemv_v2(handle, trans, m, n, alpha, A, lda, x, incx, beta, y, incy);
 	return (int)st;
 }
+
+static int mantleCublasSdot(
+	cublasHandle_t handle,
+	int n,
+	const float* x,
+	int incx,
+	const float* y,
+	int incy,
+	float* result) {
+	cublasStatus_t st = cublasSdot_v2(handle, n, x, incx, y, incy, result);
+	return (int)st;
+}
+
+static int mantleCublasScopy(
+	cublasHandle_t handle,
+	int n,
+	const float* x,
+	int incx,
+	float* y,
+	int incy) {
+	cublasStatus_t st = cublasScopy_v2(handle, n, x, incx, y, incy);
+	return (int)st;
+}
+
+static int mantleCublasSscal(
+	cublasHandle_t handle,
+	int n,
+	const float* alpha,
+	float* x,
+	int incx) {
+	cublasStatus_t st = cublasSscal_v2(handle, n, alpha, x, incx);
+	return (int)st;
+}
+
+static int mantleCublasSdgmm(
+	cublasHandle_t handle,
+	int mode,
+	int m,
+	int n,
+	const float* A,
+	int lda,
+	const float* x,
+	int incx,
+	float* C,
+	int ldc) {
+	cublasStatus_t st = cublasSdgmm(handle, mode, m, n, A, lda, x, incx, C, ldc);
+	return (int)st;
+}
+
+static int mantleCudaSoftmaxRowsF32Wrapper(float* data, int rows, int cols, cudaStream_t stream) {
+	return mantleCudaSoftmaxRowsF32(data, rows, cols, stream);
+}
+
+static int mantleCudaQuantMatVecInt8BlocksF32Wrapper(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	float* y,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecInt8BlocksF32(q, scales, x, y, rows, blocksPerRow, cols, stream);
+}
+
+static int mantleCudaQuantMatVecQ4F32Wrapper(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	const float* x,
+	float* y,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecQ4F32(qData, scalesF16, x, y, rows, blocksPerRow, cols, stream);
+}
+
+static int mantleCudaQuantMatVecK4F32Wrapper(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	const float* x,
+	float* y,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecK4F32(qData, superScalesF16, subScales, x, y, rows, blocksPerRow, cols, stream);
+}
+
+static int mantleCudaDequantizeQ4ToF16Wrapper(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	unsigned short* outF16,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream) {
+	return mantleCudaDequantizeQ4ToF16(qData, scalesF16, outF16, rows, blocksPerRow, cols, stream);
+}
+
+static int mantleCudaDequantizeK4ToF16Wrapper(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	unsigned short* outF16,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream) {
+	return mantleCudaDequantizeK4ToF16(qData, superScalesF16, subScales, outF16, rows, blocksPerRow, cols, stream);
+}
+
+static int mantleCudaSiluMulF32Wrapper(
+	const float* gate,
+	const float* up,
+	float* out,
+	int n,
+	cudaStream_t stream) {
+	return mantleCudaSiluMulF32(gate, up, out, n, stream);
+}
+
+static int mantleCudaConvertF32ToF16Wrapper(
+	const float* in,
+	unsigned short* out,
+	int n,
+	cudaStream_t stream) {
+	return mantleCudaConvertF32ToF16(in, out, n, stream);
+}
 */
 import "C"
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -192,11 +427,133 @@ type BlasHandle struct {
 }
 
 type DeviceBuffer struct {
-	ptr unsafe.Pointer
+	ptr     unsafe.Pointer
+	managed bool
 }
 
 type HostBuffer struct {
 	ptr unsafe.Pointer
+}
+
+var managedFallback atomic.Bool
+
+// PerfCounters holds CUDA backend performance statistics.
+type PerfCounters struct {
+	MatVecCalls   int64
+	RMSNormCalls  int64
+	StoreKVCalls  int64
+	StreamSyncs   int64
+	H2DBytes      int64
+	D2HBytes      int64
+	ManagedAllocs int64
+	ManagedBytes  int64
+	DeviceAllocs  int64
+	DeviceBytes   int64
+}
+
+var globalPerfCounters PerfCounters
+var perfEnabledOnce sync.Once
+var perfEnabledCached bool
+
+// GetPerfCounters returns a copy of current counters.
+func GetPerfCounters() PerfCounters {
+	return PerfCounters{
+		MatVecCalls:   globalPerfCounters.MatVecCalls,
+		RMSNormCalls:  globalPerfCounters.RMSNormCalls,
+		StoreKVCalls:  globalPerfCounters.StoreKVCalls,
+		StreamSyncs:   globalPerfCounters.StreamSyncs,
+		H2DBytes:      globalPerfCounters.H2DBytes,
+		D2HBytes:      globalPerfCounters.D2HBytes,
+		ManagedAllocs: globalPerfCounters.ManagedAllocs,
+		ManagedBytes:  globalPerfCounters.ManagedBytes,
+		DeviceAllocs:  globalPerfCounters.DeviceAllocs,
+		DeviceBytes:   globalPerfCounters.DeviceBytes,
+	}
+}
+
+// ResetPerfCounters resets all counters to zero.
+func ResetPerfCounters() {
+	globalPerfCounters = PerfCounters{}
+}
+
+// perfEnabled returns true if MANTLE_CUDA_TRACE env var is set.
+func perfEnabled() bool {
+	perfEnabledOnce.Do(func() {
+		perfEnabledCached = os.Getenv("MANTLE_CUDA_TRACE") != ""
+	})
+	return perfEnabledCached
+}
+
+func recordMatVec() {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.MatVecCalls, 1)
+	}
+}
+
+func recordRMSNorm() {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.RMSNormCalls, 1)
+	}
+}
+
+func recordStoreKV() {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.StoreKVCalls, 1)
+	}
+}
+
+func recordStreamSync() {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.StreamSyncs, 1)
+	}
+}
+
+func recordH2D(bytes int64) {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.H2DBytes, bytes)
+	}
+}
+
+func recordD2H(bytes int64) {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.D2HBytes, bytes)
+	}
+}
+
+func recordDeviceAlloc(bytes int64, managed bool) {
+	if !perfEnabled() {
+		return
+	}
+	if managed {
+		atomic.AddInt64(&globalPerfCounters.ManagedAllocs, 1)
+		atomic.AddInt64(&globalPerfCounters.ManagedBytes, bytes)
+	} else {
+		atomic.AddInt64(&globalPerfCounters.DeviceAllocs, 1)
+		atomic.AddInt64(&globalPerfCounters.DeviceBytes, bytes)
+	}
+}
+
+// RecordMatVec records a MatVec operation.
+func RecordMatVec() { recordMatVec() }
+
+// RecordRMSNorm records an RMSNorm operation.
+func RecordRMSNorm() { recordRMSNorm() }
+
+// RecordStoreKV records a StoreKV operation.
+func RecordStoreKV() { recordStoreKV() }
+
+type CUDAError struct {
+	Code int
+	Msg  string
+}
+
+func (e *CUDAError) Error() string {
+	return fmt.Sprintf("cuda runtime error %d: %s", e.Code, e.Msg)
+}
+
+func IsOOM(err error) bool {
+	var ce *CUDAError
+	return errors.As(err, &ce) && ce.Code == 2
 }
 
 func DeviceCount() (int, error) {
@@ -205,6 +562,22 @@ func DeviceCount() (int, error) {
 		return 0, err
 	}
 	return int(count), nil
+}
+
+type DeviceAttribute int
+
+const (
+	DevAttrConcurrentManagedAccess                DeviceAttribute = 89  // cudaDevAttrConcurrentManagedAccess
+	DevAttrPageableMemoryAccess                   DeviceAttribute = 88  // cudaDevAttrPageableMemoryAccess
+	DevAttrPageableMemoryAccessUsesHostPageTables DeviceAttribute = 100 // cudaDevAttrPageableMemoryAccessUsesHostPageTables
+)
+
+func DeviceGetAttribute(attr DeviceAttribute, device int) (int, error) {
+	var val C.int
+	if err := cudaErr(C.mantleCudaDeviceGetAttribute(&val, C.int(attr), C.int(device))); err != nil {
+		return 0, err
+	}
+	return int(val), nil
 }
 
 func NewStream() (Stream, error) {
@@ -230,6 +603,7 @@ func (s Stream) Synchronize() error {
 	if s.ptr == nil {
 		return nil
 	}
+	recordStreamSync()
 	return cudaErr(C.mantleCudaStreamSynchronize(s.ptr))
 }
 
@@ -239,9 +613,28 @@ func AllocDevice(bytes int64) (DeviceBuffer, error) {
 	}
 	var ptr unsafe.Pointer
 	if err := cudaErr(C.mantleCudaMalloc((*unsafe.Pointer)(&ptr), C.ulonglong(bytes))); err != nil {
+		// Capacity path: fallback to Unified Memory when device allocation OOMs.
+		if IsOOM(err) {
+			if managedErr := cudaErr(C.mantleCudaMallocManaged((*unsafe.Pointer)(&ptr), C.ulonglong(bytes))); managedErr == nil {
+				managedFallback.Store(true)
+				recordDeviceAlloc(bytes, true)
+				return DeviceBuffer{ptr: ptr, managed: true}, nil
+			} else {
+				return DeviceBuffer{}, fmt.Errorf("cuda alloc failed (%d bytes): device OOM and managed alloc failed: %w", bytes, managedErr)
+			}
+		}
 		return DeviceBuffer{}, err
 	}
-	return DeviceBuffer{ptr: ptr}, nil
+	recordDeviceAlloc(bytes, false)
+	return DeviceBuffer{ptr: ptr, managed: false}, nil
+}
+
+func ResetManagedFallbackFlag() {
+	managedFallback.Store(false)
+}
+
+func ManagedFallbackUsed() bool {
+	return managedFallback.Load()
 }
 
 func (b DeviceBuffer) Free() error {
@@ -253,6 +646,10 @@ func (b DeviceBuffer) Free() error {
 
 func (b DeviceBuffer) Ptr() unsafe.Pointer {
 	return b.ptr
+}
+
+func (b DeviceBuffer) Managed() bool {
+	return b.managed
 }
 
 func AllocHostPinned(bytes int64) (HostBuffer, error) {
@@ -281,28 +678,61 @@ func MemcpyH2DAsync(dst DeviceBuffer, src unsafe.Pointer, bytes int64, stream St
 	if bytes <= 0 {
 		return nil
 	}
-	return cudaErr(C.mantleCudaMemcpyAsync(dst.ptr, src, C.ulonglong(bytes), C.MANTLE_CUDA_MEMCPY_HOST_TO_DEVICE, stream.ptr))
+	recordH2D(bytes)
+	kind := C.int(C.MANTLE_CUDA_MEMCPY_HOST_TO_DEVICE)
+	if dst.managed {
+		kind = C.int(C.MANTLE_CUDA_MEMCPY_DEFAULT)
+	}
+	return cudaErr(C.mantleCudaMemcpyAsync(dst.ptr, src, C.ulonglong(bytes), kind, stream.ptr))
+}
+
+func MemcpyH2DAsyncAt(dst DeviceBuffer, dstOffset int64, src unsafe.Pointer, bytes int64, stream Stream) error {
+	if bytes <= 0 {
+		return nil
+	}
+	recordH2D(bytes)
+	ptr := unsafe.Add(dst.ptr, int(dstOffset))
+	kind := C.int(C.MANTLE_CUDA_MEMCPY_HOST_TO_DEVICE)
+	if dst.managed {
+		kind = C.int(C.MANTLE_CUDA_MEMCPY_DEFAULT)
+	}
+	return cudaErr(C.mantleCudaMemcpyAsync(ptr, src, C.ulonglong(bytes), kind, stream.ptr))
 }
 
 func MemcpyD2HAsync(dst unsafe.Pointer, src DeviceBuffer, bytes int64, stream Stream) error {
 	if bytes <= 0 {
 		return nil
 	}
-	return cudaErr(C.mantleCudaMemcpyAsync(dst, src.ptr, C.ulonglong(bytes), C.MANTLE_CUDA_MEMCPY_DEVICE_TO_HOST, stream.ptr))
+	recordD2H(bytes)
+	kind := C.int(C.MANTLE_CUDA_MEMCPY_DEVICE_TO_HOST)
+	if src.managed {
+		kind = C.int(C.MANTLE_CUDA_MEMCPY_DEFAULT)
+	}
+	return cudaErr(C.mantleCudaMemcpyAsync(dst, src.ptr, C.ulonglong(bytes), kind, stream.ptr))
 }
 
 func MemcpyH2D(dst DeviceBuffer, src unsafe.Pointer, bytes int64) error {
 	if bytes <= 0 {
 		return nil
 	}
-	return cudaErr(C.mantleCudaMemcpy(dst.ptr, src, C.ulonglong(bytes), C.MANTLE_CUDA_MEMCPY_HOST_TO_DEVICE))
+	recordH2D(bytes)
+	kind := C.int(C.MANTLE_CUDA_MEMCPY_HOST_TO_DEVICE)
+	if dst.managed {
+		kind = C.int(C.MANTLE_CUDA_MEMCPY_DEFAULT)
+	}
+	return cudaErr(C.mantleCudaMemcpy(dst.ptr, src, C.ulonglong(bytes), kind))
 }
 
 func MemcpyD2H(dst unsafe.Pointer, src DeviceBuffer, bytes int64) error {
 	if bytes <= 0 {
 		return nil
 	}
-	return cudaErr(C.mantleCudaMemcpy(dst, src.ptr, C.ulonglong(bytes), C.MANTLE_CUDA_MEMCPY_DEVICE_TO_HOST))
+	recordD2H(bytes)
+	kind := C.int(C.MANTLE_CUDA_MEMCPY_DEVICE_TO_HOST)
+	if src.managed {
+		kind = C.int(C.MANTLE_CUDA_MEMCPY_DEFAULT)
+	}
+	return cudaErr(C.mantleCudaMemcpy(dst, src.ptr, C.ulonglong(bytes), kind))
 }
 
 func NewBlasHandle(stream Stream) (BlasHandle, error) {
@@ -355,6 +785,13 @@ const (
 	BlasGemmDefault BlasGemmAlgo = -1 // CUBLAS_GEMM_DEFAULT
 )
 
+type BlasSideMode int
+
+const (
+	BlasSideLeft  BlasSideMode = 0 // CUBLAS_SIDE_LEFT
+	BlasSideRight BlasSideMode = 1 // CUBLAS_SIDE_RIGHT
+)
+
 func GemmEx(handle BlasHandle, transA, transB BlasOp, m, n, k int, alpha float32, a DeviceBuffer, aType BlasDataType, lda int, b DeviceBuffer, bType BlasDataType, ldb int, beta float32, c DeviceBuffer, cType BlasDataType, ldc int, compute BlasComputeType, algo BlasGemmAlgo) error {
 	alphaPtr := unsafe.Pointer(&alpha)
 	betaPtr := unsafe.Pointer(&beta)
@@ -400,6 +837,193 @@ func GemvF32(handle BlasHandle, trans BlasOp, m, n int, alpha float32, a DeviceB
 	))
 }
 
+func DotF32(handle BlasHandle, n int, x DeviceBuffer, incx int, y DeviceBuffer, incy int) (float32, error) {
+	var out C.float
+	err := cublasErr(C.mantleCublasSdot(
+		handle.ptr,
+		C.int(n),
+		(*C.float)(x.ptr),
+		C.int(incx),
+		(*C.float)(y.ptr),
+		C.int(incy),
+		&out,
+	))
+	return float32(out), err
+}
+
+func CopyF32(handle BlasHandle, n int, src DeviceBuffer, incSrc int, dst DeviceBuffer, incDst int) error {
+	return cublasErr(C.mantleCublasScopy(
+		handle.ptr,
+		C.int(n),
+		(*C.float)(src.ptr),
+		C.int(incSrc),
+		(*C.float)(dst.ptr),
+		C.int(incDst),
+	))
+}
+
+func ScalF32(handle BlasHandle, n int, alpha float32, x DeviceBuffer, incx int) error {
+	alphaPtr := unsafe.Pointer(&alpha)
+	return cublasErr(C.mantleCublasSscal(
+		handle.ptr,
+		C.int(n),
+		(*C.float)(alphaPtr),
+		(*C.float)(x.ptr),
+		C.int(incx),
+	))
+}
+
+func DgmmF32(handle BlasHandle, mode BlasSideMode, m, n int, a DeviceBuffer, lda int, x DeviceBuffer, incx int, c DeviceBuffer, ldc int) error {
+	return cublasErr(C.mantleCublasSdgmm(
+		handle.ptr,
+		C.int(mode),
+		C.int(m),
+		C.int(n),
+		(*C.float)(a.ptr),
+		C.int(lda),
+		(*C.float)(x.ptr),
+		C.int(incx),
+		(*C.float)(c.ptr),
+		C.int(ldc),
+	))
+}
+
+func SoftmaxRowsF32(buf DeviceBuffer, rows, cols int, stream Stream) error {
+	if buf.ptr == nil {
+		return fmt.Errorf("softmax buffer is nil")
+	}
+	if rows <= 0 || cols <= 0 {
+		return fmt.Errorf("softmax rows/cols must be > 0")
+	}
+	return cudaErr(C.mantleCudaSoftmaxRowsF32Wrapper((*C.float)(buf.ptr), C.int(rows), C.int(cols), stream.ptr))
+}
+
+func QuantMatVecInt8BlocksF32(q, scales, x, y DeviceBuffer, rows, blocksPerRow, cols int, stream Stream) error {
+	if q.ptr == nil || scales.ptr == nil || x.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("quant matvec buffer is nil")
+	}
+	if rows <= 0 || blocksPerRow <= 0 || cols <= 0 {
+		return fmt.Errorf("quant matvec rows/blocks/cols must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecInt8BlocksF32Wrapper(
+		(*C.schar)(q.ptr),
+		(*C.float)(scales.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(blocksPerRow),
+		C.int(cols),
+		stream.ptr,
+	))
+}
+
+func QuantMatVecQ4F32(qData, scalesF16, x, y DeviceBuffer, rows, blocksPerRow, cols int, stream Stream) error {
+	if qData.ptr == nil || scalesF16.ptr == nil || x.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("q4 quant matvec buffer is nil")
+	}
+	if rows <= 0 || blocksPerRow <= 0 || cols <= 0 {
+		return fmt.Errorf("q4 quant matvec rows/blocks/cols must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecQ4F32Wrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(scalesF16.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(blocksPerRow),
+		C.int(cols),
+		stream.ptr,
+	))
+}
+
+func QuantMatVecK4F32(qData, superScalesF16, subScales, x, y DeviceBuffer, rows, blocksPerRow, cols int, stream Stream) error {
+	if qData.ptr == nil || superScalesF16.ptr == nil || subScales.ptr == nil || x.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("k4 quant matvec buffer is nil")
+	}
+	if rows <= 0 || blocksPerRow <= 0 || cols <= 0 {
+		return fmt.Errorf("k4 quant matvec rows/blocks/cols must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecK4F32Wrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(superScalesF16.ptr),
+		(*C.uchar)(subScales.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(blocksPerRow),
+		C.int(cols),
+		stream.ptr,
+	))
+}
+
+func DequantizeQ4ToF16(qData, scalesF16, outF16 DeviceBuffer, rows, blocksPerRow, cols int, stream Stream) error {
+	if qData.ptr == nil || scalesF16.ptr == nil || outF16.ptr == nil {
+		return fmt.Errorf("q4 dequant buffer is nil")
+	}
+	if rows <= 0 || blocksPerRow <= 0 || cols <= 0 {
+		return fmt.Errorf("q4 dequant rows/blocks/cols must be > 0")
+	}
+	return cudaErr(C.mantleCudaDequantizeQ4ToF16Wrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(scalesF16.ptr),
+		(*C.ushort)(outF16.ptr),
+		C.int(rows),
+		C.int(blocksPerRow),
+		C.int(cols),
+		stream.ptr,
+	))
+}
+
+func DequantizeK4ToF16(qData, superScalesF16, subScales, outF16 DeviceBuffer, rows, blocksPerRow, cols int, stream Stream) error {
+	if qData.ptr == nil || superScalesF16.ptr == nil || subScales.ptr == nil || outF16.ptr == nil {
+		return fmt.Errorf("k4 dequant buffer is nil")
+	}
+	if rows <= 0 || blocksPerRow <= 0 || cols <= 0 {
+		return fmt.Errorf("k4 dequant rows/blocks/cols must be > 0")
+	}
+	return cudaErr(C.mantleCudaDequantizeK4ToF16Wrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(superScalesF16.ptr),
+		(*C.uchar)(subScales.ptr),
+		(*C.ushort)(outF16.ptr),
+		C.int(rows),
+		C.int(blocksPerRow),
+		C.int(cols),
+		stream.ptr,
+	))
+}
+
+func SiluMulF32(gate, up, out DeviceBuffer, n int, stream Stream) error {
+	if gate.ptr == nil || up.ptr == nil || out.ptr == nil {
+		return fmt.Errorf("silu mul buffer is nil")
+	}
+	if n <= 0 {
+		return fmt.Errorf("silu mul n must be > 0")
+	}
+	return cudaErr(C.mantleCudaSiluMulF32Wrapper(
+		(*C.float)(gate.ptr),
+		(*C.float)(up.ptr),
+		(*C.float)(out.ptr),
+		C.int(n),
+		stream.ptr,
+	))
+}
+
+func ConvertF32ToF16(in, out DeviceBuffer, n int, stream Stream) error {
+	if in.ptr == nil || out.ptr == nil {
+		return fmt.Errorf("f32->f16 convert buffer is nil")
+	}
+	if n <= 0 {
+		return fmt.Errorf("f32->f16 convert n must be > 0")
+	}
+	return cudaErr(C.mantleCudaConvertF32ToF16Wrapper(
+		(*C.float)(in.ptr),
+		(*C.ushort)(out.ptr),
+		C.int(n),
+		stream.ptr,
+	))
+}
+
 func cublasErr(code C.int) error {
 	if code == 0 {
 		return nil
@@ -412,5 +1036,5 @@ func cudaErr(code C.int) error {
 		return nil
 	}
 	msg := C.GoString(C.mantleCudaGetErrorString(C.cudaError_t(code)))
-	return fmt.Errorf("cuda runtime error %d: %s", int(code), msg)
+	return &CUDAError{Code: int(code), Msg: msg}
 }

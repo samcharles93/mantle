@@ -663,11 +663,13 @@ func loadMat(src tensorSource, name string) (*Mat, error) {
 				return nil, fmt.Errorf("%s: quant payload size mismatch", name)
 			}
 			m := Mat{R: r, C: c, Stride: c, DType: payload.DType, Raw: payload.Raw}
-			cache, err := BuildQuantCache(&m)
-			if err != nil {
-				return nil, fmt.Errorf("%s: quant cache: %w", name, err)
+			if quantCacheBuildEnabledForLoad() {
+				cache, err := BuildQuantCache(&m)
+				if err != nil {
+					return nil, fmt.Errorf("%s: quant cache: %w", name, err)
+				}
+				m.Quant = cache
 			}
-			m.Quant = cache
 			return &m, nil
 		}
 		data, err := decodeTensorF32(payload)
