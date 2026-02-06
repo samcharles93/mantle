@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ func runCmd() *cli.Command {
 		// Debug flags
 		showConfig bool
 		showTokens bool
+		rawOutput  bool
 		// Profiling
 		cpuProfile string
 		memProfile string
@@ -203,6 +205,11 @@ func runCmd() *cli.Command {
 			Usage:       "print prompt token ids",
 			Value:       true,
 			Destination: &showTokens,
+		},
+		&cli.BoolFlag{
+			Name:        "raw-output",
+			Usage:       "print escaped output chunks without extra formatting",
+			Destination: &rawOutput,
 		},
 		// Profiling flags
 		&cli.StringFlag{
@@ -537,6 +544,12 @@ func runCmd() *cli.Command {
 
 				var responseBuilder strings.Builder
 				result, err := loadResult.Engine.Generate(ctx, &req, func(s string) {
+					if rawOutput {
+						escaped := escapeRawOutput(s)
+						fmt.Print(escaped)
+						responseBuilder.WriteString(s)
+						return
+					}
 					fmt.Print(s)
 					responseBuilder.WriteString(s)
 				})
@@ -545,9 +558,14 @@ func runCmd() *cli.Command {
 					break
 				}
 
-				fmt.Println() // Newline after generation
+				if !rawOutput {
+					fmt.Println() // Newline after generation
+				}
 				log.Info("generation complete",
 					"tps", result.Stats.TPS,
+					"prompt_tps", result.Stats.PromptTPS,
+					"gen_tps", result.Stats.GenerationTPS,
+					"prompt_tokens", result.Stats.PromptTokens,
 					"tokens", result.Stats.TokensGenerated,
 					"duration", result.Stats.Duration,
 				)
@@ -577,6 +595,32 @@ func joinInts(ids []int) string {
 		b.WriteString(fmt.Sprintf("%d", id))
 	}
 	b.WriteByte(']')
+	return b.String()
+}
+
+func escapeRawOutput(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\\':
+			b.WriteString(`\\`)
+		default:
+			if strconv.IsPrint(r) {
+				b.WriteRune(r)
+			} else {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			}
+		}
+	}
 	return b.String()
 }
 

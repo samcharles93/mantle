@@ -14,6 +14,13 @@ type Stats struct {
 	TokensGenerated int
 	Duration        time.Duration
 	TPS             float64
+
+	PromptTokens   int
+	PromptDuration time.Duration
+	PromptTPS      float64
+
+	GenerationDuration time.Duration
+	GenerationTPS      float64
 }
 
 // Generate runs the inference loop for a fixed number of steps.
@@ -26,11 +33,17 @@ func Generate(m simd.Model, sampler *logits.Sampler, promptTokens []int, steps i
 	var err error
 
 	// Process prompt tokens
+	promptStart := time.Now()
 	for _, id := range promptTokens {
 		logitsVec, err = m.ForwardToken(id)
 		if err != nil {
 			return stats, fmt.Errorf("forward error during prefill: %w", err)
 		}
+	}
+	stats.PromptTokens = len(promptTokens)
+	stats.PromptDuration = time.Since(promptStart)
+	if stats.PromptDuration.Seconds() > 0 && stats.PromptTokens > 0 {
+		stats.PromptTPS = float64(stats.PromptTokens) / stats.PromptDuration.Seconds()
 	}
 
 	toks := append([]int(nil), promptTokens...)
@@ -52,6 +65,8 @@ func Generate(m simd.Model, sampler *logits.Sampler, promptTokens []int, steps i
 	if stats.Duration.Seconds() > 0 {
 		stats.TPS = float64(stats.TokensGenerated) / stats.Duration.Seconds()
 	}
+	stats.GenerationDuration = stats.Duration
+	stats.GenerationTPS = stats.TPS
 
 	return stats, nil
 }
@@ -104,6 +119,7 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 
 	var logitsVec []float32
 	var err error
+	promptStart := time.Now()
 	for _, id := range newInTokens {
 		logitsVec, err = g.Model.ForwardToken(id)
 		if err != nil {
@@ -111,6 +127,11 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		}
 	}
 	g.ContextTokens = append(g.ContextTokens, newInTokens...)
+	stats.PromptTokens = len(newInTokens)
+	stats.PromptDuration = time.Since(promptStart)
+	if stats.PromptDuration.Seconds() > 0 && stats.PromptTokens > 0 {
+		stats.PromptTPS = float64(stats.PromptTokens) / stats.PromptDuration.Seconds()
+	}
 
 	toks := append([]int(nil), g.ContextTokens...)
 
@@ -119,11 +140,21 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		limit = 1000000
 	}
 
-	const streamBatchTokens = 8
-	var pending []int
+	const (
+		streamMaxTokens  = 32
+		streamMaxChars   = 128
+		streamMinChars   = 16
+		streamMaxLatency = 40 * time.Millisecond
+	)
+	var (
+		pending       []int
+		pendingChars  int
+		lastFlushTime = time.Now()
+	)
 	flush := func() {
 		if stream == nil || len(pending) == 0 {
 			pending = pending[:0]
+			pendingChars = 0
 			return
 		}
 		s, _ := g.decodeTokens(pending)
@@ -131,8 +162,11 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 			stream(s)
 		}
 		pending = pending[:0]
+		pendingChars = 0
+		lastFlushTime = time.Now()
 	}
 
+	genStart := time.Now()
 	for i := 0; i < limit; i++ {
 		if err := ctx.Err(); err != nil {
 			return g.ContextTokens, stats, err
@@ -149,7 +183,13 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 
 		if stream != nil {
 			pending = append(pending, next)
-			if len(pending) >= streamBatchTokens {
+			if tokStr, err := g.decodeToken(next); err == nil {
+				pendingChars += len(tokStr)
+			}
+			age := time.Since(lastFlushTime)
+			if len(pending) >= streamMaxTokens ||
+				pendingChars >= streamMaxChars ||
+				(age >= streamMaxLatency && pendingChars >= streamMinChars) {
 				flush()
 			}
 		}
@@ -161,6 +201,10 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		stats.TokensGenerated++
 	}
 
+	stats.GenerationDuration = time.Since(genStart)
+	if stats.GenerationDuration.Seconds() > 0 {
+		stats.GenerationTPS = float64(stats.TokensGenerated) / stats.GenerationDuration.Seconds()
+	}
 	stats.Duration = time.Since(start)
 	if stats.Duration.Seconds() > 0 {
 		stats.TPS = float64(stats.TokensGenerated) / stats.Duration.Seconds()
