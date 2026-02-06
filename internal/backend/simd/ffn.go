@@ -2,9 +2,17 @@ package simd
 
 import "simd/archsimd"
 
+type ffnFastPath interface {
+	FFNBlock(layer *Layer, x []float32, out []float32) bool
+}
+
 // FFN performs feed-forward network computation with SiLU activation.
 // Computes: SiLU(Gate(x)) * Up(x) -> Down
 func FFN(m *Instance, layer *Layer, x []float32) []float32 {
+	if fp, ok := m.Ops().(ffnFastPath); ok && fp.FFNBlock(layer, x, m.Scratch.Tmp2) {
+		return m.Scratch.Tmp2
+	}
+
 	var qx *QuantVec
 	if CanUseQuantVec(layer.FfnUp) || CanUseQuantVec(layer.FfnGate) {
 		qx = PrepareQuantVec(x)

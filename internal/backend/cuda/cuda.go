@@ -3,12 +3,15 @@
 package cuda
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"sync/atomic"
+	"time"
 
 	"github.com/samcharles93/mantle/internal/backend/cuda/native"
 	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/mcfstore"
-	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
 type Backend struct{}
@@ -21,6 +24,9 @@ func New() (*Backend, error) {
 	if count < 1 {
 		return nil, fmt.Errorf("no cuda devices detected")
 	}
+	if os.Getenv("MANTLE_CUDA_TRACE") != "" {
+		logUMCapabilities()
+	}
 	return &Backend{}, nil
 }
 
@@ -29,6 +35,7 @@ func (b *Backend) Name() string {
 }
 
 func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int) (simd.Runtime, error) {
+	native.ResetManagedFallbackFlag()
 	stream, err := native.NewStream()
 	if err != nil {
 		return nil, fmt.Errorf("cuda stream create failed: %w", err)
@@ -39,13 +46,12 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 		return nil, fmt.Errorf("cublas init failed: %w", err)
 	}
 
-	m, err := simd.LoadModelMCF(mcfFile, cfgBytes, maxContext)
+	restoreQuantCache := simd.SetQuantCacheBuildEnabledForLoad(false)
+	m, err := func() (*simd.Instance, error) {
+		defer restoreQuantCache()
+		return simd.LoadModelMCF(mcfFile, cfgBytes, maxContext)
+	}()
 	if err != nil {
-		_ = blas.Destroy()
-		_ = stream.Destroy()
-		return nil, err
-	}
-	if err := validateNoQuant(m); err != nil {
 		_ = blas.Destroy()
 		_ = stream.Destroy()
 		return nil, err
@@ -53,22 +59,60 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 
 	ops := NewOps(stream, blas)
 	m.SetOps(ops)
+	preloadStart := time.Now()
+	if err := ops.PreloadModelWeights(m); err != nil {
+		_ = ops.Close()
+		_ = blas.Destroy()
+		_ = stream.Destroy()
+		return nil, fmt.Errorf("cuda weight preload failed: %w", err)
+	}
+	if os.Getenv("MANTLE_CUDA_TRACE") != "" {
+		fmt.Fprintf(os.Stderr, "CUDA preload complete in %s\n", time.Since(preloadStart).Round(time.Millisecond))
+	}
 
-	return &cudaRuntime{model: m, ops: ops, stream: stream, blas: blas}, nil
+	managedLog := false
+	if native.ManagedFallbackUsed() {
+		fmt.Fprintln(os.Stderr, "CUDA Unified Memory fallback active (device memory pressure detected)")
+		managedLog = true
+	}
+
+	return &cudaRuntime{model: m, ops: ops, stream: stream, blas: blas, managedFallbackLog: managedLog}, nil
 }
 
 type cudaRuntime struct {
-	model  *simd.Instance
-	ops    *Ops
-	stream native.Stream
-	blas   native.BlasHandle
+	model              *simd.Instance
+	ops                *Ops
+	stream             native.Stream
+	blas               native.BlasHandle
+	managedFallbackLog bool
+	tokenCount         atomic.Int64
 }
 
-func (r *cudaRuntime) ForwardToken(id int) ([]float32, error) {
-	return r.model.ForwardToken(id)
+func (r *cudaRuntime) ForwardToken(id int) (logits []float32, err error) {
+	if r.model == nil {
+		return nil, fmt.Errorf("cuda runtime is closed")
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = cudaExecutionError(rec)
+		}
+	}()
+	logits, err = r.model.ForwardToken(id)
+	if err != nil {
+		return nil, err
+	}
+	if !r.managedFallbackLog && native.ManagedFallbackUsed() {
+		fmt.Fprintln(os.Stderr, "CUDA Unified Memory fallback active (device memory pressure detected)")
+		r.managedFallbackLog = true
+	}
+	r.tokenCount.Add(1)
+	return logits, nil
 }
 
 func (r *cudaRuntime) Reset() {
+	if r.model == nil {
+		return
+	}
 	r.model.Reset()
 }
 
@@ -81,99 +125,63 @@ func (r *cudaRuntime) UpdateRoPE() {
 }
 
 func (r *cudaRuntime) Close() error {
-	var err error
+	var errs []error
 	if r.ops != nil {
 		if e := r.ops.Close(); e != nil {
-			err = e
+			errs = append(errs, e)
 		}
+		r.ops = nil
 	}
-	if e := r.blas.Destroy(); e != nil && err == nil {
-		err = e
+	if e := r.blas.Destroy(); e != nil {
+		errs = append(errs, e)
 	}
-	if e := r.stream.Destroy(); e != nil && err == nil {
-		err = e
+	r.blas = native.BlasHandle{}
+	if e := r.stream.Destroy(); e != nil {
+		errs = append(errs, e)
 	}
-	return err
+	r.stream = native.Stream{}
+	r.model = nil
+
+	if os.Getenv("MANTLE_CUDA_TRACE") != "" {
+		r.emitPerfSummary()
+	}
+
+	return errors.Join(errs...)
 }
 
-func validateNoQuant(m *simd.Instance) error {
-	check := func(name string, mat *simd.Mat) error {
-		if mat == nil {
-			return nil
-		}
-		if mcf.DTypeRequiresAligned64(mat.DType) {
-			return fmt.Errorf("cuda backend does not support quantized weights (%s dtype=0x%04x)", name, uint16(mat.DType))
-		}
-		return nil
-	}
+func (r *cudaRuntime) emitPerfSummary() {
+	c := native.GetPerfCounters()
+	toks := r.tokenCount.Load()
+	fmt.Fprintf(os.Stderr, "\n=== CUDA Performance Summary ===\n")
+	fmt.Fprintf(os.Stderr, "Tokens processed: %d\n", toks)
+	fmt.Fprintf(os.Stderr, "MatVec calls: %d (%.1f per token)\n", c.MatVecCalls, float64(c.MatVecCalls)/float64(max(toks, 1)))
+	fmt.Fprintf(os.Stderr, "RMSNorm calls: %d (%.1f per token)\n", c.RMSNormCalls, float64(c.RMSNormCalls)/float64(max(toks, 1)))
+	fmt.Fprintf(os.Stderr, "StoreKV calls: %d (%.1f per token)\n", c.StoreKVCalls, float64(c.StoreKVCalls)/float64(max(toks, 1)))
+	fmt.Fprintf(os.Stderr, "Stream syncs: %d\n", c.StreamSyncs)
+	fmt.Fprintf(os.Stderr, "H2D bytes: %d MB\n", c.H2DBytes/1024/1024)
+	fmt.Fprintf(os.Stderr, "D2H bytes: %d MB\n", c.D2HBytes/1024/1024)
+	fmt.Fprintf(os.Stderr, "Device allocs: %d (%.1f MB)\n", c.DeviceAllocs, float64(c.DeviceBytes)/1024/1024)
+	fmt.Fprintf(os.Stderr, "Managed allocs: %d (%.1f MB)\n", c.ManagedAllocs, float64(c.ManagedBytes)/1024/1024)
+	fmt.Fprintf(os.Stderr, "================================\n")
+}
 
-	if err := check("embeddings", m.Embeddings); err != nil {
-		return err
+func max(a, b int64) int64 {
+	if a > b {
+		return a
 	}
-	if err := check("output", m.Output); err != nil {
-		return err
+	return b
+}
+
+func logUMCapabilities() {
+	concurrent, err1 := native.DeviceGetAttribute(native.DevAttrConcurrentManagedAccess, 0)
+	pageable, err2 := native.DeviceGetAttribute(native.DevAttrPageableMemoryAccess, 0)
+	coherent, err3 := native.DeviceGetAttribute(native.DevAttrPageableMemoryAccessUsesHostPageTables, 0)
+	if err1 != nil || err2 != nil || err3 != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to query CUDA UM device attributes (concurrent=%v pageable=%v coherent=%v)\n", err1, err2, err3)
+		return
 	}
-	for i := range m.Layers {
-		layer := &m.Layers[i]
-		if err := check("layer.wq", layer.Wq); err != nil {
-			return err
-		}
-		if err := check("layer.wk", layer.Wk); err != nil {
-			return err
-		}
-		if err := check("layer.wv", layer.Wv); err != nil {
-			return err
-		}
-		if err := check("layer.wo", layer.Wo); err != nil {
-			return err
-		}
-		if err := check("layer.attn_gate", layer.AttnGate); err != nil {
-			return err
-		}
-		if err := check("layer.shortconv_kernel", layer.ShortConvKernel); err != nil {
-			return err
-		}
-		if err := check("layer.shortconv_in", layer.ShortConvInProj); err != nil {
-			return err
-		}
-		if err := check("layer.shortconv_out", layer.ShortConvOutProj); err != nil {
-			return err
-		}
-		if err := check("layer.ffn_up", layer.FfnUp); err != nil {
-			return err
-		}
-		if err := check("layer.ffn_gate", layer.FfnGate); err != nil {
-			return err
-		}
-		if err := check("layer.ffn_down", layer.FfnDown); err != nil {
-			return err
-		}
-		if layer.MoE != nil {
-			if err := check("layer.moe.router", layer.MoE.Router); err != nil {
-				return err
-			}
-			if err := check("layer.moe.shared_up", layer.MoE.Shared.Up); err != nil {
-				return err
-			}
-			if err := check("layer.moe.shared_gate", layer.MoE.Shared.Gate); err != nil {
-				return err
-			}
-			if err := check("layer.moe.shared_down", layer.MoE.Shared.Down); err != nil {
-				return err
-			}
-			for j := range layer.MoE.Experts {
-				ex := &layer.MoE.Experts[j]
-				if err := check("layer.moe.expert_up", ex.Up); err != nil {
-					return err
-				}
-				if err := check("layer.moe.expert_gate", ex.Gate); err != nil {
-					return err
-				}
-				if err := check("layer.moe.expert_down", ex.Down); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
+	fmt.Fprintln(os.Stderr, "CUDA Device 0 UM Capabilities:")
+	fmt.Fprintf(os.Stderr, "  ConcurrentManagedAccess: %d\n", concurrent)
+	fmt.Fprintf(os.Stderr, "  PageableMemoryAccess: %d\n", pageable)
+	fmt.Fprintf(os.Stderr, "  PageableMemoryAccessUsesHostPageTables: %d\n", coherent)
 }

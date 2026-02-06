@@ -5,7 +5,9 @@ package cuda
 import (
 	"fmt"
 	"math"
+	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"unsafe"
 
@@ -18,18 +20,24 @@ type Ops struct {
 	stream native.Stream
 	blas   native.BlasHandle
 
-	mu      sync.Mutex
-	weights map[*simd.Mat]deviceMat
+	mu          sync.Mutex
+	weights     map[*simd.Mat]deviceMat
+	qweights    map[*simd.Mat]deviceQuantMat
+	normWeights map[uintptr]native.DeviceBuffer
 
 	xHost native.HostBuffer
 	yHost native.HostBuffer
 	xDev  native.DeviceBuffer
 	yDev  native.DeviceBuffer
+	zDev  native.DeviceBuffer
+	aDev  native.DeviceBuffer
 
 	xCapBytes int
 	yCapBytes int
 	xDevBytes int
 	yDevBytes int
+	zDevBytes int
+	aDevBytes int
 }
 
 type deviceMat struct {
@@ -39,12 +47,166 @@ type deviceMat struct {
 	cols  int
 }
 
+type deviceQuantMat struct {
+	format       quantMatFormat
+	q            native.DeviceBuffer
+	scales       native.DeviceBuffer
+	superScales  native.DeviceBuffer
+	subScales    native.DeviceBuffer
+	rows         int
+	cols         int
+	blocksPerRow int
+}
+
+type quantMatFormat int
+
+const (
+	quantMatFormatCachedInt8 quantMatFormat = iota
+	quantMatFormatQ4Raw
+	quantMatFormatK4Raw
+)
+
 func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 	return &Ops{
-		stream:  stream,
-		blas:    blas,
-		weights: make(map[*simd.Mat]deviceMat),
+		stream:      stream,
+		blas:        blas,
+		weights:     make(map[*simd.Mat]deviceMat),
+		qweights:    make(map[*simd.Mat]deviceQuantMat),
+		normWeights: make(map[uintptr]native.DeviceBuffer),
 	}
+}
+
+// PreloadModelWeights uploads all model matrices and RMSNorm weights to device memory.
+// This removes lazy first-use uploads from the decode hot path.
+func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
+	if o == nil || m == nil {
+		return nil
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	uploadMat := func(name string, mat *simd.Mat) error {
+		if mat == nil {
+			return nil
+		}
+		if useQuantKernel() && mat.Quant != nil && mat.Quant.ValidFor(mat) {
+			if _, err := o.ensureQuantMat(mat); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			return nil
+		}
+		if _, err := o.deviceMat(mat); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		return nil
+	}
+	uploadNorm := func(name string, weight []float32) error {
+		if len(weight) == 0 {
+			return nil
+		}
+		if _, err := o.deviceNormWeight(weight); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		return nil
+	}
+
+	if err := uploadMat("embeddings", m.Embeddings); err != nil {
+		return err
+	}
+	if err := uploadMat("output", m.Output); err != nil {
+		return err
+	}
+	if err := uploadNorm("output_norm", m.OutputNorm); err != nil {
+		return err
+	}
+
+	for i := range m.Layers {
+		layer := &m.Layers[i]
+		prefix := fmt.Sprintf("layer[%d]", i)
+
+		if err := uploadNorm(prefix+".attn_norm", layer.AttnNorm); err != nil {
+			return err
+		}
+		if err := uploadNorm(prefix+".post_attn_norm", layer.PostAttnNorm); err != nil {
+			return err
+		}
+		if err := uploadNorm(prefix+".ffn_norm", layer.FfnNorm); err != nil {
+			return err
+		}
+		if err := uploadNorm(prefix+".post_ffn_norm", layer.PostFfnNorm); err != nil {
+			return err
+		}
+		if err := uploadNorm(prefix+".attn_q_norm", layer.AttnQNorm); err != nil {
+			return err
+		}
+		if err := uploadNorm(prefix+".attn_k_norm", layer.AttnKNorm); err != nil {
+			return err
+		}
+
+		if err := uploadMat(prefix+".wq", layer.Wq); err != nil {
+			return err
+		}
+		if err := uploadMat(prefix+".wk", layer.Wk); err != nil {
+			return err
+		}
+		if err := uploadMat(prefix+".wv", layer.Wv); err != nil {
+			return err
+		}
+		if err := uploadMat(prefix+".wo", layer.Wo); err != nil {
+			return err
+		}
+		if err := uploadMat(prefix+".attn_gate", layer.AttnGate); err != nil {
+			return err
+		}
+		if err := uploadMat(prefix+".shortconv_kernel", layer.ShortConvKernel); err != nil {
+			return err
+		}
+		if err := uploadMat(prefix+".shortconv_in", layer.ShortConvInProj); err != nil {
+			return err
+		}
+		if err := uploadMat(prefix+".shortconv_out", layer.ShortConvOutProj); err != nil {
+			return err
+		}
+		if err := uploadMat(prefix+".ffn_up", layer.FfnUp); err != nil {
+			return err
+		}
+		if err := uploadMat(prefix+".ffn_gate", layer.FfnGate); err != nil {
+			return err
+		}
+		if err := uploadMat(prefix+".ffn_down", layer.FfnDown); err != nil {
+			return err
+		}
+		if layer.MoE != nil {
+			if err := uploadMat(prefix+".moe.router", layer.MoE.Router); err != nil {
+				return err
+			}
+			if err := uploadMat(prefix+".moe.shared.up", layer.MoE.Shared.Up); err != nil {
+				return err
+			}
+			if err := uploadMat(prefix+".moe.shared.gate", layer.MoE.Shared.Gate); err != nil {
+				return err
+			}
+			if err := uploadMat(prefix+".moe.shared.down", layer.MoE.Shared.Down); err != nil {
+				return err
+			}
+			for j := range layer.MoE.Experts {
+				ex := &layer.MoE.Experts[j]
+				exPrefix := fmt.Sprintf("%s.moe.expert[%d]", prefix, j)
+				if err := uploadMat(exPrefix+".up", ex.Up); err != nil {
+					return err
+				}
+				if err := uploadMat(exPrefix+".gate", ex.Gate); err != nil {
+					return err
+				}
+				if err := uploadMat(exPrefix+".down", ex.Down); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func (o *Ops) Close() error {
@@ -58,11 +220,39 @@ func (o *Ops) Close() error {
 		}
 	}
 	o.weights = make(map[*simd.Mat]deviceMat)
+	for _, q := range o.qweights {
+		if e := q.q.Free(); e != nil && err == nil {
+			err = e
+		}
+		if e := q.scales.Free(); e != nil && err == nil {
+			err = e
+		}
+		if e := q.superScales.Free(); e != nil && err == nil {
+			err = e
+		}
+		if e := q.subScales.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.qweights = make(map[*simd.Mat]deviceQuantMat)
+
+	for _, buf := range o.normWeights {
+		if e := buf.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.normWeights = make(map[uintptr]native.DeviceBuffer)
 
 	if e := o.xDev.Free(); e != nil && err == nil {
 		err = e
 	}
 	if e := o.yDev.Free(); e != nil && err == nil {
+		err = e
+	}
+	if e := o.zDev.Free(); e != nil && err == nil {
+		err = e
+	}
+	if e := o.aDev.Free(); e != nil && err == nil {
 		err = e
 	}
 	if e := o.xHost.Free(); e != nil && err == nil {
@@ -71,15 +261,25 @@ func (o *Ops) Close() error {
 	if e := o.yHost.Free(); e != nil && err == nil {
 		err = e
 	}
+
+	o.xDev = native.DeviceBuffer{}
+	o.yDev = native.DeviceBuffer{}
+	o.zDev = native.DeviceBuffer{}
+	o.aDev = native.DeviceBuffer{}
+	o.xHost = native.HostBuffer{}
+	o.yHost = native.HostBuffer{}
 	o.xCapBytes = 0
 	o.yCapBytes = 0
 	o.xDevBytes = 0
 	o.yDevBytes = 0
+	o.zDevBytes = 0
+	o.aDevBytes = 0
 
 	return err
 }
 
 func (o *Ops) MatVec(dst []float32, w *simd.Mat, x []float32) {
+	native.RecordMatVec()
 	if w == nil || w.R == 0 || w.C == 0 {
 		return
 	}
@@ -93,25 +293,30 @@ func (o *Ops) MatVec(dst []float32, w *simd.Mat, x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	if useQuantKernel() && w.Quant != nil && w.Quant.ValidFor(w) {
+		o.matVecQuant(dst, w, x)
+		return
+	}
+
 	devW, err := o.deviceMat(w)
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("cuda matvec weight upload failed (r=%d c=%d dtype=%s): %w", w.R, w.C, dtypeString(w.DType), err))
 	}
 
 	xBytes := xBufferBytes(devW.dtype, w.C)
 	yBytes := int64(w.R) * int64(unsafe.Sizeof(float32(0)))
 	if err := o.ensureHostVecs(int(xBytes), int(yBytes)); err != nil {
-		panic(err)
+		panic(fmt.Errorf("cuda matvec host buffer alloc failed (x=%d y=%d bytes): %w", xBytes, yBytes, err))
 	}
 	if err := o.ensureDeviceVecs(int(xBytes), int(yBytes)); err != nil {
-		panic(err)
+		panic(fmt.Errorf("cuda matvec device buffer alloc failed (x=%d y=%d bytes): %w", xBytes, yBytes, err))
 	}
 
 	if err := fillXBuffer(o.xHost, devW.dtype, x[:w.C]); err != nil {
 		panic(err)
 	}
 	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
-		panic(err)
+		panic(fmt.Errorf("cuda matvec H2D copy failed (%d bytes): %w", xBytes, err))
 	}
 
 	if err := native.GemmEx(
@@ -135,14 +340,51 @@ func (o *Ops) MatVec(dst []float32, w *simd.Mat, x []float32) {
 		native.BlasComputeF32,
 		native.BlasGemmDefault,
 	); err != nil {
-		panic(err)
+		panic(fmt.Errorf("cuda matvec gemm failed (m=%d n=1 k=%d): %w", w.R, w.C, err))
 	}
 
-	if err := native.MemcpyD2HAsync(o.yHost.Ptr(), o.yDev, yBytes, o.stream); err != nil {
-		panic(err)
+	if err := o.waitForResult(o.yHost.Ptr(), o.yDev, yBytes); err != nil {
+		panic(fmt.Errorf("cuda matvec result wait failed: %w", err))
 	}
-	if err := o.stream.Synchronize(); err != nil {
-		panic(err)
+
+	copy(dst[:w.R], unsafe.Slice((*float32)(o.yHost.Ptr()), w.R))
+	runtime.KeepAlive(x)
+	runtime.KeepAlive(dst)
+}
+
+func (o *Ops) matVecQuant(dst []float32, w *simd.Mat, x []float32) {
+	qw, err := o.ensureQuantMat(w)
+	if err != nil {
+		panic(fmt.Errorf("cuda quant matvec weight upload failed (r=%d c=%d dtype=%s): %w", w.R, w.C, dtypeString(w.DType), err))
+	}
+
+	xBytes := int64(w.C) * int64(unsafe.Sizeof(float32(0)))
+	yBytes := int64(w.R) * int64(unsafe.Sizeof(float32(0)))
+	if err := o.ensureHostVecs(int(xBytes), int(yBytes)); err != nil {
+		panic(fmt.Errorf("cuda quant matvec host buffer alloc failed (x=%d y=%d bytes): %w", xBytes, yBytes, err))
+	}
+	if err := o.ensureDeviceVecs(int(xBytes), int(yBytes)); err != nil {
+		panic(fmt.Errorf("cuda quant matvec device buffer alloc failed (x=%d y=%d bytes): %w", xBytes, yBytes, err))
+	}
+
+	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), w.C), x[:w.C])
+	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
+		panic(fmt.Errorf("cuda quant matvec H2D copy failed (%d bytes): %w", xBytes, err))
+	}
+	var kernelErr error
+	switch qw.format {
+	case quantMatFormatQ4Raw:
+		kernelErr = native.QuantMatVecQ4F32(qw.q, qw.scales, o.xDev, o.yDev, qw.rows, qw.blocksPerRow, qw.cols, o.stream)
+	case quantMatFormatK4Raw:
+		kernelErr = native.QuantMatVecK4F32(qw.q, qw.superScales, qw.subScales, o.xDev, o.yDev, qw.rows, qw.blocksPerRow, qw.cols, o.stream)
+	default:
+		kernelErr = native.QuantMatVecInt8BlocksF32(qw.q, qw.scales, o.xDev, o.yDev, qw.rows, qw.blocksPerRow, qw.cols, o.stream)
+	}
+	if kernelErr != nil {
+		panic(fmt.Errorf("cuda quant matvec kernel failed (rows=%d cols=%d blocks=%d): %w", qw.rows, qw.cols, qw.blocksPerRow, kernelErr))
+	}
+	if err := o.waitForResult(o.yHost.Ptr(), o.yDev, yBytes); err != nil {
+		panic(fmt.Errorf("cuda quant matvec result wait failed: %w", err))
 	}
 
 	copy(dst[:w.R], unsafe.Slice((*float32)(o.yHost.Ptr()), w.R))
@@ -154,12 +396,363 @@ func (o *Ops) MatVecWithQuant(dst []float32, w *simd.Mat, x []float32, _ *simd.Q
 	o.MatVec(dst, w, x)
 }
 
+func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
+	if o == nil || layer == nil || layer.FfnUp == nil || layer.FfnGate == nil || layer.FfnDown == nil {
+		return false
+	}
+	if len(x) < layer.FfnUp.C || len(out) < layer.FfnDown.R {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	upW, err := o.deviceMat(layer.FfnUp)
+	if err != nil {
+		return false
+	}
+	gateW, err := o.deviceMat(layer.FfnGate)
+	if err != nil {
+		return false
+	}
+	downW, err := o.deviceMat(layer.FfnDown)
+	if err != nil {
+		return false
+	}
+	// CUDA FFN fast path currently supports f16/bf16 weights with matching input/output packing.
+	if upW.dtype != gateW.dtype || upW.dtype != downW.dtype {
+		return false
+	}
+
+	interm := upW.rows
+	if interm != gateW.rows || upW.cols != len(x) || downW.cols != interm || downW.rows > len(out) {
+		return false
+	}
+
+	xBytes := xBufferBytes(upW.dtype, len(x))
+	intermF32Bytes := int64(interm) * 4
+	intermF16Bytes := int64(interm) * 2
+	outBytes := int64(downW.rows) * 4
+
+	if err := o.ensureHostVecs(int(xBytes), int(outBytes)); err != nil {
+		return false
+	}
+	if err := o.ensureDeviceVecs(int(xBytes), int(max64Local(intermF32Bytes, outBytes))); err != nil {
+		return false
+	}
+	if err := o.ensureNormTmp(int(max64Local(intermF32Bytes, outBytes))); err != nil {
+		return false
+	}
+	if err := o.ensureActTmp(int(intermF16Bytes)); err != nil {
+		return false
+	}
+
+	if err := fillXBuffer(o.xHost, upW.dtype, x[:len(x)]); err != nil {
+		return false
+	}
+	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
+		return false
+	}
+
+	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, upW.rows, 1, upW.cols, 1.0, upW.buf, upW.dtype, upW.cols, o.xDev, upW.dtype, upW.cols, 0.0, o.yDev, native.BlasF32, upW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+		return false
+	}
+	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, gateW.rows, 1, gateW.cols, 1.0, gateW.buf, gateW.dtype, gateW.cols, o.xDev, gateW.dtype, gateW.cols, 0.0, o.zDev, native.BlasF32, gateW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+		return false
+	}
+
+	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, interm, o.stream); err != nil {
+		return false
+	}
+	if err := native.ConvertF32ToF16(o.yDev, o.aDev, interm, o.stream); err != nil {
+		return false
+	}
+
+	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, downW.rows, 1, downW.cols, 1.0, downW.buf, downW.dtype, downW.cols, o.aDev, downW.dtype, downW.cols, 0.0, o.zDev, native.BlasF32, downW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+		return false
+	}
+	if err := o.waitForResult(o.yHost.Ptr(), o.zDev, outBytes); err != nil {
+		return false
+	}
+	copy(out[:downW.rows], unsafe.Slice((*float32)(o.yHost.Ptr()), downW.rows))
+	return true
+}
+
+func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bool {
+	if o == nil || wq == nil || wk == nil || wv == nil {
+		return false
+	}
+	if len(q) < wq.R || len(k) < wk.R || len(v) < wv.R || len(x) < wq.C || wq.C != wk.C || wq.C != wv.C {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	dq, err := o.deviceMat(wq)
+	if err != nil {
+		return false
+	}
+	dk, err := o.deviceMat(wk)
+	if err != nil {
+		return false
+	}
+	dv, err := o.deviceMat(wv)
+	if err != nil {
+		return false
+	}
+	if dq.dtype != dk.dtype || dq.dtype != dv.dtype {
+		return false
+	}
+
+	xBytes := xBufferBytes(dq.dtype, wq.C)
+	qBytes := int64(dq.rows) * 4
+	kBytes := int64(dk.rows) * 4
+	vBytes := int64(dv.rows) * 4
+	totalOutBytes := qBytes + kBytes + vBytes
+	if err := o.ensureHostVecs(int(xBytes), int(totalOutBytes)); err != nil {
+		return false
+	}
+	maxOutBytes := int(max64Local(qBytes, max64Local(kBytes, vBytes)))
+	if err := o.ensureDeviceVecs(int(xBytes), maxOutBytes); err != nil {
+		return false
+	}
+	if err := o.ensureNormTmp(int(kBytes)); err != nil {
+		return false
+	}
+	if err := o.ensureActTmp(int(vBytes)); err != nil {
+		return false
+	}
+
+	if err := fillXBuffer(o.xHost, dq.dtype, x[:wq.C]); err != nil {
+		return false
+	}
+	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
+		return false
+	}
+
+	runOne := func(out native.DeviceBuffer, w deviceMat) bool {
+		return native.GemmEx(
+			o.blas,
+			native.BlasOpT,
+			native.BlasOpN,
+			w.rows,
+			1,
+			w.cols,
+			1.0,
+			w.buf,
+			w.dtype,
+			w.cols,
+			o.xDev,
+			w.dtype,
+			w.cols,
+			0.0,
+			out,
+			native.BlasF32,
+			w.rows,
+			native.BlasComputeF32,
+			native.BlasGemmDefault,
+		) == nil
+	}
+
+	if !runOne(o.yDev, dq) || !runOne(o.zDev, dk) || !runOne(o.aDev, dv) {
+		return false
+	}
+	if err := native.MemcpyD2HAsync(o.yHost.Ptr(), o.yDev, qBytes, o.stream); err != nil {
+		return false
+	}
+	if err := native.MemcpyD2HAsync(unsafe.Add(o.yHost.Ptr(), int(qBytes)), o.zDev, kBytes, o.stream); err != nil {
+		return false
+	}
+	if err := native.MemcpyD2HAsync(unsafe.Add(o.yHost.Ptr(), int(qBytes+kBytes)), o.aDev, vBytes, o.stream); err != nil {
+		return false
+	}
+	if err := o.stream.Synchronize(); err != nil {
+		return false
+	}
+
+	copy(q[:dq.rows], unsafe.Slice((*float32)(o.yHost.Ptr()), dq.rows))
+	copy(k[:dk.rows], unsafe.Slice((*float32)(unsafe.Add(o.yHost.Ptr(), int(qBytes))), dk.rows))
+	copy(v[:dv.rows], unsafe.Slice((*float32)(unsafe.Add(o.yHost.Ptr(), int(qBytes+kBytes))), dv.rows))
+	return true
+}
+
+func (o *Ops) Softmax(x []float32) {
+	if len(x) <= 1 {
+		return
+	}
+	if o == nil {
+		panic("cuda ops is nil")
+	}
+	if !useAttnSoftmaxKernel() {
+		simd.Softmax(x)
+		return
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	bytes := int64(len(x)) * int64(unsafe.Sizeof(float32(0)))
+	if err := o.ensureHostVecs(int(bytes), int(bytes)); err != nil {
+		panic(fmt.Errorf("cuda softmax host buffer alloc failed (%d bytes): %w", bytes, err))
+	}
+	if err := o.ensureDeviceVecs(int(bytes), int(bytes)); err != nil {
+		panic(fmt.Errorf("cuda softmax device buffer alloc failed (%d bytes): %w", bytes, err))
+	}
+
+	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), len(x)), x)
+	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), bytes, o.stream); err != nil {
+		panic(fmt.Errorf("cuda softmax H2D copy failed (%d bytes): %w", bytes, err))
+	}
+	if err := native.SoftmaxRowsF32(o.xDev, 1, len(x), o.stream); err != nil {
+		panic(fmt.Errorf("cuda softmax kernel failed (cols=%d): %w", len(x), err))
+	}
+	if err := o.waitForResult(o.yHost.Ptr(), o.xDev, bytes); err != nil {
+		panic(fmt.Errorf("cuda softmax result wait failed: %w", err))
+	}
+
+	copy(x, unsafe.Slice((*float32)(o.yHost.Ptr()), len(x)))
+	runtime.KeepAlive(x)
+}
+
+func (o *Ops) RMSNorm(dst, src, weight []float32, eps float32) {
+	native.RecordRMSNorm()
+	n := len(src)
+	if n == 0 {
+		return
+	}
+	if len(dst) < n || len(weight) < n {
+		panic("rmsnorm shape mismatch")
+	}
+	if o == nil {
+		panic("cuda ops is nil")
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
+	if err := o.ensureHostVecs(int(bytes), int(bytes)); err != nil {
+		panic(fmt.Errorf("cuda rmsnorm host buffer alloc failed (%d bytes): %w", bytes, err))
+	}
+	if err := o.ensureDeviceVecs(int(bytes), int(bytes)); err != nil {
+		panic(fmt.Errorf("cuda rmsnorm device buffer alloc failed (%d bytes): %w", bytes, err))
+	}
+	if err := o.ensureNormTmp(int(bytes)); err != nil {
+		panic(fmt.Errorf("cuda rmsnorm temp buffer alloc failed (%d bytes): %w", bytes, err))
+	}
+
+	wDev, err := o.deviceNormWeight(weight)
+	if err != nil {
+		panic(fmt.Errorf("cuda rmsnorm weight upload failed (%d elements): %w", n, err))
+	}
+
+	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), n), src[:n])
+	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), bytes, o.stream); err != nil {
+		panic(fmt.Errorf("cuda rmsnorm H2D copy failed (%d bytes): %w", bytes, err))
+	}
+
+	sumSq, err := native.DotF32(o.blas, n, o.xDev, 1, o.xDev, 1)
+	if err != nil {
+		panic(fmt.Errorf("cuda rmsnorm dot failed (n=%d): %w", n, err))
+	}
+	mean := sumSq / float32(n)
+	scale := float32(1.0 / math.Sqrt(float64(mean+eps)))
+
+	if err := native.CopyF32(o.blas, n, o.xDev, 1, o.yDev, 1); err != nil {
+		panic(fmt.Errorf("cuda rmsnorm copy failed (n=%d): %w", n, err))
+	}
+	if err := native.ScalF32(o.blas, n, scale, o.yDev, 1); err != nil {
+		panic(fmt.Errorf("cuda rmsnorm scale failed (n=%d): %w", n, err))
+	}
+	if err := native.DgmmF32(o.blas, native.BlasSideLeft, n, 1, o.yDev, n, wDev, 1, o.zDev, n); err != nil {
+		panic(fmt.Errorf("cuda rmsnorm dgmm failed (n=%d): %w", n, err))
+	}
+
+	if err := o.waitForResult(o.yHost.Ptr(), o.zDev, bytes); err != nil {
+		panic(fmt.Errorf("cuda rmsnorm result wait failed: %w", err))
+	}
+
+	copy(dst[:n], unsafe.Slice((*float32)(o.yHost.Ptr()), n))
+}
+
+func (o *Ops) ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {
+	if headDim%2 != 0 {
+		panic("headDim must be even for RoPE")
+	}
+	if attentionFactor == 0 {
+		attentionFactor = 1
+	}
+	half := headDim / 2
+	for h := range nHead {
+		base := h * headDim
+		for i := range half {
+			angle := float64(pos) * invFreq[i]
+			c := float32(math.Cos(angle)) * attentionFactor
+			s := float32(math.Sin(angle)) * attentionFactor
+			i0 := base + i
+			i1 := base + i + half
+			x0 := x[i0]
+			x1 := x[i1]
+			x[i0] = x0*c - x1*s
+			x[i1] = x0*s + x1*c
+		}
+	}
+}
+
+func (o *Ops) StoreKV(_ int, pos, kvStride int, kDst, vDst []float32, kDst16, vDst16 []uint16, k, v []float32) {
+	native.RecordStoreKV()
+	if kvStride <= 0 {
+		return
+	}
+	offset := pos * kvStride
+	if kDst != nil {
+		copy(kDst[offset:], k)
+	} else if kDst16 != nil {
+		for i, kv := range k {
+			kDst16[offset+i] = simd.Float32ToFloat16(kv)
+		}
+	}
+	if vDst != nil {
+		copy(vDst[offset:], v)
+	} else if vDst16 != nil {
+		for i, vv := range v {
+			vDst16[offset+i] = simd.Float32ToFloat16(vv)
+		}
+	}
+}
+
 func (o *Ops) deviceMat(w *simd.Mat) (deviceMat, error) {
 	if buf, ok := o.weights[w]; ok {
 		return buf, nil
 	}
 	if w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType) {
-		return deviceMat{}, fmt.Errorf("cuda backend does not support quantized weights (dtype=%s)", dtypeString(w.DType))
+		dev, err := o.uploadQuantAsF16Device(w)
+		if err != nil {
+			// Fallback: CPU decode path remains as a compatibility safety net.
+			hostF16, decErr := decodeQuantToF16(w)
+			if decErr != nil {
+				return deviceMat{}, err
+			}
+			bytes := int64(len(hostF16)) * int64(unsafe.Sizeof(uint16(0)))
+			dev, decErr = native.AllocDevice(bytes)
+			if decErr != nil {
+				return deviceMat{}, err
+			}
+			if decErr := native.MemcpyH2D(dev, unsafe.Pointer(&hostF16[0]), bytes); decErr != nil {
+				_ = dev.Free()
+				return deviceMat{}, err
+			}
+		}
+		info := deviceMat{
+			buf:   dev,
+			dtype: native.BlasF16,
+			rows:  w.R,
+			cols:  w.C,
+		}
+		o.weights[w] = info
+		runtime.KeepAlive(w)
+		return info, nil
 	}
 
 	dtype, bytes, hostPtr, err := weightUploadSpec(w)
@@ -187,6 +780,413 @@ func (o *Ops) deviceMat(w *simd.Mat) (deviceMat, error) {
 	o.weights[w] = info
 	runtime.KeepAlive(w)
 	return info, nil
+}
+
+func (o *Ops) uploadQuantAsF16Device(w *simd.Mat) (native.DeviceBuffer, error) {
+	if w == nil || w.Raw == nil || !mcf.DTypeRequiresAligned64(w.DType) {
+		return native.DeviceBuffer{}, fmt.Errorf("gpu dequant requires quantized raw matrix")
+	}
+	totalElems, ok := mulInt(w.R, w.C)
+	if !ok {
+		return native.DeviceBuffer{}, fmt.Errorf("quant matrix too large")
+	}
+	outBytes, ok := mulInt(totalElems, 2)
+	if !ok {
+		return native.DeviceBuffer{}, fmt.Errorf("quant matrix too large")
+	}
+	out, err := native.AllocDevice(int64(outBytes))
+	if err != nil {
+		return native.DeviceBuffer{}, err
+	}
+
+	switch w.DType {
+	case mcf.DTypeQ4:
+		v, err := parseQ4PayloadView(w)
+		if err != nil {
+			_ = out.Free()
+			return native.DeviceBuffer{}, err
+		}
+		qBuf, sBuf, err := o.uploadQ4PayloadBuffers(v)
+		if err != nil {
+			_ = out.Free()
+			return native.DeviceBuffer{}, err
+		}
+		defer qBuf.Free()
+		defer sBuf.Free()
+		if err := native.DequantizeQ4ToF16(qBuf, sBuf, out, w.R, v.blocksPerRow, w.C, o.stream); err != nil {
+			_ = out.Free()
+			return native.DeviceBuffer{}, err
+		}
+	case mcf.DTypeK4:
+		v, err := parseK4PayloadView(w)
+		if err != nil {
+			_ = out.Free()
+			return native.DeviceBuffer{}, err
+		}
+		qBuf, superBuf, subBuf, err := o.uploadK4PayloadBuffers(v)
+		if err != nil {
+			_ = out.Free()
+			return native.DeviceBuffer{}, err
+		}
+		defer qBuf.Free()
+		defer superBuf.Free()
+		defer subBuf.Free()
+		if err := native.DequantizeK4ToF16(qBuf, superBuf, subBuf, out, w.R, v.blocksPerRow, w.C, o.stream); err != nil {
+			_ = out.Free()
+			return native.DeviceBuffer{}, err
+		}
+	default:
+		_ = out.Free()
+		return native.DeviceBuffer{}, fmt.Errorf("gpu dequant unsupported dtype: %s", dtypeString(w.DType))
+	}
+
+	return out, nil
+}
+
+func decodeQuantToF16(w *simd.Mat) ([]uint16, error) {
+	if w == nil || w.R == 0 || w.C == 0 {
+		return nil, fmt.Errorf("empty quantized weight matrix")
+	}
+	if w.Raw == nil || !mcf.DTypeRequiresAligned64(w.DType) {
+		return nil, fmt.Errorf("decodeQuantToF16 requires quantized raw matrix")
+	}
+	row := make([]float32, w.C)
+	out := make([]uint16, w.R*w.C)
+	for r := range w.R {
+		w.RowTo(row, r)
+		base := r * w.C
+		for c, v := range row {
+			out[base+c] = simd.Float32ToFloat16(v)
+		}
+	}
+	return out, nil
+}
+
+func useQuantKernel() bool {
+	return envEnabled("MANTLE_CUDA_QUANT_KERNEL")
+}
+
+func useLegacyStreamSync() bool {
+	return envEnabled("MANTLE_CUDA_LEGACY_SYNC")
+}
+
+func useAttnSoftmaxKernel() bool {
+	return envEnabled("MANTLE_CUDA_ATTN_SOFTMAX")
+}
+
+func envEnabled(name string) bool {
+	v, ok := os.LookupEnv(name)
+	if !ok {
+		return false
+	}
+	if b, err := strconv.ParseBool(v); err == nil {
+		return b
+	}
+	switch v {
+	case "1", "on", "ON", "yes", "YES", "y", "Y":
+		return true
+	default:
+		return false
+	}
+}
+
+func (o *Ops) waitForResult(hostDst unsafe.Pointer, devSrc native.DeviceBuffer, bytes int64) error {
+	if useLegacyStreamSync() {
+		if err := native.MemcpyD2HAsync(hostDst, devSrc, bytes, o.stream); err != nil {
+			return err
+		}
+		if err := o.stream.Synchronize(); err != nil {
+			return err
+		}
+		return nil
+	}
+	// Blocking D2H copy implicitly waits for producing work and avoids a separate stream sync call.
+	return native.MemcpyD2H(hostDst, devSrc, bytes)
+}
+
+func (o *Ops) ensureQuantMat(w *simd.Mat) (deviceQuantMat, error) {
+	if buf, ok := o.qweights[w]; ok {
+		return buf, nil
+	}
+	if w == nil {
+		return deviceQuantMat{}, fmt.Errorf("missing quant matrix")
+	}
+	if w.DType == mcf.DTypeQ4 && len(w.Raw) > 0 {
+		info, err := o.ensureQuantMatQ4Raw(w)
+		if err != nil {
+			return deviceQuantMat{}, err
+		}
+		o.qweights[w] = info
+		runtime.KeepAlive(w)
+		return info, nil
+	}
+	if w.DType == mcf.DTypeK4 && len(w.Raw) > 0 {
+		info, err := o.ensureQuantMatK4Raw(w)
+		if err != nil {
+			return deviceQuantMat{}, err
+		}
+		o.qweights[w] = info
+		runtime.KeepAlive(w)
+		return info, nil
+	}
+	if w.Quant == nil || !w.Quant.ValidFor(w) {
+		return deviceQuantMat{}, fmt.Errorf("missing quant cache")
+	}
+	qc := w.Quant
+	if len(qc.Q) == 0 || len(qc.Scales) == 0 {
+		return deviceQuantMat{}, fmt.Errorf("empty quant cache")
+	}
+
+	qBytes := int64(len(qc.Q))
+	scaleBytes := int64(len(qc.Scales)) * int64(unsafe.Sizeof(float32(0)))
+	qBuf, err := native.AllocDevice(qBytes)
+	if err != nil {
+		return deviceQuantMat{}, err
+	}
+	if err := native.MemcpyH2D(qBuf, unsafe.Pointer(&qc.Q[0]), qBytes); err != nil {
+		_ = qBuf.Free()
+		return deviceQuantMat{}, err
+	}
+	sBuf, err := native.AllocDevice(scaleBytes)
+	if err != nil {
+		_ = qBuf.Free()
+		return deviceQuantMat{}, err
+	}
+	if err := native.MemcpyH2D(sBuf, unsafe.Pointer(&qc.Scales[0]), scaleBytes); err != nil {
+		_ = qBuf.Free()
+		_ = sBuf.Free()
+		return deviceQuantMat{}, err
+	}
+
+	info := deviceQuantMat{
+		format:       quantMatFormatCachedInt8,
+		q:            qBuf,
+		scales:       sBuf,
+		rows:         w.R,
+		cols:         w.C,
+		blocksPerRow: qc.BlocksPerRow,
+	}
+	o.qweights[w] = info
+	runtime.KeepAlive(w)
+	return info, nil
+}
+
+type q4PayloadView struct {
+	blocksPerRow int
+	data         []byte
+	scales       []byte
+}
+
+type k4PayloadView struct {
+	blocksPerRow int
+	data         []byte
+	superScales  []byte
+	subScales    []byte
+}
+
+func parseQ4PayloadView(w *simd.Mat) (q4PayloadView, error) {
+	blocksPerRow, totalBlocks, err := quantBlocks(w.R, w.C)
+	if err != nil {
+		return q4PayloadView{}, err
+	}
+	scaleBytes, ok := mulInt(totalBlocks, 2)
+	if !ok {
+		return q4PayloadView{}, fmt.Errorf("q4 scale region too large")
+	}
+	dataOff, ok := align64Int(scaleBytes)
+	if !ok {
+		return q4PayloadView{}, fmt.Errorf("q4 payload layout overflow")
+	}
+	dataBytes, ok := mulInt(totalBlocks, 16)
+	if !ok {
+		return q4PayloadView{}, fmt.Errorf("q4 data region too large")
+	}
+	if dataOff < 0 || dataOff+dataBytes > len(w.Raw) {
+		return q4PayloadView{}, fmt.Errorf("q4 payload bounds invalid")
+	}
+	return q4PayloadView{
+		blocksPerRow: blocksPerRow,
+		data:         w.Raw[dataOff : dataOff+dataBytes],
+		scales:       w.Raw[:scaleBytes],
+	}, nil
+}
+
+func parseK4PayloadView(w *simd.Mat) (k4PayloadView, error) {
+	blocksPerRow, totalBlocks, err := quantBlocks(w.R, w.C)
+	if err != nil {
+		return k4PayloadView{}, err
+	}
+	superBlocksPerRow := (blocksPerRow + 7) / 8
+	superCount, ok := mulInt(w.R, superBlocksPerRow)
+	if !ok {
+		return k4PayloadView{}, fmt.Errorf("k4 super scale region too large")
+	}
+	superBytes, ok := mulInt(superCount, 2)
+	if !ok {
+		return k4PayloadView{}, fmt.Errorf("k4 super scale region too large")
+	}
+	subOff, ok := align64Int(superBytes)
+	if !ok {
+		return k4PayloadView{}, fmt.Errorf("k4 payload layout overflow")
+	}
+	subBytes := totalBlocks
+	dataOff, ok := addInt(subOff, subBytes)
+	if !ok {
+		return k4PayloadView{}, fmt.Errorf("k4 payload layout overflow")
+	}
+	dataOff, ok = align64Int(dataOff)
+	if !ok {
+		return k4PayloadView{}, fmt.Errorf("k4 payload layout overflow")
+	}
+	dataBytes, ok := mulInt(totalBlocks, 16)
+	if !ok {
+		return k4PayloadView{}, fmt.Errorf("k4 data region too large")
+	}
+	if superBytes < 0 || subOff < 0 || dataOff < 0 || dataOff+dataBytes > len(w.Raw) {
+		return k4PayloadView{}, fmt.Errorf("k4 payload bounds invalid")
+	}
+	if subOff+subBytes > len(w.Raw) {
+		return k4PayloadView{}, fmt.Errorf("k4 subscale region out of bounds")
+	}
+	return k4PayloadView{
+		blocksPerRow: blocksPerRow,
+		data:         w.Raw[dataOff : dataOff+dataBytes],
+		superScales:  w.Raw[:superBytes],
+		subScales:    w.Raw[subOff : subOff+subBytes],
+	}, nil
+}
+
+func (o *Ops) uploadQ4PayloadBuffers(v q4PayloadView) (native.DeviceBuffer, native.DeviceBuffer, error) {
+	qBuf, err := native.AllocDevice(int64(len(v.data)))
+	if err != nil {
+		return native.DeviceBuffer{}, native.DeviceBuffer{}, err
+	}
+	if err := native.MemcpyH2D(qBuf, unsafe.Pointer(&v.data[0]), int64(len(v.data))); err != nil {
+		_ = qBuf.Free()
+		return native.DeviceBuffer{}, native.DeviceBuffer{}, err
+	}
+	sBuf, err := native.AllocDevice(int64(len(v.scales)))
+	if err != nil {
+		_ = qBuf.Free()
+		return native.DeviceBuffer{}, native.DeviceBuffer{}, err
+	}
+	if err := native.MemcpyH2D(sBuf, unsafe.Pointer(&v.scales[0]), int64(len(v.scales))); err != nil {
+		_ = qBuf.Free()
+		_ = sBuf.Free()
+		return native.DeviceBuffer{}, native.DeviceBuffer{}, err
+	}
+	return qBuf, sBuf, nil
+}
+
+func (o *Ops) uploadK4PayloadBuffers(v k4PayloadView) (native.DeviceBuffer, native.DeviceBuffer, native.DeviceBuffer, error) {
+	qBuf, err := native.AllocDevice(int64(len(v.data)))
+	if err != nil {
+		return native.DeviceBuffer{}, native.DeviceBuffer{}, native.DeviceBuffer{}, err
+	}
+	if err := native.MemcpyH2D(qBuf, unsafe.Pointer(&v.data[0]), int64(len(v.data))); err != nil {
+		_ = qBuf.Free()
+		return native.DeviceBuffer{}, native.DeviceBuffer{}, native.DeviceBuffer{}, err
+	}
+	superBuf, err := native.AllocDevice(int64(len(v.superScales)))
+	if err != nil {
+		_ = qBuf.Free()
+		return native.DeviceBuffer{}, native.DeviceBuffer{}, native.DeviceBuffer{}, err
+	}
+	if err := native.MemcpyH2D(superBuf, unsafe.Pointer(&v.superScales[0]), int64(len(v.superScales))); err != nil {
+		_ = qBuf.Free()
+		_ = superBuf.Free()
+		return native.DeviceBuffer{}, native.DeviceBuffer{}, native.DeviceBuffer{}, err
+	}
+	subBuf, err := native.AllocDevice(int64(len(v.subScales)))
+	if err != nil {
+		_ = qBuf.Free()
+		_ = superBuf.Free()
+		return native.DeviceBuffer{}, native.DeviceBuffer{}, native.DeviceBuffer{}, err
+	}
+	if err := native.MemcpyH2D(subBuf, unsafe.Pointer(&v.subScales[0]), int64(len(v.subScales))); err != nil {
+		_ = qBuf.Free()
+		_ = superBuf.Free()
+		_ = subBuf.Free()
+		return native.DeviceBuffer{}, native.DeviceBuffer{}, native.DeviceBuffer{}, err
+	}
+	return qBuf, superBuf, subBuf, nil
+}
+
+func (o *Ops) ensureQuantMatQ4Raw(w *simd.Mat) (deviceQuantMat, error) {
+	v, err := parseQ4PayloadView(w)
+	if err != nil {
+		return deviceQuantMat{}, err
+	}
+	qBuf, sBuf, err := o.uploadQ4PayloadBuffers(v)
+	if err != nil {
+		return deviceQuantMat{}, err
+	}
+
+	return deviceQuantMat{
+		format:       quantMatFormatQ4Raw,
+		q:            qBuf,
+		scales:       sBuf,
+		rows:         w.R,
+		cols:         w.C,
+		blocksPerRow: v.blocksPerRow,
+	}, nil
+}
+
+func (o *Ops) ensureQuantMatK4Raw(w *simd.Mat) (deviceQuantMat, error) {
+	v, err := parseK4PayloadView(w)
+	if err != nil {
+		return deviceQuantMat{}, err
+	}
+	qBuf, superBuf, subBuf, err := o.uploadK4PayloadBuffers(v)
+	if err != nil {
+		return deviceQuantMat{}, err
+	}
+
+	return deviceQuantMat{
+		format:       quantMatFormatK4Raw,
+		q:            qBuf,
+		superScales:  superBuf,
+		subScales:    subBuf,
+		rows:         w.R,
+		cols:         w.C,
+		blocksPerRow: v.blocksPerRow,
+	}, nil
+}
+
+func quantBlocks(rows, cols int) (int, int, error) {
+	if rows <= 0 || cols <= 0 {
+		return 0, 0, fmt.Errorf("invalid quant matrix shape")
+	}
+	blocksPerRow := (cols + 31) / 32
+	totalBlocks, ok := mulInt(rows, blocksPerRow)
+	if !ok {
+		return 0, 0, fmt.Errorf("quant matrix too large")
+	}
+	return blocksPerRow, totalBlocks, nil
+}
+
+func mulInt(a, b int) (int, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if a > int(^uint(0)>>1)/b {
+		return 0, false
+	}
+	return a * b, true
+}
+
+func addInt(a, b int) (int, bool) {
+	if a > int(^uint(0)>>1)-b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func align64Int(n int) (int, bool) {
+	if n < 0 || n > int(^uint(0)>>1)-63 {
+		return 0, false
+	}
+	return (n + 63) &^ 63, true
 }
 
 func weightUploadSpec(w *simd.Mat) (native.BlasDataType, int64, unsafe.Pointer, error) {
@@ -264,6 +1264,57 @@ func (o *Ops) ensureDeviceVecs(xBytes, yBytes int) error {
 	return nil
 }
 
+func (o *Ops) ensureNormTmp(bytes int) error {
+	if bytes > o.zDevBytes {
+		if err := o.zDev.Free(); err != nil {
+			return err
+		}
+		buf, err := native.AllocDevice(int64(bytes))
+		if err != nil {
+			return err
+		}
+		o.zDev = buf
+		o.zDevBytes = bytes
+	}
+	return nil
+}
+
+func (o *Ops) ensureActTmp(bytes int) error {
+	if bytes > o.aDevBytes {
+		if err := o.aDev.Free(); err != nil {
+			return err
+		}
+		buf, err := native.AllocDevice(int64(bytes))
+		if err != nil {
+			return err
+		}
+		o.aDev = buf
+		o.aDevBytes = bytes
+	}
+	return nil
+}
+
+func (o *Ops) deviceNormWeight(weight []float32) (native.DeviceBuffer, error) {
+	if len(weight) == 0 {
+		return native.DeviceBuffer{}, fmt.Errorf("empty rmsnorm weight")
+	}
+	key := uintptr(unsafe.Pointer(&weight[0]))
+	if buf, ok := o.normWeights[key]; ok {
+		return buf, nil
+	}
+	bytes := int64(len(weight)) * int64(unsafe.Sizeof(float32(0)))
+	buf, err := native.AllocDevice(bytes)
+	if err != nil {
+		return native.DeviceBuffer{}, err
+	}
+	if err := native.MemcpyH2D(buf, unsafe.Pointer(&weight[0]), bytes); err != nil {
+		_ = buf.Free()
+		return native.DeviceBuffer{}, err
+	}
+	o.normWeights[key] = buf
+	return buf, nil
+}
+
 func xBufferBytes(dtype native.BlasDataType, length int) int64 {
 	switch dtype {
 	case native.BlasF16, native.BlasBF16:
@@ -271,6 +1322,23 @@ func xBufferBytes(dtype native.BlasDataType, length int) int64 {
 	default:
 		return int64(length) * 4
 	}
+}
+
+func max64Local(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func maxInt3(a, b, c int) int {
+	if b > a {
+		a = b
+	}
+	if c > a {
+		a = c
+	}
+	return a
 }
 
 func fillXBuffer(buf native.HostBuffer, dtype native.BlasDataType, x []float32) error {
