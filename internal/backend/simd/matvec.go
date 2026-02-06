@@ -374,32 +374,70 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 	raw := w.Raw
 	if u16raw, ok := rawUint16LE(raw); ok {
 		c := w.C
-		for i := rs; i < re; i++ {
+		i := rs
+		for ; i+1 < re; i += 2 {
+			row0Base := i * w.Stride
+			row1Base := (i + 1) * w.Stride
+			row0 := u16raw[row0Base : row0Base+w.Stride]
+			row1 := u16raw[row1Base : row1Base+w.Stride]
+			if c > 0 {
+				_ = row0[c-1]
+				_ = row1[c-1]
+			}
+
+			var acc0 archsimd.Float32x8
+			var acc1 archsimd.Float32x8
+			j := 0
+			for ; j+8 <= c; j += 8 {
+				vx := archsimd.LoadFloat32x8Slice(x[j:])
+
+				vu0 := archsimd.LoadUint16x8Slice(row0[j:])
+				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				acc0 = acc0.Add(vf0.Mul(vx))
+
+				vu1 := archsimd.LoadUint16x8Slice(row1[j:])
+				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				acc1 = acc1.Add(vf1.Mul(vx))
+			}
+
+			var tmp0 [8]float32
+			var tmp1 [8]float32
+			acc0.Store(&tmp0)
+			acc1.Store(&tmp1)
+			var sum0 float32
+			var sum1 float32
+			sum0 += tmp0[0] + tmp0[1] + tmp0[2] + tmp0[3] + tmp0[4] + tmp0[5] + tmp0[6] + tmp0[7]
+			sum1 += tmp1[0] + tmp1[1] + tmp1[2] + tmp1[3] + tmp1[4] + tmp1[5] + tmp1[6] + tmp1[7]
+
+			for ; j < c; j++ {
+				xv := x[j]
+				sum0 += bf16ToF32Table(row0[j]) * xv
+				sum1 += bf16ToF32Table(row1[j]) * xv
+			}
+			dst[i] = sum0
+			dst[i+1] = sum1
+		}
+		if i < re {
 			rowBase := i * w.Stride
 			row := u16raw[rowBase : rowBase+w.Stride]
 			if c > 0 {
 				_ = row[c-1]
 			}
 
-			// Single accumulator
 			var acc archsimd.Float32x8
 			j := 0
-			// Process 8 elements at a time
 			for ; j+8 <= c; j += 8 {
-				// Load 8 BF16 values as uint16, convert to F32
 				vu := archsimd.LoadUint16x8Slice(row[j:])
 				vf := vu.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
 				vx := archsimd.LoadFloat32x8Slice(x[j:])
 				acc = acc.Add(vf.Mul(vx))
 			}
 
-			// Horizontal reduction: store to array and sum scalarly
 			var tmp [8]float32
 			acc.Store(&tmp)
 			var sum float32
 			sum += tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 
-			// Handle remaining elements
 			for ; j < c; j++ {
 				sum += bf16ToF32Table(row[j]) * x[j]
 			}
