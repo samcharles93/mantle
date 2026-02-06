@@ -685,6 +685,143 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *simd.Layer, q, k, v []flo
 	return true
 }
 
+func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
+	if !useAttentionInnerFastPath() {
+		return false
+	}
+	if o == nil || layer == nil || layer.Wo == nil {
+		return false
+	}
+	if len(projOut) < layer.Wo.R || len(q) < nHead*headDim || len(k) < kvStride || len(v) < kvStride {
+		return false
+	}
+	if pos < 0 || start < 0 || start > pos || kvStride <= 0 || headDim <= 0 || nHead <= 0 || kvHeads <= 0 {
+		return false
+	}
+	cacheLen := layer.AttnCache.CacheLen
+	if cacheLen <= 0 {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	cache, err := o.ensureAttnCache(layer, kvStride, cacheLen)
+	if err != nil {
+		return false
+	}
+	if cache.kvStride != kvStride || cache.cacheLen != cacheLen {
+		return false
+	}
+
+	qBytes := int64(nHead*headDim) * 4
+	outBytes := qBytes
+	if err := o.ensureHostVecs(int(qBytes), int(outBytes)); err != nil {
+		return false
+	}
+	if err := o.ensureDeviceVecs(int(qBytes), int(outBytes)); err != nil {
+		return false
+	}
+	if err := o.ensureKVU16Tmp(kvStride); err != nil {
+		return false
+	}
+
+	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), nHead*headDim), q[:nHead*headDim])
+	for i := range kvStride {
+		o.kTmpU16[i] = simd.Float32ToFloat16(k[i])
+		o.vTmpU16[i] = simd.Float32ToFloat16(v[i])
+	}
+
+	cachePos := pos
+	if cacheLen > 0 {
+		cachePos = pos % cacheLen
+	}
+	kvBytes := int64(kvStride) * 2
+	dstOffset := int64(cachePos*kvStride) * 2
+	if err := native.MemcpyH2DAsyncAt(cache.k, dstOffset, unsafe.Pointer(&o.kTmpU16[0]), kvBytes, o.stream); err != nil {
+		return false
+	}
+	if err := native.MemcpyH2DAsyncAt(cache.v, dstOffset, unsafe.Pointer(&o.vTmpU16[0]), kvBytes, o.stream); err != nil {
+		return false
+	}
+	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), qBytes, o.stream); err != nil {
+		return false
+	}
+
+	if err := native.AttentionInnerF16CacheF32(o.xDev, cache.k, cache.v, o.yDev, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen, scale, o.stream); err != nil {
+		return false
+	}
+
+	// Projection step: Wo * attnOut (attnOut is in o.yDev)
+	projDim := layer.Wo.R
+	projBytes := int64(projDim) * 4
+	if err := o.ensureNormTmp(int(projBytes)); err != nil {
+		return false
+	}
+	// Ensure host buffer for final result
+	if err := o.ensureHostVecs(int(qBytes), int(projBytes)); err != nil {
+		return false
+	}
+
+	if useQuantKernel() && layer.Wo.Quant != nil && layer.Wo.Quant.ValidFor(layer.Wo) {
+		qw, err := o.ensureQuantMat(layer.Wo)
+		if err != nil {
+			return false
+		}
+		var kernelErr error
+		switch qw.format {
+		case quantMatFormatQ4Raw:
+			kernelErr = native.QuantMatVecQ4F32(qw.q, qw.scales, o.yDev, o.zDev, qw.rows, qw.blocksPerRow, qw.cols, o.stream)
+		case quantMatFormatK4Raw:
+			kernelErr = native.QuantMatVecK4F32(qw.q, qw.superScales, qw.subScales, o.yDev, o.zDev, qw.rows, qw.blocksPerRow, qw.cols, o.stream)
+		default:
+			kernelErr = native.QuantMatVecInt8BlocksF32(qw.q, qw.scales, o.yDev, o.zDev, qw.rows, qw.blocksPerRow, qw.cols, o.stream)
+		}
+		if kernelErr != nil {
+			return false
+		}
+	} else {
+		devW, err := o.deviceMat(layer.Wo)
+		if err != nil {
+			return false
+		}
+		// gemm: Wo^T * attnOut (Wo is column-major? In BLAS gemm with transposition)
+		// Wo dimensions: rows = projDim, cols = nHead*headDim
+		// Compute y = Wo^T * x where x is attnOut (size cols)
+		// Use GemmEx with OpT, OpN
+		if err := native.GemmEx(
+			o.blas,
+			native.BlasOpT,
+			native.BlasOpN,
+			devW.rows, // output size
+			1,
+			devW.cols, // input size
+			1.0,
+			devW.buf,
+			devW.dtype,
+			devW.cols,
+			o.yDev,
+			native.BlasF32,
+			devW.cols,
+			0.0,
+			o.zDev,
+			native.BlasF32,
+			devW.rows,
+			native.BlasComputeF32,
+			native.BlasGemmDefault,
+		); err != nil {
+			return false
+		}
+	}
+
+	// Copy projection result to host
+	if err := o.waitForResult(o.yHost.Ptr(), o.zDev, projBytes); err != nil {
+		return false
+	}
+	copy(projOut[:projDim], unsafe.Slice((*float32)(o.yHost.Ptr()), projDim))
+	return true
+}
+
 func (o *Ops) Softmax(x []float32) {
 	if len(x) <= 1 {
 		return
