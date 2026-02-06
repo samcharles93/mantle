@@ -21,6 +21,7 @@ type Loader struct {
 	ChatTemplatePath    string
 	HFConfigPath        string
 	Backend             string
+	DisableSWA          bool
 }
 
 type LoadResult struct {
@@ -67,6 +68,13 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	}
 	if len(cfgBytes) == 0 {
 		return cleanup(fmt.Errorf("hf config.json not found in MCF (use --hf-config to override)"))
+	}
+	if l.DisableSWA {
+		updated, err := disableSWAConfig(cfgBytes)
+		if err != nil {
+			return cleanup(fmt.Errorf("disable swa: %w", err))
+		}
+		cfgBytes = updated
 	}
 
 	backendName, err := backend.Normalize(l.Backend)
@@ -208,4 +216,27 @@ func parseHFGenerationDefaults(genBytes []byte) GenDefaults {
 		return GenDefaults{}
 	}
 	return GenDefaults(cfg)
+}
+
+func disableSWAConfig(cfgBytes []byte) ([]byte, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(cfgBytes, &raw); err != nil {
+		return nil, err
+	}
+	raw["sliding_window"] = 0
+	raw["sliding_window_pattern"] = 0
+	raw["global_attn_every_n_layers"] = 0
+	if lt, ok := raw["layer_types"]; ok {
+		if list, ok := lt.([]any); ok {
+			for i := range list {
+				list[i] = "full_attention"
+			}
+			raw["layer_types"] = list
+		}
+	}
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
