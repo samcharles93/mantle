@@ -24,6 +24,7 @@ type Ops struct {
 	weights     map[*simd.Mat]deviceMat
 	qweights    map[*simd.Mat]deviceQuantMat
 	normWeights map[uintptr]native.DeviceBuffer
+	attnCaches  map[*simd.Layer]deviceAttnCache
 
 	xHost native.HostBuffer
 	yHost native.HostBuffer
@@ -38,6 +39,9 @@ type Ops struct {
 	yDevBytes int
 	zDevBytes int
 	aDevBytes int
+
+	kTmpU16 []uint16
+	vTmpU16 []uint16
 }
 
 type deviceMat struct {
@@ -58,6 +62,13 @@ type deviceQuantMat struct {
 	blocksPerRow int
 }
 
+type deviceAttnCache struct {
+	k        native.DeviceBuffer
+	v        native.DeviceBuffer
+	kvStride int
+	cacheLen int
+}
+
 type quantMatFormat int
 
 const (
@@ -73,6 +84,7 @@ func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 		weights:     make(map[*simd.Mat]deviceMat),
 		qweights:    make(map[*simd.Mat]deviceQuantMat),
 		normWeights: make(map[uintptr]native.DeviceBuffer),
+		attnCaches:  make(map[*simd.Layer]deviceAttnCache),
 	}
 }
 
@@ -242,6 +254,15 @@ func (o *Ops) Close() error {
 		}
 	}
 	o.normWeights = make(map[uintptr]native.DeviceBuffer)
+	for _, cache := range o.attnCaches {
+		if e := cache.k.Free(); e != nil && err == nil {
+			err = e
+		}
+		if e := cache.v.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.attnCaches = make(map[*simd.Layer]deviceAttnCache)
 
 	if e := o.xDev.Free(); e != nil && err == nil {
 		err = e
@@ -574,6 +595,76 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bo
 	copy(q[:dq.rows], unsafe.Slice((*float32)(o.yHost.Ptr()), dq.rows))
 	copy(k[:dk.rows], unsafe.Slice((*float32)(unsafe.Add(o.yHost.Ptr(), int(qBytes))), dk.rows))
 	copy(v[:dv.rows], unsafe.Slice((*float32)(unsafe.Add(o.yHost.Ptr(), int(qBytes+kBytes))), dv.rows))
+	return true
+}
+
+func (o *Ops) AttentionInner(attnOut []float32, layer *simd.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
+	if o == nil || layer == nil {
+		return false
+	}
+	if len(attnOut) < nHead*headDim || len(q) < nHead*headDim || len(k) < kvStride || len(v) < kvStride {
+		return false
+	}
+	if pos < 0 || start < 0 || start > pos || kvStride <= 0 || headDim <= 0 || nHead <= 0 || kvHeads <= 0 {
+		return false
+	}
+	cacheLen := layer.AttnCache.CacheLen
+	if cacheLen <= 0 {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	cache, err := o.ensureAttnCache(layer, kvStride, cacheLen)
+	if err != nil {
+		return false
+	}
+	if cache.kvStride != kvStride || cache.cacheLen != cacheLen {
+		return false
+	}
+
+	qBytes := int64(nHead*headDim) * 4
+	outBytes := qBytes
+	if err := o.ensureHostVecs(int(qBytes), int(outBytes)); err != nil {
+		return false
+	}
+	if err := o.ensureDeviceVecs(int(qBytes), int(outBytes)); err != nil {
+		return false
+	}
+	if err := o.ensureKVU16Tmp(kvStride); err != nil {
+		return false
+	}
+
+	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), nHead*headDim), q[:nHead*headDim])
+	for i := range kvStride {
+		o.kTmpU16[i] = simd.Float32ToFloat16(k[i])
+		o.vTmpU16[i] = simd.Float32ToFloat16(v[i])
+	}
+
+	cachePos := pos
+	if cacheLen > 0 {
+		cachePos = pos % cacheLen
+	}
+	kvBytes := int64(kvStride) * 2
+	dstOffset := int64(cachePos*kvStride) * 2
+	if err := native.MemcpyH2DAsyncAt(cache.k, dstOffset, unsafe.Pointer(&o.kTmpU16[0]), kvBytes, o.stream); err != nil {
+		return false
+	}
+	if err := native.MemcpyH2DAsyncAt(cache.v, dstOffset, unsafe.Pointer(&o.vTmpU16[0]), kvBytes, o.stream); err != nil {
+		return false
+	}
+	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), qBytes, o.stream); err != nil {
+		return false
+	}
+
+	if err := native.AttentionInnerF16CacheF32(o.xDev, cache.k, cache.v, o.yDev, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen, scale, o.stream); err != nil {
+		return false
+	}
+	if err := o.waitForResult(o.yHost.Ptr(), o.yDev, outBytes); err != nil {
+		return false
+	}
+	copy(attnOut[:nHead*headDim], unsafe.Slice((*float32)(o.yHost.Ptr()), nHead*headDim))
 	return true
 }
 
@@ -1292,6 +1383,55 @@ func (o *Ops) ensureActTmp(bytes int) error {
 		o.aDevBytes = bytes
 	}
 	return nil
+}
+
+func (o *Ops) ensureKVU16Tmp(kvStride int) error {
+	if kvStride <= 0 {
+		return fmt.Errorf("invalid kv stride")
+	}
+	if len(o.kTmpU16) < kvStride {
+		o.kTmpU16 = make([]uint16, kvStride)
+	}
+	if len(o.vTmpU16) < kvStride {
+		o.vTmpU16 = make([]uint16, kvStride)
+	}
+	return nil
+}
+
+func (o *Ops) ensureAttnCache(layer *simd.Layer, kvStride, cacheLen int) (deviceAttnCache, error) {
+	if cache, ok := o.attnCaches[layer]; ok {
+		return cache, nil
+	}
+	if kvStride <= 0 || cacheLen <= 0 {
+		return deviceAttnCache{}, fmt.Errorf("invalid attention cache dimensions")
+	}
+	totalElems, ok := mulInt(kvStride, cacheLen)
+	if !ok {
+		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
+	}
+	totalBytes, ok := mulInt(totalElems, 2)
+	if !ok {
+		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
+	}
+
+	kBuf, err := native.AllocDevice(int64(totalBytes))
+	if err != nil {
+		return deviceAttnCache{}, err
+	}
+	vBuf, err := native.AllocDevice(int64(totalBytes))
+	if err != nil {
+		_ = kBuf.Free()
+		return deviceAttnCache{}, err
+	}
+
+	cache := deviceAttnCache{
+		k:        kBuf,
+		v:        vBuf,
+		kvStride: kvStride,
+		cacheLen: cacheLen,
+	}
+	o.attnCaches[layer] = cache
+	return cache, nil
 }
 
 func (o *Ops) deviceNormWeight(weight []float32) (native.DeviceBuffer, error) {

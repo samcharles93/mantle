@@ -1055,6 +1055,33 @@ func ConvertF32ToF16(in, out DeviceBuffer, n int, stream Stream) error {
 	))
 }
 
+func AttentionInnerF16CacheF32(q, cacheK, cacheV, out DeviceBuffer, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen int, scale float32, stream Stream) error {
+	if q.ptr == nil || cacheK.ptr == nil || cacheV.ptr == nil || out.ptr == nil {
+		return fmt.Errorf("attention inner buffer is nil")
+	}
+	if pos < 0 || start < 0 || start > pos {
+		return fmt.Errorf("attention inner invalid position/window")
+	}
+	if kvStride <= 0 || headDim <= 0 || nHead <= 0 || kvHeads <= 0 || cacheLen <= 0 {
+		return fmt.Errorf("attention inner dimensions must be > 0")
+	}
+	return cudaErr(C.mantleCudaAttentionInnerF16CacheF32Wrapper(
+		(*C.float)(q.ptr),
+		(*C.ushort)(cacheK.ptr),
+		(*C.ushort)(cacheV.ptr),
+		(*C.float)(out.ptr),
+		C.int(pos),
+		C.int(start),
+		C.int(kvStride),
+		C.int(headDim),
+		C.int(nHead),
+		C.int(kvHeads),
+		C.int(cacheLen),
+		C.float(scale),
+		stream.ptr,
+	))
+}
+
 func cublasErr(code C.int) error {
 	if code == 0 {
 		return nil

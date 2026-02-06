@@ -10,6 +10,10 @@ type attentionQKVFastPath interface {
 	MatVecQKV(q, k, v []float32, wq, wk, wv *Mat, x []float32) bool
 }
 
+type attentionInnerFastPath interface {
+	AttentionInner(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool
+}
+
 // Attention performs multi-head attention with optional RoPE, KV caching, and sliding window.
 // Implements the full attention mechanism including Q/K/V projections, attention computation,
 // and output projection.
@@ -89,6 +93,11 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			start = 0
 		}
 	}
+
+	if fp, ok := ops.(attentionInnerFastPath); ok && fp.AttentionInner(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
+		goto attentionDone
+	}
+
 	ctx := AttnContext{
 		Q:        q,
 		CacheK:   layer.AttnCache.K,
@@ -137,6 +146,8 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		}
 		pool.DoneSlots <- done
 	}
+
+attentionDone:
 
 	if layer.AttnGate != nil {
 		gate := m.Scratch.AttnGate[:nHead*headDim]
