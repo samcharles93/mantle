@@ -55,15 +55,17 @@ func (s *Server) handleCreateResponse(c *echo.Context) error {
 	}
 
 	var writer *SSEStreamWriter
+	var streamWriter StreamWriter
 	if req.Stream != nil && *req.Stream {
 		w, err := NewSSEStreamWriter(c)
 		if err != nil {
 			return writeBadRequest(c, err.Error())
 		}
 		writer = w
+		streamWriter = w
 	}
 
-	resp, inputItems, err := s.service.CreateResponse(c.Request().Context(), &req, writer)
+	resp, inputItems, err := s.service.CreateResponse(c.Request().Context(), &req, streamWriter)
 	if err != nil {
 		if writer != nil && writer.Started() {
 			return nil

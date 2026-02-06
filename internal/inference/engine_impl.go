@@ -65,7 +65,7 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		stream(prompt)
 	}
 
-	ids, err := e.tokenizer.Encode(prompt)
+	ids, err := safeEncode(e.tokenizer, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("encode prompt: %w", err)
 	}
@@ -92,7 +92,9 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		ContextTokens: make([]int, 0, len(ids)),
 	}
 
-	e.model.Reset()
+	if err := safeReset(e.model); err != nil {
+		return nil, err
+	}
 
 	var sb strings.Builder
 	streamWrapper := func(tok string) {
@@ -116,6 +118,25 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		Text:  sb.String(),
 		Stats: stats,
 	}, nil
+}
+
+func safeReset(m simd.Model) (err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic in Reset: %v", rec)
+		}
+	}()
+	m.Reset()
+	return nil
+}
+
+func safeEncode(tok tokenizer.Tokenizer, prompt string) (ids []int, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic in Encode: %v", rec)
+		}
+	}()
+	return tok.Encode(prompt)
 }
 
 func (e *EngineImpl) renderPrompt(req *Request) (string, error) {
