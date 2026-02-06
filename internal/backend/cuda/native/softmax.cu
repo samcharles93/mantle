@@ -344,6 +344,88 @@ __global__ void convert_f32_to_f16_kernel(
     out[idx] = __half_as_ushort(__float2half(in[idx]));
 }
 
+__global__ void attention_inner_f16_cache_f32_kernel(
+    const float* __restrict__ q,
+    const uint16_t* __restrict__ cache_k,
+    const uint16_t* __restrict__ cache_v,
+    float* __restrict__ out,
+    int pos,
+    int start,
+    int kv_stride,
+    int head_dim,
+    int n_head,
+    int kv_heads,
+    int cache_len,
+    float scale) {
+    const int h = blockIdx.x;
+    const int tid = threadIdx.x;
+    if (h >= n_head) return;
+
+    const int kv_head = (h * kv_heads) / n_head;
+    const float* qh = q + h * head_dim;
+    float* out_h = out + h * head_dim;
+
+    for (int d = tid; d < head_dim; d += blockDim.x) {
+        out_h[d] = 0.0f;
+    }
+    __syncthreads();
+
+    __shared__ float partial[256];
+    __shared__ float s_m;
+    __shared__ float s_l;
+    __shared__ float s_alpha;
+    __shared__ float s_beta;
+
+    if (tid == 0) {
+        s_m = -INFINITY;
+        s_l = 0.0f;
+    }
+    __syncthreads();
+
+    const bool use_ring = cache_len > 0 && cache_len < (pos + 1);
+
+    for (int t = start; t <= pos; t++) {
+        const int cache_pos = use_ring ? (t % cache_len) : t;
+        const int k_base = cache_pos * kv_stride + kv_head * head_dim;
+
+        float dot_part = 0.0f;
+        for (int d = tid; d < head_dim; d += blockDim.x) {
+            const float kf = f16_to_f32(cache_k[k_base + d]);
+            dot_part += qh[d] * kf;
+        }
+        partial[tid] = dot_part;
+        __syncthreads();
+
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                partial[tid] += partial[tid + stride];
+            }
+            __syncthreads();
+        }
+
+        if (tid == 0) {
+            const float s = partial[0] * scale;
+            const float m_new = fmaxf(s_m, s);
+            s_alpha = __expf(s_m - m_new);
+            s_beta = __expf(s - m_new);
+            s_l = s_l * s_alpha + s_beta;
+            s_m = m_new;
+        }
+        __syncthreads();
+
+        const int v_base = cache_pos * kv_stride + kv_head * head_dim;
+        for (int d = tid; d < head_dim; d += blockDim.x) {
+            const float vf = f16_to_f32(cache_v[v_base + d]);
+            out_h[d] = out_h[d]*s_alpha + s_beta*vf;
+        }
+        __syncthreads();
+    }
+
+    for (int d = tid; d < head_dim; d += blockDim.x) {
+        out_h[d] = out_h[d] / (s_l + 1e-12f);
+    }
+}
+
 int mantleCudaSoftmaxRowsF32(float* data, int rows, int cols, cudaStream_t stream) {
     if (!data || rows <= 0 || cols <= 0) return 0;
     if (rows > INT_MAX / cols) return cudaErrorInvalidValue;
@@ -465,6 +547,31 @@ int mantleCudaConvertF32ToF16(
     const int threads = 256;
     const int blocks = (n + threads - 1) / threads;
     convert_f32_to_f16_kernel<<<blocks, threads, 0, stream>>>(in, out, n);
+    return (int)cudaGetLastError();
+}
+
+int mantleCudaAttentionInnerF16CacheF32(
+    const float* q,
+    const uint16_t* cacheK,
+    const uint16_t* cacheV,
+    float* out,
+    int pos,
+    int start,
+    int kvStride,
+    int headDim,
+    int nHead,
+    int kvHeads,
+    int cacheLen,
+    float scale,
+    cudaStream_t stream) {
+    if (!q || !cacheK || !cacheV || !out || pos < 0 || start < 0 || start > pos || kvStride <= 0 || headDim <= 0 || nHead <= 0 || kvHeads <= 0 || cacheLen <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    const int threads = 256;
+    dim3 block(threads);
+    dim3 grid(nHead);
+    attention_inner_f16_cache_f32_kernel<<<grid, block, 0, stream>>>(
+        q, cacheK, cacheV, out, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen, scale);
     return (int)cudaGetLastError();
 }
 

@@ -156,6 +156,20 @@ extern int mantleCudaConvertF32ToF16(
 	unsigned short* out,
 	int n,
 	cudaStream_t stream);
+extern int mantleCudaAttentionInnerF16CacheF32(
+	const float* q,
+	const unsigned short* cacheK,
+	const unsigned short* cacheV,
+	float* out,
+	int pos,
+	int start,
+	int kvStride,
+	int headDim,
+	int nHead,
+	int kvHeads,
+	int cacheLen,
+	float scale,
+	cudaStream_t stream);
 
 static const char* mantleCudaGetErrorString(cudaError_t err) {
 	return cudaGetErrorString(err);
@@ -405,6 +419,23 @@ static int mantleCudaConvertF32ToF16Wrapper(
 	int n,
 	cudaStream_t stream) {
 	return mantleCudaConvertF32ToF16(in, out, n, stream);
+}
+
+static int mantleCudaAttentionInnerF16CacheF32Wrapper(
+	const float* q,
+	const unsigned short* cacheK,
+	const unsigned short* cacheV,
+	float* out,
+	int pos,
+	int start,
+	int kvStride,
+	int headDim,
+	int nHead,
+	int kvHeads,
+	int cacheLen,
+	float scale,
+	cudaStream_t stream) {
+	return mantleCudaAttentionInnerF16CacheF32(q, cacheK, cacheV, out, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen, scale, stream);
 }
 */
 import "C"
