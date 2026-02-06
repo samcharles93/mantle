@@ -14,6 +14,10 @@ type attentionInnerFastPath interface {
 	AttentionInner(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool
 }
 
+type attentionInnerProjectionFastPath interface {
+	AttentionInnerProjection(projOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool
+}
+
 // Attention performs multi-head attention with optional RoPE, KV caching, and sliding window.
 // Implements the full attention mechanism including Q/K/V projections, attention computation,
 // and output projection.
@@ -91,6 +95,13 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		start = pos - layer.AttnWindow + 1
 		if start < 0 {
 			start = 0
+		}
+	}
+
+	// Combined attention inner + projection fast path (no gate)
+	if layer.AttnGate == nil {
+		if fp, ok := ops.(attentionInnerProjectionFastPath); ok && fp.AttentionInnerProjection(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
+			return m.Scratch.AttnProj
 		}
 	}
 
