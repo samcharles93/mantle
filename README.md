@@ -147,3 +147,8 @@ I plan to add `inspect` and `serve` only if the project continues, or, you're we
 ## Contributing
 
 ... Submit a PR.
+
+## Developer Utilities
+
+Developer investigation tools live under `work/` and are excluded from default builds/tests.
+See `work/README.md` for usage with `-tags tools`.
