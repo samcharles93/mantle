@@ -200,17 +200,17 @@ func blockUpdateGenericSIMD(cData, aData, bData []float32, cStride, aStride, bSt
 				for ; j+16 <= width; j += 16 {
 					vc0 := archsimd.LoadFloat32x8Slice(cRow[j:])
 					vb0 := archsimd.LoadFloat32x8Slice(bRow[j:])
-					vc0 = vc0.Add(vb0.Mul(vaik))
+					vc0 = vb0.MulAdd(vaik, vc0)
 					vc0.StoreSlice(cRow[j:])
 					vc1 := archsimd.LoadFloat32x8Slice(cRow[j+8:])
 					vb1 := archsimd.LoadFloat32x8Slice(bRow[j+8:])
-					vc1 = vc1.Add(vb1.Mul(vaik))
+					vc1 = vb1.MulAdd(vaik, vc1)
 					vc1.StoreSlice(cRow[j+8:])
 				}
 				for ; j+8 <= width; j += 8 {
 					vc := archsimd.LoadFloat32x8Slice(cRow[j:])
 					vb := archsimd.LoadFloat32x8Slice(bRow[j:])
-					vc = vc.Add(vb.Mul(vaik))
+					vc = vb.MulAdd(vaik, vc)
 					vc.StoreSlice(cRow[j:])
 				}
 				for ; j < width; j++ {
@@ -239,13 +239,13 @@ func blockUpdateGenericSIMD(cData, aData, bData []float32, cStride, aStride, bSt
 				bRow := bData[bOff : bOff+32]
 
 				vb0 := archsimd.LoadFloat32x8Slice(bRow[0:])
-				acc0 = acc0.Add(vb0.Mul(vaik))
+				acc0 = vb0.MulAdd(vaik, acc0)
 				vb1 := archsimd.LoadFloat32x8Slice(bRow[8:])
-				acc1 = acc1.Add(vb1.Mul(vaik))
+				acc1 = vb1.MulAdd(vaik, acc1)
 				vb2 := archsimd.LoadFloat32x8Slice(bRow[16:])
-				acc2 = acc2.Add(vb2.Mul(vaik))
+				acc2 = vb2.MulAdd(vaik, acc2)
 				vb3 := archsimd.LoadFloat32x8Slice(bRow[24:])
-				acc3 = acc3.Add(vb3.Mul(vaik))
+				acc3 = vb3.MulAdd(vaik, acc3)
 			}
 
 			// Store back to C
@@ -264,7 +264,7 @@ func blockUpdateGenericSIMD(cData, aData, bData []float32, cStride, aStride, bSt
 				vaik := archsimd.BroadcastFloat32x8(aik)
 				bOff := kk*bStride + j0 + j
 				vb := archsimd.LoadFloat32x8Slice(bData[bOff : bOff+8])
-				acc = acc.Add(vb.Mul(vaik))
+				acc = vb.MulAdd(vaik, acc)
 			}
 			acc.StoreSlice(cRow[j:])
 		}
@@ -335,17 +335,17 @@ func blockUpdateAlpha1SIMD(cData, aData, bData []float32, cStride, aStride, bStr
 				for ; j+16 <= width; j += 16 {
 					vc0 := archsimd.LoadFloat32x8Slice(cRow[j:])
 					vb0 := archsimd.LoadFloat32x8Slice(bRow[j:])
-					vc0 = vc0.Add(vb0.Mul(vaik))
+					vc0 = vb0.MulAdd(vaik, vc0)
 					vc0.StoreSlice(cRow[j:])
 					vc1 := archsimd.LoadFloat32x8Slice(cRow[j+8:])
 					vb1 := archsimd.LoadFloat32x8Slice(bRow[j+8:])
-					vc1 = vc1.Add(vb1.Mul(vaik))
+					vc1 = vb1.MulAdd(vaik, vc1)
 					vc1.StoreSlice(cRow[j+8:])
 				}
 				for ; j+8 <= width; j += 8 {
 					vc := archsimd.LoadFloat32x8Slice(cRow[j:])
 					vb := archsimd.LoadFloat32x8Slice(bRow[j:])
-					vc = vc.Add(vb.Mul(vaik))
+					vc = vb.MulAdd(vaik, vc)
 					vc.StoreSlice(cRow[j:])
 				}
 				for ; j < width; j++ {
@@ -371,13 +371,13 @@ func blockUpdateAlpha1SIMD(cData, aData, bData []float32, cStride, aStride, bStr
 				bRow := bData[bOff : bOff+32]
 
 				vb0 := archsimd.LoadFloat32x8Slice(bRow[0:])
-				acc0 = acc0.Add(vb0.Mul(vaik))
+				acc0 = vb0.MulAdd(vaik, acc0)
 				vb1 := archsimd.LoadFloat32x8Slice(bRow[8:])
-				acc1 = acc1.Add(vb1.Mul(vaik))
+				acc1 = vb1.MulAdd(vaik, acc1)
 				vb2 := archsimd.LoadFloat32x8Slice(bRow[16:])
-				acc2 = acc2.Add(vb2.Mul(vaik))
+				acc2 = vb2.MulAdd(vaik, acc2)
 				vb3 := archsimd.LoadFloat32x8Slice(bRow[24:])
-				acc3 = acc3.Add(vb3.Mul(vaik))
+				acc3 = vb3.MulAdd(vaik, acc3)
 			}
 
 			acc0.StoreSlice(cRow[j:])
@@ -395,7 +395,7 @@ func blockUpdateAlpha1SIMD(cData, aData, bData []float32, cStride, aStride, bStr
 				vaik := archsimd.BroadcastFloat32x8(aik)
 				bOff := kk*bStride + j0 + j
 				vb := archsimd.LoadFloat32x8Slice(bData[bOff : bOff+8])
-				acc = acc.Add(vb.Mul(vaik))
+				acc = vb.MulAdd(vaik, acc)
 			}
 			acc.StoreSlice(cRow[j:])
 		}
@@ -430,17 +430,17 @@ func blockUpdateAlpha1SIMDPacked(cData, aData, packB []float32, cStride, aStride
 				for ; j+16 <= width; j += 16 {
 					vc0 := archsimd.LoadFloat32x8Slice(cRow[j:])
 					vb0 := archsimd.LoadFloat32x8Slice(bRow[j:])
-					vc0 = vc0.Add(vb0.Mul(vaik))
+					vc0 = vb0.MulAdd(vaik, vc0)
 					vc0.StoreSlice(cRow[j:])
 					vc1 := archsimd.LoadFloat32x8Slice(cRow[j+8:])
 					vb1 := archsimd.LoadFloat32x8Slice(bRow[j+8:])
-					vc1 = vc1.Add(vb1.Mul(vaik))
+					vc1 = vb1.MulAdd(vaik, vc1)
 					vc1.StoreSlice(cRow[j+8:])
 				}
 				for ; j+8 <= width; j += 8 {
 					vc := archsimd.LoadFloat32x8Slice(cRow[j:])
 					vb := archsimd.LoadFloat32x8Slice(bRow[j:])
-					vc = vc.Add(vb.Mul(vaik))
+					vc = vb.MulAdd(vaik, vc)
 					vc.StoreSlice(cRow[j:])
 				}
 				for ; j < width; j++ {
@@ -464,13 +464,13 @@ func blockUpdateAlpha1SIMDPacked(cData, aData, packB []float32, cStride, aStride
 				bRow := packB[kk*width : kk*width+width]
 
 				vb0 := archsimd.LoadFloat32x8Slice(bRow[j:])
-				acc0 = acc0.Add(vb0.Mul(vaik))
+				acc0 = vb0.MulAdd(vaik, acc0)
 				vb1 := archsimd.LoadFloat32x8Slice(bRow[j+8:])
-				acc1 = acc1.Add(vb1.Mul(vaik))
+				acc1 = vb1.MulAdd(vaik, acc1)
 				vb2 := archsimd.LoadFloat32x8Slice(bRow[j+16:])
-				acc2 = acc2.Add(vb2.Mul(vaik))
+				acc2 = vb2.MulAdd(vaik, acc2)
 				vb3 := archsimd.LoadFloat32x8Slice(bRow[j+24:])
-				acc3 = acc3.Add(vb3.Mul(vaik))
+				acc3 = vb3.MulAdd(vaik, acc3)
 			}
 
 			acc0.StoreSlice(cRow[j:])
@@ -487,7 +487,7 @@ func blockUpdateAlpha1SIMDPacked(cData, aData, packB []float32, cStride, aStride
 				vaik := archsimd.BroadcastFloat32x8(aik)
 				bRow := packB[kk*width : kk*width+width]
 				vb := archsimd.LoadFloat32x8Slice(bRow[j:])
-				acc = acc.Add(vb.Mul(vaik))
+				acc = vb.MulAdd(vaik, acc)
 			}
 			acc.StoreSlice(cRow[j:])
 		}

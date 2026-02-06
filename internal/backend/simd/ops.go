@@ -85,7 +85,7 @@ func dotSIMD(a, b []float32) float32 {
 	for ; i+8 <= n; i += 8 {
 		va := archsimd.LoadFloat32x8Slice(a[i:])
 		vb := archsimd.LoadFloat32x8Slice(b[i:])
-		acc = acc.Add(va.Mul(vb))
+		acc = va.MulAdd(vb, acc)
 	}
 
 	// Horizontal reduction: store to array and sum scalarly
@@ -134,7 +134,7 @@ func rmsNormSIMD(dst, src, weight []float32, eps float32) {
 	i := 0
 	for ; i+8 <= n; i += 8 {
 		v := archsimd.LoadFloat32x8Slice(src[i:])
-		acc = acc.Add(v.Mul(v))
+		acc = v.MulAdd(v, acc)
 	}
 
 	// Horizontal reduction: store to array and sum scalarly

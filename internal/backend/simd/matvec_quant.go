@@ -746,8 +746,8 @@ func dotInt8Float32SIMD(q []int8, x []float32, n int) float32 {
 		vxLo := archsimd.LoadFloat32x8Slice(x[i:])
 		vxHi := archsimd.LoadFloat32x8Slice(x[i+8:])
 
-		acc = acc.Add(lo.Mul(vxLo))
-		acc = acc.Add(hi.Mul(vxHi))
+		acc = lo.MulAdd(vxLo, acc)
+		acc = hi.MulAdd(vxHi, acc)
 	}
 
 	var tmp [8]float32
