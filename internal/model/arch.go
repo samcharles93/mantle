@@ -350,6 +350,8 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 	case hasArch("afmoe"):
 		return afmoeSpec(), nil
 	case hasArch("gemma3"):
+		return gemma3Spec(), nil
+	case hasArch("gemma"):
 		return gemmaSpec(), nil
 	case hasArch("granite"):
 		return graniteSpec(), nil
