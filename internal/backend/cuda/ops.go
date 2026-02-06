@@ -418,6 +418,9 @@ func (o *Ops) MatVecWithQuant(dst []float32, w *simd.Mat, x []float32, _ *simd.Q
 }
 
 func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
+	if !useFFNFastPath() {
+		return false
+	}
 	if o == nil || layer == nil || layer.FfnUp == nil || layer.FfnGate == nil || layer.FfnDown == nil {
 		return false
 	}
@@ -485,11 +488,19 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, interm, o.stream); err != nil {
 		return false
 	}
-	if err := native.ConvertF32ToF16(o.yDev, o.aDev, interm, o.stream); err != nil {
-		return false
+
+	downInput := o.aDev
+	downInputType := downW.dtype
+	if downW.dtype == native.BlasBF16 || downW.dtype == native.BlasF32 {
+		downInput = o.yDev
+		downInputType = native.BlasF32
+	} else {
+		if err := native.ConvertF32ToF16(o.yDev, o.aDev, interm, o.stream); err != nil {
+			return false
+		}
 	}
 
-	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, downW.rows, 1, downW.cols, 1.0, downW.buf, downW.dtype, downW.cols, o.aDev, downW.dtype, downW.cols, 0.0, o.zDev, native.BlasF32, downW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, downW.rows, 1, downW.cols, 1.0, downW.buf, downW.dtype, downW.cols, downInput, downInputType, downW.cols, 0.0, o.zDev, native.BlasF32, downW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
 		return false
 	}
 	if err := o.waitForResult(o.yHost.Ptr(), o.zDev, outBytes); err != nil {
@@ -500,6 +511,9 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 }
 
 func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bool {
+	if !useQKVFastPath() {
+		return false
+	}
 	if o == nil || wq == nil || wk == nil || wv == nil {
 		return false
 	}
@@ -599,6 +613,9 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bo
 }
 
 func (o *Ops) AttentionInner(attnOut []float32, layer *simd.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
+	if !useAttentionInnerFastPath() {
+		return false
+	}
 	if o == nil || layer == nil {
 		return false
 	}
@@ -963,6 +980,18 @@ func useLegacyStreamSync() bool {
 
 func useAttnSoftmaxKernel() bool {
 	return envEnabled("MANTLE_CUDA_ATTN_SOFTMAX")
+}
+
+func useFFNFastPath() bool {
+	return !envEnabled("MANTLE_CUDA_DISABLE_FFN_FASTPATH")
+}
+
+func useQKVFastPath() bool {
+	return !envEnabled("MANTLE_CUDA_DISABLE_QKV_FASTPATH")
+}
+
+func useAttentionInnerFastPath() bool {
+	return !envEnabled("MANTLE_CUDA_DISABLE_ATTN_INNER_FASTPATH")
 }
 
 func envEnabled(name string) bool {
@@ -1504,7 +1533,10 @@ func fillXBuffer(buf native.HostBuffer, dtype native.BlasDataType, x []float32) 
 }
 
 func bf16FromF32(v float32) uint16 {
-	return uint16(uint32(math.Float32bits(v)) >> 16)
+	u := math.Float32bits(v)
+	// Round-to-nearest-even on truncated 16 bits to match SIMD path.
+	rnd := uint32(0x7FFF + ((u >> 16) & 1))
+	return uint16((u + rnd) >> 16)
 }
 
 func dtypeString(dt mcf.TensorDType) string {
