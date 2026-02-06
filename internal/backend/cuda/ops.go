@@ -685,7 +685,7 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *simd.Layer, q, k, v []flo
 	return true
 }
 
-func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
+func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon float32) bool {
 	if !useAttentionInnerFastPath() {
 		return false
 	}
@@ -715,7 +715,12 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, 
 	}
 
 	qBytes := int64(nHead*headDim) * 4
+	projDim := layer.Wo.R
+	projBytes := int64(projDim) * 4
 	outBytes := qBytes
+	if projBytes > outBytes {
+		outBytes = projBytes
+	}
 	if err := o.ensureHostVecs(int(qBytes), int(outBytes)); err != nil {
 		return false
 	}
@@ -753,8 +758,7 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, 
 	}
 
 	// Projection step: Wo * attnOut (attnOut is in o.yDev)
-	projDim := layer.Wo.R
-	projBytes := int64(projDim) * 4
+	// projDim and projBytes already defined above
 	if err := o.ensureNormTmp(int(projBytes)); err != nil {
 		return false
 	}
@@ -815,8 +819,28 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, 
 	}
 
 	// Copy projection result to host
-	if err := o.waitForResult(o.yHost.Ptr(), o.zDev, projBytes); err != nil {
-		return false
+	if len(layer.PostAttnNorm) > 0 {
+		// Upload norm weight if not already present
+		wDev, err := o.deviceNormWeight(layer.PostAttnNorm)
+		if err != nil {
+			return false
+		}
+		// Ensure temporary buffer for norm result
+		if err := o.ensureActTmp(int(projBytes)); err != nil {
+			return false
+		}
+		if err := o.rmsNormDevice(o.zDev, wDev, o.aDev, projDim, epsilon); err != nil {
+			return false
+		}
+		// Copy normalized result to host
+		if err := o.waitForResult(o.yHost.Ptr(), o.aDev, projBytes); err != nil {
+			return false
+		}
+	} else {
+		// Copy projection result directly
+		if err := o.waitForResult(o.yHost.Ptr(), o.zDev, projBytes); err != nil {
+			return false
+		}
 	}
 	copy(projOut[:projDim], unsafe.Slice((*float32)(o.yHost.Ptr()), projDim))
 	return true
