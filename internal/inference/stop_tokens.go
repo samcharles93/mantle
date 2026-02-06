@@ -12,13 +12,37 @@ func BuildStopTokens(tok tokenizer.Tokenizer, cfg tokenizer.TokenizerConfig) []i
 		stopTokens = stopTokens[:0]
 	}
 
+	addUnique := func(id int) {
+		if id < 0 {
+			return
+		}
+		for _, v := range stopTokens {
+			if v == id {
+				return
+			}
+		}
+		stopTokens = append(stopTokens, id)
+	}
+
 	if t, ok := tok.(interface{ TokenString(int) string }); ok {
 		token2 := strings.ToLower(strings.TrimSpace(t.TokenString(2)))
 		if token2 == "<|endoftext|>" || token2 == "<|end_of_text|>" || token2 == "</s>" {
-			if cfg.EOSTokenID != 2 && cfg.EOSTokenID >= 0 {
-				stopTokens = append(stopTokens, 2)
-			} else if cfg.EOSTokenID < 0 {
-				stopTokens = append(stopTokens, 2)
+			addUnique(2)
+		}
+	}
+
+	for id, token := range cfg.Tokens {
+		if token == "<|im_end|>" {
+			addUnique(id)
+			break
+		}
+	}
+
+	if t, ok := tok.(interface{ Decoder() []string }); ok {
+		for id, token := range t.Decoder() {
+			if token == "<|im_end|>" {
+				addUnique(id)
+				break
 			}
 		}
 	}

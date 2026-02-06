@@ -17,8 +17,14 @@ type SamplerConfig struct {
 }
 
 type Sampler struct {
-	rng *rand.Rand
-	cfg SamplerConfig
+	rng       *rand.Rand
+	cfg       SamplerConfig
+	topIdx    []int
+	topVal    []float32
+	prob      []float64
+	seenMark  []uint32
+	seenEpoch uint32
+	seenList  []int
 }
 
 // NewSampler returns a new sampler with the provided configuration.
@@ -65,18 +71,35 @@ func (s *Sampler) Sample(logits []float32, recent []int, excludePenalty []int) i
 		}
 		window := recent[start:]
 
-		seen := make(map[int]struct{}, len(window))
+		if len(s.seenMark) < len(logits) {
+			s.seenMark = make([]uint32, len(logits))
+		}
+		s.seenEpoch++
+		if s.seenEpoch == 0 {
+			for i := range s.seenMark {
+				s.seenMark[i] = 0
+			}
+			s.seenEpoch = 1
+		}
+		s.seenList = s.seenList[:0]
+
 		for _, id := range window {
-			if id >= 0 && id < len(logits) {
-				seen[id] = struct{}{}
+			if id >= 0 && id < len(logits) && s.seenMark[id] != s.seenEpoch {
+				s.seenMark[id] = s.seenEpoch
+				s.seenList = append(s.seenList, id)
 			}
 		}
 
 		for _, id := range excludePenalty {
-			delete(seen, id)
+			if id >= 0 && id < len(logits) {
+				s.seenMark[id] = 0
+			}
 		}
 
-		for id := range seen {
+		for _, id := range s.seenList {
+			if id < 0 || id >= len(logits) || s.seenMark[id] != s.seenEpoch {
+				continue
+			}
 			if logits[id] > 0 {
 				logits[id] /= s.cfg.RepeatPenalty
 			} else {
@@ -94,7 +117,10 @@ func (s *Sampler) Sample(logits []float32, recent []int, excludePenalty []int) i
 
 	k := min(s.cfg.TopK, len(logits))
 
-	topIdx, topVal := topK(logits, k, invTemp)
+	topIdx, topVal := s.topK(logits, k, invTemp)
+	if len(topVal) == 0 {
+		return 0
+	}
 
 	maxv := topVal[0]
 	for i := 1; i < len(topVal); i++ {
@@ -103,7 +129,10 @@ func (s *Sampler) Sample(logits []float32, recent []int, excludePenalty []int) i
 		}
 	}
 
-	prob := make([]float64, len(topVal))
+	if cap(s.prob) < len(topVal) {
+		s.prob = make([]float64, len(topVal))
+	}
+	prob := s.prob[:len(topVal)]
 	var sum float64
 	for i := range topVal {
 		x := float64(topVal[i] - maxv)
@@ -195,35 +224,45 @@ func argmax(x []float32) int {
 // topK returns the indices and values of the k largest elements in logits, scaled by invTemp.
 // The returned slices are ordered from largest to smallest by value.
 // This is an O(V*K) algorithm suitable for small K.
-func topK(logits []float32, k int, invTemp float32) ([]int, []float32) {
-	idx := make([]int, 0, k)
-	val := make([]float32, 0, k)
+func (s *Sampler) topK(logits []float32, k int, invTemp float32) ([]int, []float32) {
+	if k <= 0 {
+		return nil, nil
+	}
+	if cap(s.topIdx) < k+1 {
+		s.topIdx = make([]int, 0, k+1)
+		s.topVal = make([]float32, 0, k+1)
+	}
+	topIdx := s.topIdx[:0]
+	topVal := s.topVal[:0]
+
 	for i, l := range logits {
 		v := l * invTemp
 
-		pos := len(val)
-		for pos > 0 && val[pos-1] < v {
+		pos := len(topVal)
+		for pos > 0 && topVal[pos-1] < v {
 			pos--
 		}
 		if pos >= k {
 			continue
 		}
 
-		idx = append(idx, 0)
-		val = append(val, 0)
+		topIdx = append(topIdx, 0)
+		topVal = append(topVal, 0)
 
-		copy(idx[pos+1:], idx[pos:])
-		copy(val[pos+1:], val[pos:])
-		idx[pos] = i
-		val[pos] = v
+		copy(topIdx[pos+1:], topIdx[pos:])
+		copy(topVal[pos+1:], topVal[pos:])
+		topIdx[pos] = i
+		topVal[pos] = v
 
-		if len(val) > k {
-			idx = idx[:k]
-			val = val[:k]
+		if len(topVal) > k {
+			topIdx = topIdx[:k]
+			topVal = topVal[:k]
 		}
 	}
-	if len(idx) == 0 {
+	if len(topIdx) == 0 {
 		return []int{0}, []float32{0}
 	}
-	return idx, val
+	s.topIdx = topIdx
+	s.topVal = topVal
+	return topIdx, topVal
 }

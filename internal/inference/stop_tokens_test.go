@@ -81,3 +81,34 @@ func TestBuildStopTokensLegacyID2(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildStopTokensAddsImEnd(t *testing.T) {
+	cfg := tokenizer.TokenizerConfig{
+		EOSTokenID: 1,
+		Tokens:     []string{"<pad>", "<eos>", "<|im_end|>"},
+	}
+	got := BuildStopTokens(fakeTokenizer{tokens: map[int]string{}}, cfg)
+	want := []int{1, 2}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+type fakeDecoderTokenizer struct {
+	decoder []string
+}
+
+func (f fakeDecoderTokenizer) Encode(text string) ([]int, error) { return nil, nil }
+func (f fakeDecoderTokenizer) Decode(ids []int) (string, error)  { return "", nil }
+func (f fakeDecoderTokenizer) Decoder() []string                 { return f.decoder }
+
+func TestBuildStopTokensAddsImEndFromDecoder(t *testing.T) {
+	cfg := tokenizer.TokenizerConfig{
+		EOSTokenID: 5,
+	}
+	got := BuildStopTokens(fakeDecoderTokenizer{decoder: []string{"a", "b", "<|im_end|>"}}, cfg)
+	want := []int{5, 2}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}

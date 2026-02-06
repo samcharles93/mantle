@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/samcharles93/mantle/internal/backend/simd"
@@ -65,6 +66,10 @@ type Generator struct {
 	}
 	ContextTokens []int
 	StopTokens    []int
+
+	tokenCache    []string
+	tokenCacheOK  []bool
+	tokenCacheMap map[int]string
 }
 
 func (g *Generator) Run(allTokens []int, steps int, stream func(string)) ([]int, Stats, error) {
@@ -111,6 +116,20 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		limit = 1000000
 	}
 
+	const streamBatchTokens = 8
+	var pending []int
+	flush := func() {
+		if stream == nil || len(pending) == 0 {
+			pending = pending[:0]
+			return
+		}
+		s, _ := g.decodeTokens(pending)
+		if s != "" {
+			stream(s)
+		}
+		pending = pending[:0]
+	}
+
 	for i := 0; i < limit; i++ {
 		if err := ctx.Err(); err != nil {
 			return g.ContextTokens, stats, err
@@ -126,8 +145,10 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		g.ContextTokens = append(g.ContextTokens, next)
 
 		if stream != nil {
-			s, _ := g.Tokenizer.Decode([]int{next})
-			stream(s)
+			pending = append(pending, next)
+			if len(pending) >= streamBatchTokens {
+				flush()
+			}
 		}
 
 		logitsVec, err = g.Model.ForwardToken(next)
@@ -142,5 +163,62 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		stats.TPS = float64(stats.TokensGenerated) / stats.Duration.Seconds()
 	}
 
+	flush()
 	return g.ContextTokens, stats, nil
+}
+
+func (g *Generator) initTokenCache() {
+	if g.tokenCache != nil || g.tokenCacheMap != nil {
+		return
+	}
+	if t, ok := g.Tokenizer.(interface{ Decoder() []string }); ok {
+		if dec := t.Decoder(); len(dec) > 0 {
+			g.tokenCache = make([]string, len(dec))
+			g.tokenCacheOK = make([]bool, len(dec))
+			return
+		}
+	}
+	g.tokenCacheMap = make(map[int]string)
+}
+
+func (g *Generator) decodeToken(id int) (string, error) {
+	g.initTokenCache()
+	if g.tokenCache != nil {
+		if id >= 0 && id < len(g.tokenCache) && g.tokenCacheOK[id] {
+			return g.tokenCache[id], nil
+		}
+		s, err := g.Tokenizer.Decode([]int{id})
+		if err != nil {
+			return "", err
+		}
+		if id >= 0 && id < len(g.tokenCache) {
+			g.tokenCache[id] = s
+			g.tokenCacheOK[id] = true
+		}
+		return s, nil
+	}
+	if s, ok := g.tokenCacheMap[id]; ok {
+		return s, nil
+	}
+	s, err := g.Tokenizer.Decode([]int{id})
+	if err != nil {
+		return "", err
+	}
+	g.tokenCacheMap[id] = s
+	return s, nil
+}
+
+func (g *Generator) decodeTokens(ids []int) (string, error) {
+	if len(ids) == 0 {
+		return "", nil
+	}
+	var b strings.Builder
+	for _, id := range ids {
+		s, err := g.decodeToken(id)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(s)
+	}
+	return b.String(), nil
 }
