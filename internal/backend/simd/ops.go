@@ -192,14 +192,131 @@ func Softmax(x []float32) {
 	}
 }
 
+// fastExp computes an approximation of exp(x) using polynomial approximation.
+// Accurate for x in [-10, 10] with relative error < 0.1%.
+// For neural network inference, this is sufficient.
+func fastExp(x float32) float32 {
+	// Clamp to safe range to avoid overflow
+	if x > 88.0 {
+		return 3.4028235e38 // Close to float32 max
+	}
+	if x < -88.0 {
+		return 0.0
+	}
+
+	// Range reduction: exp(x) = 2^k * exp(r)
+	// where x = k*ln(2) + r, and -ln(2)/2 <= r < ln(2)/2
+	const ln2 = 0.693147180559945309417
+	const ln2Inv = 1.44269504088896340736
+
+	// k = round(x / ln(2))
+	k := int32(x*ln2Inv + 0.5)
+	if x < 0 {
+		k = int32(x*ln2Inv - 0.5)
+	}
+
+	// r = x - k*ln(2)
+	r := x - float32(k)*ln2
+
+	// Compute exp(r) using 5th order polynomial (minimax approximation)
+	// exp(r) ≈ 1 + r + r²/2 + r³/6 + r⁴/24 + r⁵/120
+	r2 := r * r
+	r3 := r2 * r
+	r4 := r2 * r2
+
+	poly := 1.0 + r + r2*0.5 + r3*0.16666667 + r4*0.041666667 + (r4*r)*0.008333333
+
+	// Compute 2^k using bit manipulation
+	// float32 bits: sign(1) | exponent(8) | mantissa(23)
+	// For 2^k: exponent = k + 127 (bias)
+	exp := uint32(k+127) << 23
+	scale := math.Float32frombits(exp)
+
+	return poly * scale
+}
+
+// fastSigmoid computes an approximation of sigmoid using fastExp.
+func fastSigmoid(x float32) float32 {
+	// For large |x|, sigmoid saturates
+	if x > 10.0 {
+		return 1.0
+	}
+	if x < -10.0 {
+		return 0.0
+	}
+	return 1.0 / (1.0 + fastExp(-x))
+}
+
+// fastSilu computes silu(x) = x * sigmoid(x) using fast approximation.
+func fastSilu(x float32) float32 {
+	return x * fastSigmoid(x)
+}
+
+// fastExpVec computes exp(x) for a Float32x8 vector using polynomial approximation.
+func fastExpVec(x archsimd.Float32x8) archsimd.Float32x8 {
+	// Constants
+	ln2 := archsimd.BroadcastFloat32x8(0.693147180559945309417)
+	ln2Inv := archsimd.BroadcastFloat32x8(1.44269504088896340736)
+	maxVal := archsimd.BroadcastFloat32x8(88.0)
+	minVal := archsimd.BroadcastFloat32x8(-88.0)
+	one := archsimd.BroadcastFloat32x8(1.0)
+	c2 := archsimd.BroadcastFloat32x8(0.5)
+	c3 := archsimd.BroadcastFloat32x8(0.16666667)
+	c4 := archsimd.BroadcastFloat32x8(0.041666667)
+	c5 := archsimd.BroadcastFloat32x8(0.008333333)
+
+	// Clamp x to safe range
+	x = x.Max(minVal).Min(maxVal)
+
+	// Range reduction: k = round(x / ln(2))
+	k := x.Mul(ln2Inv).RoundToEven().ConvertToInt32()
+
+	// r = x - k*ln(2)
+	kf := k.ConvertToFloat32()
+	r := x.Sub(kf.Mul(ln2))
+
+	// Polynomial: 1 + r + r²/2 + r³/6 + r⁴/24 + r⁵/120
+	r2 := r.Mul(r)
+	r3 := r2.Mul(r)
+	r4 := r2.Mul(r2)
+	r5 := r4.Mul(r)
+
+	poly := one.Add(r).Add(r2.Mul(c2)).Add(r3.Mul(c3)).Add(r4.Mul(c4)).Add(r5.Mul(c5))
+
+	// Compute 2^k by adding k to the exponent field
+	// float32: sign(1) | exp(8) | mantissa(23)
+	// 2^k: exp = k + 127
+	bias := archsimd.BroadcastInt32x8(127)
+	exp := k.Add(bias).ShiftAllLeft(23)
+	scale := exp.AsFloat32x8()
+
+	return poly.Mul(scale)
+}
+
+// fastSigmoidVec computes sigmoid for a Float32x8 vector.
+func fastSigmoidVec(x archsimd.Float32x8) archsimd.Float32x8 {
+	one := archsimd.BroadcastFloat32x8(1.0)
+	negX := x.Sub(x.Add(x)) // -x
+	expNegX := fastExpVec(negX)
+	return one.Div(one.Add(expNegX))
+}
+
+// fastSiluVec computes silu for a Float32x8 vector.
+func fastSiluVec(x archsimd.Float32x8) archsimd.Float32x8 {
+	return x.Mul(fastSigmoidVec(x))
+}
+
 // Sigmoid computes the logistic sigmoid activation.
 func Sigmoid(x float32) float32 {
-	return float32(1.0 / (1.0 + math.Exp(float64(-x))))
+	// Use fast approximation for speed
+	// If you need exact results, change to: return float32(1.0 / (1.0 + math.Exp(float64(-x))))
+	return fastSigmoid(x)
 }
 
 // Silu computes the Sigmoid Linear Unit (SiLU) activation.
 func Silu(x float32) float32 {
-	return x * Sigmoid(x)
+	// Use fast approximation for speed
+	return fastSilu(x)
 }
 
 // Softplus computes log(1+exp(x)) in a numerically stable way.

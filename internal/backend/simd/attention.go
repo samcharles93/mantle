@@ -1,6 +1,10 @@
 package simd
 
-import "math"
+import (
+	"math"
+
+	"simd/archsimd"
+)
 
 // Attention performs multi-head attention with optional RoPE, KV caching, and sliding window.
 // Implements the full attention mechanism including Q/K/V projections, attention computation,
@@ -138,7 +142,19 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	if layer.AttnGate != nil {
 		gate := m.Scratch.AttnGate[:nHead*headDim]
 		m.Ops().MatVecWithQuant(gate, layer.AttnGate, x, qx)
-		for i := range gate {
+
+		// Vectorized Sigmoid with multiplication
+		n := len(gate)
+		i := 0
+		if cpu.HasAVX2 {
+			for ; i+8 <= n; i += 8 {
+				vout := archsimd.LoadFloat32x8Slice(attnOut[i:])
+				vgate := archsimd.LoadFloat32x8Slice(gate[i:])
+				vout = vout.Mul(fastSigmoidVec(vgate))
+				vout.StoreSlice(attnOut[i:])
+			}
+		}
+		for ; i < n; i++ {
 			attnOut[i] *= Sigmoid(gate[i])
 		}
 	}

@@ -1,6 +1,10 @@
 package simd
 
-import "math"
+import (
+	"math"
+
+	"simd/archsimd"
+)
 
 func Mamba(m *Instance, layer *Layer, x []float32) []float32 {
 	ml := layer.Mamba
@@ -36,7 +40,17 @@ func Mamba(m *Instance, layer *Layer, x []float32) []float32 {
 		ml.ConvBias,
 		ml.ConvState,
 	)
-	for i := range ml.ConvChannels {
+	// Vectorized Silu activation
+	n := ml.ConvChannels
+	i := 0
+	if cpu.HasAVX2 {
+		for ; i+8 <= n; i += 8 {
+			v := archsimd.LoadFloat32x8Slice(m.Scratch.MambaConv[i:])
+			v = fastSiluVec(v)
+			v.StoreSlice(m.Scratch.MambaConv[i:])
+		}
+	}
+	for ; i < n; i++ {
 		m.Scratch.MambaConv[i] = Silu(m.Scratch.MambaConv[i])
 	}
 
@@ -63,7 +77,18 @@ func Mamba(m *Instance, layer *Layer, x []float32) []float32 {
 	if m.Config.Config.MambaRMSNorm && ml.Norm != nil {
 		RMSNormGated(y, y, m.Scratch.MambaZ[:ml.Inner], ml.Norm, m.RMSEpsilon, m.Config.Config.MambaNormBeforeGate)
 	} else {
-		for i := range y {
+		// Vectorized Silu with multiplication
+		n := len(y)
+		i := 0
+		if cpu.HasAVX2 {
+			for ; i+8 <= n; i += 8 {
+				vy := archsimd.LoadFloat32x8Slice(y[i:])
+				vz := archsimd.LoadFloat32x8Slice(m.Scratch.MambaZ[i:])
+				vy = vy.Mul(fastSiluVec(vz))
+				vy.StoreSlice(y[i:])
+			}
+		}
+		for ; i < n; i++ {
 			y[i] *= Silu(m.Scratch.MambaZ[i])
 		}
 	}
