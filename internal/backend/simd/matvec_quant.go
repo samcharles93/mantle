@@ -245,7 +245,7 @@ func matVecRangeQuantCached(dst []float32, w *Mat, x []float32, rs, re int, qx *
 		scales := qc.Scales[blockBase : blockBase+blocksPerRow]
 
 		var sum float32
-		for b := 0; b < blocksPerRow; b++ {
+		for b := range blocksPerRow {
 			col := b * 32
 			n := w.C - col
 			if n <= 0 {
@@ -299,10 +299,7 @@ func matVecRangeQWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 	}
 
 	for batchStart := rs; batchStart < re; batchStart += batchSize {
-		batchEnd := batchStart + batchSize
-		if batchEnd > re {
-			batchEnd = re
-		}
+		batchEnd := min(batchStart+batchSize, re)
 		actualBatch := batchEnd - batchStart
 
 		// Use worker buffers if available, otherwise allocate
@@ -391,10 +388,7 @@ func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 	}
 
 	for batchStart := rs; batchStart < re; batchStart += batchSize {
-		batchEnd := batchStart + batchSize
-		if batchEnd > re {
-			batchEnd = re
-		}
+		batchEnd := min(batchStart+batchSize, re)
 		actualBatch := batchEnd - batchStart
 
 		// Use worker buffers if available, otherwise allocate
@@ -563,7 +557,7 @@ func decodeBlock(dst *[32]int8, src []byte, bits int) {
 	switch bits {
 	case 8:
 		// Fast path: 8-bit is just a byte copy
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			dst[i] = int8(src[i])
 		}
 	case 4:
@@ -605,9 +599,9 @@ func decodeBlockBits(dst *[32]int8, src []byte, bits int) {
 
 func decodeBlockBitsScalar(dst *[32]int8, src []byte, bits int) {
 	bitPos := 0
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		var v uint8
-		for b := 0; b < bits; b++ {
+		for b := range bits {
 			byteIdx := bitPos >> 3
 			bitIdx := uint(bitPos & 7)
 			if (src[byteIdx]>>bitIdx)&1 == 1 {
@@ -691,7 +685,7 @@ func decodeBitsBuffer(dst *[32]int8, src []byte, bits int) {
 	var bitBuf uint64
 	var bitCount uint
 	srcIdx := 0
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		for bitCount < uint(bits) {
 			var next uint64
 			if srcIdx < len(src) {
@@ -768,7 +762,7 @@ func dotInt8Float32SIMD(q []int8, x []float32, n int) float32 {
 
 func dotInt8Int16Scalar(q []int8, x []int16, n int) int32 {
 	var sum int32
-	for i := 0; i < n; i++ {
+	for i := range n {
 		sum += int32(q[i]) * int32(x[i])
 	}
 	return sum
@@ -817,10 +811,10 @@ func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, sca
 	for i := range scales {
 		scales[i] = 0
 	}
-	for b := 0; b < blocks; b++ {
+	for b := range blocks {
 		base := b * 32
 		maxAbs := float32(0)
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			idx := base + i
 			if idx >= len(x) {
 				continue
@@ -839,7 +833,7 @@ func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, sca
 		scale := maxAbs / 127.0
 		scales[b] = scale
 		inv := float32(1.0) / scale
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			idx := base + i
 			if idx >= len(x) {
 				continue
