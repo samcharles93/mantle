@@ -94,60 +94,56 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		}
 	}
 
-	if fp, ok := ops.(attentionInnerFastPath); ok && fp.AttentionInner(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
-		goto attentionDone
-	}
-
-	ctx := AttnContext{
-		Q:        q,
-		CacheK:   layer.AttnCache.K,
-		CacheV:   layer.AttnCache.V,
-		CacheK16: layer.AttnCache.K16,
-		CacheV16: layer.AttnCache.V16,
-		AttnOut:  attnOut,
-		Pos:      pos,
-		Start:    start,
-		KvStride: kvStride,
-		HeadDim:  headDim,
-		NHead:    nHead,
-		KvHeads:  kvHeads,
-		Scale:    scale,
-		CacheLen: layer.AttnCache.CacheLen,
-		Ops:      ops,
-	}
-
-	pool := m.GetAttnPool()
-	workers := pool.Size
-	if workers <= 1 {
-		RunAttnHeads(&ctx, m.Scratch.Scores, 0, nHead)
-	} else {
-		chunk := (nHead + workers - 1) / workers
-		done := <-pool.DoneSlots
-		activeWorkers := 0
-		for i := 0; i < workers; i++ {
-			rs := i * chunk
-			re := rs + chunk
-			if re > nHead {
-				re = nHead
-			}
-			if rs >= re {
-				break
-			}
-			activeWorkers++
-			pool.Tasks <- AttnTask{
-				Ctx:  &ctx,
-				Rs:   rs,
-				Re:   re,
-				Done: done,
-			}
+	if fp, ok := ops.(attentionInnerFastPath); !(ok && fp.AttentionInner(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale)) {
+		ctx := AttnContext{
+			Q:        q,
+			CacheK:   layer.AttnCache.K,
+			CacheV:   layer.AttnCache.V,
+			CacheK16: layer.AttnCache.K16,
+			CacheV16: layer.AttnCache.V16,
+			AttnOut:  attnOut,
+			Pos:      pos,
+			Start:    start,
+			KvStride: kvStride,
+			HeadDim:  headDim,
+			NHead:    nHead,
+			KvHeads:  kvHeads,
+			Scale:    scale,
+			CacheLen: layer.AttnCache.CacheLen,
+			Ops:      ops,
 		}
-		for i := 0; i < activeWorkers; i++ {
-			<-done
-		}
-		pool.DoneSlots <- done
-	}
 
-attentionDone:
+		pool := m.GetAttnPool()
+		workers := pool.Size
+		if workers <= 1 {
+			RunAttnHeads(&ctx, m.Scratch.Scores, 0, nHead)
+		} else {
+			chunk := (nHead + workers - 1) / workers
+			done := <-pool.DoneSlots
+			activeWorkers := 0
+			for i := 0; i < workers; i++ {
+				rs := i * chunk
+				re := rs + chunk
+				if re > nHead {
+					re = nHead
+				}
+				if rs >= re {
+					break
+				}
+				activeWorkers++
+				pool.Tasks <- AttnTask{
+					Ctx:  &ctx,
+					Rs:   rs,
+					Re:   re,
+					Done: done,
+				}
+			}
+			for i := 0; i < activeWorkers; i++ {
+				<-done
+			}
+			pool.DoneSlots <- done
+		}
+	}
 
 	if layer.AttnGate != nil {
 		gate := m.Scratch.AttnGate[:nHead*headDim]
