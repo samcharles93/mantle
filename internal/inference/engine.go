@@ -50,16 +50,16 @@ func Generate(m simd.Model, sampler *logits.Sampler, promptTokens []int, steps i
 
 	// Generation loop
 	genStart := time.Now()
-	for i := 0; i < steps; i++ {
+	for step := range steps {
 		next, sampleErr := safeSample(sampler, logitsVec, toks, nil)
 		if sampleErr != nil {
-			return stats, fmt.Errorf("sample error during generation step %d: %w", i, sampleErr)
+			return stats, fmt.Errorf("sample error during generation step %d: %w", step, sampleErr)
 		}
 		toks = append(toks, next)
 
 		logitsVec, err = safeForwardToken(m, next)
 		if err != nil {
-			return stats, fmt.Errorf("forward error during generation step %d: %w", i, err)
+			return stats, fmt.Errorf("forward error during generation step %d: %w", step, err)
 		}
 		stats.TokensGenerated++
 	}
@@ -170,7 +170,8 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 	}
 
 	genStart := time.Now()
-	for i := 0; i < limit; i++ {
+	var streamingOverhead time.Duration
+	for range limit {
 		if err := ctx.Err(); err != nil {
 			return g.ContextTokens, stats, err
 		}
@@ -197,7 +198,9 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 			if len(pending) >= streamMaxTokens ||
 				pendingChars >= streamMaxChars ||
 				(age >= streamMaxLatency && pendingChars >= streamMinChars) {
+				callbackStart := time.Now()
 				flush()
+				streamingOverhead += time.Since(callbackStart)
 			}
 		}
 
@@ -209,7 +212,8 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		stats.TokensGenerated++
 	}
 
-	stats.GenerationDuration = time.Since(genStart)
+	totalDuration := time.Since(genStart)
+	stats.GenerationDuration = totalDuration - streamingOverhead
 	if stats.GenerationDuration.Seconds() > 0 {
 		stats.GenerationTPS = float64(stats.TokensGenerated) / stats.GenerationDuration.Seconds()
 	}
@@ -218,7 +222,9 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		stats.TPS = float64(stats.TokensGenerated) / stats.Duration.Seconds()
 	}
 
+	callbackStart := time.Now()
 	flush()
+	streamingOverhead += time.Since(callbackStart)
 	return g.ContextTokens, stats, nil
 }
 

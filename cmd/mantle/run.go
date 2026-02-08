@@ -37,6 +37,9 @@ func runCmd() *cli.Command {
 		toolsJSON    string
 		hfConfigFile string
 
+		// Streaming options
+		streamMode string
+
 		// Debug flags
 		showConfig bool
 		showTokens bool
@@ -200,6 +203,12 @@ func runCmd() *cli.Command {
 			Name:        "hf-config",
 			Usage:       "explicit path to hf config.json",
 			Destination: &hfConfigFile,
+		},
+		&cli.StringFlag{
+			Name:        "stream-mode",
+			Usage:       "streaming output mode: instant, smooth, typewriter, quiet",
+			Value:       "smooth",
+			Destination: &streamMode,
 		},
 		// Debug flags
 		&cli.BoolFlag{
@@ -581,17 +590,22 @@ func runCmd() *cli.Command {
 				opts.EchoPrompt = &echoPromptVal
 				req := inference.ResolveRequest(opts, genDefaults)
 
-				var responseBuilder strings.Builder
+				// Create streaming writer based on mode
+				mode := StreamMode(streamMode)
+				if mode != StreamInstant && mode != StreamSmooth && mode != StreamTypewriter && mode != StreamQuiet {
+					log.Warn("invalid stream-mode, using 'smooth'", "provided", streamMode)
+					mode = StreamSmooth
+				}
+
+				if showConfig {
+					log.Info("streaming mode", "mode", mode)
+				}
+
+				writer := NewStreamWriter(mode, rawOutput)
 				result, err := loadResult.Engine.Generate(ctx, &req, func(s string) {
-					if rawOutput {
-						escaped := escapeRawOutput(s)
-						fmt.Print(escaped)
-						responseBuilder.WriteString(s)
-						return
-					}
-					fmt.Print(s)
-					responseBuilder.WriteString(s)
+					writer.Write(s)
 				})
+				responseText := writer.Flush()
 				if err != nil {
 					log.Error("generation failed", "error", err)
 					break
@@ -610,7 +624,7 @@ func runCmd() *cli.Command {
 				)
 
 				// Append assistant response to history
-				msgs = append(msgs, tokenizer.Message{Role: "assistant", Content: responseBuilder.String()})
+				msgs = append(msgs, tokenizer.Message{Role: "assistant", Content: responseText})
 
 				if !interactive {
 					break
