@@ -3,3 +3,8 @@ work/*
 .claude/
 .gemini/
 .task/
+profiles/
+*.prof
+*.out
+*.pprof
+*.test
