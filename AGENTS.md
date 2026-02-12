@@ -27,7 +27,7 @@ The Model Container Format (MCF) is:
 ## Hard constraints (must follow)
 
 ### Go and build constraints
-- You must ensure you run `GOEXPERIMENT=simd go1.26rc3` for any commands that require `go`. `go` commands will not work in this project due to the experimental nature of the simd/archsimd package which this project depends on.
+- You must ensure you run `GOEXPERIMENT=simd go`. This is due to the experimental nature of the simd/archsimd package which this project depends on.
 - Prefer the standard library first.
 - Use modern Go where it improves clarity or correctness:
   - built-in `min()` / `max()` where appropriate

@@ -18,6 +18,10 @@ type attentionInnerProjectionFastPath interface {
 	AttentionInnerProjection(projOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon float32) bool
 }
 
+type batchedNormOps interface {
+	RMSNormBatched(dst, src, weight []float32, eps float32, headDim, nHeads int) bool
+}
+
 // Attention performs multi-head attention with optional RoPE, KV caching, and sliding window.
 // Implements the full attention mechanism including Q/K/V projections, attention computation,
 // and output projection.
@@ -60,13 +64,25 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	}
 
 	if len(layer.AttnQNorm) > 0 {
-		for h := range nHead {
-			ops.RMSNorm(q[h*headDim:(h+1)*headDim], q[h*headDim:(h+1)*headDim], layer.AttnQNorm, m.RMSEpsilon)
+		batched := false
+		if bp, ok := ops.(batchedNormOps); ok {
+			batched = bp.RMSNormBatched(q, q, layer.AttnQNorm, m.RMSEpsilon, headDim, nHead)
+		}
+		if !batched {
+			for h := range nHead {
+				ops.RMSNorm(q[h*headDim:(h+1)*headDim], q[h*headDim:(h+1)*headDim], layer.AttnQNorm, m.RMSEpsilon)
+			}
 		}
 	}
 	if len(layer.AttnKNorm) > 0 {
-		for h := range kvHeads {
-			ops.RMSNorm(k[h*headDim:(h+1)*headDim], k[h*headDim:(h+1)*headDim], layer.AttnKNorm, m.RMSEpsilon)
+		batched := false
+		if bp, ok := ops.(batchedNormOps); ok {
+			batched = bp.RMSNormBatched(k, k, layer.AttnKNorm, m.RMSEpsilon, headDim, kvHeads)
+		}
+		if !batched {
+			for h := range kvHeads {
+				ops.RMSNorm(k[h*headDim:(h+1)*headDim], k[h*headDim:(h+1)*headDim], layer.AttnKNorm, m.RMSEpsilon)
+			}
 		}
 	}
 
@@ -87,7 +103,13 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	if cacheLen > 0 {
 		cachePos = pos % cacheLen
 	}
-	ops.StoreKV(-1, cachePos, kvStride, layer.AttnCache.K, layer.AttnCache.V, layer.AttnCache.K16, layer.AttnCache.V16, k, v)
+	layer.AttnCache.EnsurePos(cachePos)
+	ops.StoreKV(-1, cachePos, kvStride,
+		layer.AttnCache.K, layer.AttnCache.V,
+		layer.AttnCache.K16, layer.AttnCache.V16,
+		layer.AttnCache.KQ8, layer.AttnCache.VQ8,
+		layer.AttnCache.KQ8S, layer.AttnCache.VQ8S,
+		k, v)
 
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 	start := 0
@@ -107,21 +129,25 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 
 	if fp, ok := ops.(attentionInnerFastPath); !(ok && fp.AttentionInner(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale)) {
 		ctx := AttnContext{
-			Q:        q,
-			CacheK:   layer.AttnCache.K,
-			CacheV:   layer.AttnCache.V,
-			CacheK16: layer.AttnCache.K16,
-			CacheV16: layer.AttnCache.V16,
-			AttnOut:  attnOut,
-			Pos:      pos,
-			Start:    start,
-			KvStride: kvStride,
-			HeadDim:  headDim,
-			NHead:    nHead,
-			KvHeads:  kvHeads,
-			Scale:    scale,
-			CacheLen: layer.AttnCache.CacheLen,
-			Ops:      ops,
+			Q:         q,
+			CacheK:    layer.AttnCache.K,
+			CacheV:    layer.AttnCache.V,
+			CacheK16:  layer.AttnCache.K16,
+			CacheV16:  layer.AttnCache.V16,
+			CacheKQ8:  layer.AttnCache.KQ8,
+			CacheVQ8:  layer.AttnCache.VQ8,
+			CacheKQ8S: layer.AttnCache.KQ8S,
+			CacheVQ8S: layer.AttnCache.VQ8S,
+			AttnOut:   attnOut,
+			Pos:       pos,
+			Start:     start,
+			KvStride:  kvStride,
+			HeadDim:   headDim,
+			NHead:     nHead,
+			KvHeads:   kvHeads,
+			Scale:     scale,
+			CacheLen:  layer.AttnCache.CacheLen,
+			Ops:       ops,
 		}
 
 		pool := m.GetAttnPool()

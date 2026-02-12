@@ -1,7 +1,6 @@
 version: "3"
 
 vars:
-  GO: go1.26rc3
   WORK_DIR: '{{.WORK_DIR | default "/work"}}'
   MODELS_DIR: '{{.MODELS_DIR | default (joinPath .WORK_DIR "models")}}'
   MCF_DIR: '{{.MCF_DIR | default (joinPath .MODELS_DIR "mcf")}}'
@@ -51,15 +50,6 @@ tasks:
     cmds:
       - "task: build"
 
-  setup:
-    desc: Install Go 1.26rc3 toolchain
-    cmds:
-      - "go install golang.org/dl/go1.26rc3@latest"
-      - "go1.26rc3 download"
-      - "go1.26rc3 version"
-    status:
-      - "which go1.26rc3"
-
   cuda:build-kernels:
     desc: Build optional CUDA kernel objects/static library
     cmds:
@@ -72,7 +62,7 @@ tasks:
     desc: Build the mantle binary (use CUDA=1 for cuda backend)
     cmds:
       - '{{if .CUDA}}task cuda:build-kernels{{end}}'
-      - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}{{.GO}} build {{if .VERSION_LDFLAGS}}{{.VERSION_LDFLAGS}}{{else}}{{.BUILD_FLAGS}}{{end}} {{.BUILD_TAGS}} -o bin/mantle ./cmd/mantle'
+      - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}go build {{if .VERSION_LDFLAGS}}{{.VERSION_LDFLAGS}}{{else}}{{.BUILD_FLAGS}}{{end}} {{.BUILD_TAGS}} -o bin/mantle ./cmd/mantle'
       - 'echo "Build Complete: bin/mantle"'
     preconditions:
       - sh: '{{if .CUDA}}[ -n "{{.CUDA_HOME_RESOLVED}}" ] && [ -d "{{.CUDA_LIBDIR}}" ] && [ -f "{{.CUDA_LIBDIR}}/libcudart.so" ] && [ -f "{{.CUDA_LIBDIR}}/libcublas.so" ]{{else}}true{{end}}'
@@ -87,7 +77,7 @@ tasks:
         sh: 'date -u +%Y%m%dT%H%M%SZ'
     cmds:
       - '{{if .CUDA}}task cuda:build-kernels{{end}}'
-      - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}{{.GO}} build {{if .VERSION_LDFLAGS}}{{.VERSION_LDFLAGS}}{{else}}{{.BUILD_FLAGS}}{{end}} {{.BUILD_TAGS}} -o bin/mantle ./cmd/mantle'
+      - '{{if .CUDA}}CGO_LDFLAGS="-L{{.CUDA_LIBDIR}}" LD_LIBRARY_PATH="{{.CUDA_LIBDIR}}:$LD_LIBRARY_PATH" {{end}}go build {{if .VERSION_LDFLAGS}}{{.VERSION_LDFLAGS}}{{else}}{{.BUILD_FLAGS}}{{end}} {{.BUILD_TAGS}} -o bin/mantle ./cmd/mantle'
       - 'echo "Build Complete: bin/mantle"'
     preconditions:
       - sh: '{{if .CUDA}}[ -n "{{.CUDA_HOME_RESOLVED}}" ] && [ -d "{{.CUDA_LIBDIR}}" ] && [ -f "{{.CUDA_LIBDIR}}/libcudart.so" ] && [ -f "{{.CUDA_LIBDIR}}/libcublas.so" ]{{else}}true{{end}}'
@@ -96,7 +86,7 @@ tasks:
   build:logdiff:
     desc: Build the logdiff tool
     cmds:
-      - "{{.GO}} build -o bin/logdiff {{.BUILD_FLAGS}} ./cmd/logdiff"
+      - "go build -o bin/logdiff {{.BUILD_FLAGS}} ./cmd/logdiff"
 
   pack:
     desc: Pack a raw model into MCF format
@@ -157,22 +147,22 @@ tasks:
   bench-simd-compare:
     desc: Run SIMD vs scalar benchmark comparisons
     cmds:
-      - "{{.GO}} test -bench='(SIMD|Scalar)$' -benchtime=3s ./internal/backend/simd/"
+      - "go test -bench='(SIMD|Scalar)$' -benchtime=3s ./internal/backend/simd/"
 
   fmt:
     desc: Format all Go code
     cmds:
-      - "{{.GO}} fmt ./..."
+      - "go fmt ./..."
 
   test:
     desc: Run all tests
     cmds:
-      - "{{.GO}} test ./..."
+      - "go test ./..."
 
   lint:
     desc: Run golangci-lint with correct environment
     vars:
       TARGET_GOROOT:
-        sh: '{{.GO}} env GOROOT'
+        sh: 'go env GOROOT'
     cmds:
       - 'GOROOT="{{.TARGET_GOROOT}}" PATH="{{.TARGET_GOROOT}}/bin:$PATH" golangci-lint run'

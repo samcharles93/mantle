@@ -156,6 +156,24 @@ extern int mantleCudaConvertF32ToF16(
 	unsigned short* out,
 	int n,
 	cudaStream_t stream);
+extern int launchFusedRMSNormMatVecBF16(
+	float* out,
+	const unsigned short* W,
+	const float* x,
+	const float* normWeight,
+	float eps,
+	int rows,
+	int cols,
+	cudaStream_t stream);
+extern int launchFusedRMSNormMatVecF32(
+	float* out,
+	const float* W,
+	const float* x,
+	const float* normWeight,
+	float eps,
+	int rows,
+	int cols,
+	cudaStream_t stream);
 extern int mantleCudaAttentionInnerF16CacheF32(
 	const float* q,
 	const unsigned short* cacheK,
@@ -169,6 +187,21 @@ extern int mantleCudaAttentionInnerF16CacheF32(
 	int kvHeads,
 	int cacheLen,
 	float scale,
+	cudaStream_t stream);
+extern int mantleCudaRMSNormF32(
+	float* out,
+	const float* x,
+	const float* weight,
+	float eps,
+	int n,
+	cudaStream_t stream);
+extern int mantleCudaRMSNormBatchedF32(
+	float* out,
+	const float* x,
+	const float* weight,
+	float eps,
+	int head_dim,
+	int n_heads,
 	cudaStream_t stream);
 
 static const char* mantleCudaGetErrorString(cudaError_t err) {
@@ -436,6 +469,51 @@ static int mantleCudaAttentionInnerF16CacheF32Wrapper(
 	float scale,
 	cudaStream_t stream) {
 	return mantleCudaAttentionInnerF16CacheF32(q, cacheK, cacheV, out, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen, scale, stream);
+}
+
+static int mantleFusedRMSNormMatVecBF16(
+	float* out,
+	const unsigned short* W,
+	const float* x,
+	const float* normWeight,
+	float eps,
+	int rows,
+	int cols,
+	cudaStream_t stream) {
+	return launchFusedRMSNormMatVecBF16(out, W, x, normWeight, eps, rows, cols, stream);
+}
+
+static int mantleFusedRMSNormMatVecF32(
+	float* out,
+	const float* W,
+	const float* x,
+	const float* normWeight,
+	float eps,
+	int rows,
+	int cols,
+	cudaStream_t stream) {
+	return launchFusedRMSNormMatVecF32(out, W, x, normWeight, eps, rows, cols, stream);
+}
+
+static int mantleCudaRMSNormF32Wrapper(
+	float* out,
+	const float* x,
+	const float* weight,
+	float eps,
+	int n,
+	cudaStream_t stream) {
+	return mantleCudaRMSNormF32(out, x, weight, eps, n, stream);
+}
+
+static int mantleCudaRMSNormBatchedF32Wrapper(
+	float* out,
+	const float* x,
+	const float* weight,
+	float eps,
+	int head_dim,
+	int n_heads,
+	cudaStream_t stream) {
+	return mantleCudaRMSNormBatchedF32(out, x, weight, eps, head_dim, n_heads, stream);
 }
 */
 import "C"
@@ -1087,6 +1165,81 @@ func cublasErr(code C.int) error {
 		return nil
 	}
 	return fmt.Errorf("cublas error %d", int(code))
+}
+
+// FusedRMSNormMatVecBF16 performs fused RMSNorm + MatVec with BF16 weights
+func FusedRMSNormMatVecBF16(out, W, x, normWeight DeviceBuffer, eps float32, rows, cols int, stream Stream) error {
+	if out.ptr == nil || W.ptr == nil || x.ptr == nil || normWeight.ptr == nil {
+		return fmt.Errorf("fused rmsnorm matvec buffer is nil")
+	}
+	if rows <= 0 || cols <= 0 {
+		return fmt.Errorf("fused rmsnorm matvec dimensions must be > 0")
+	}
+	return cudaErr(C.mantleFusedRMSNormMatVecBF16(
+		(*C.float)(out.ptr),
+		(*C.ushort)(W.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(normWeight.ptr),
+		C.float(eps),
+		C.int(rows),
+		C.int(cols),
+		stream.ptr,
+	))
+}
+
+// FusedRMSNormMatVecF32 performs fused RMSNorm + MatVec with F32 weights
+func FusedRMSNormMatVecF32(out, W, x, normWeight DeviceBuffer, eps float32, rows, cols int, stream Stream) error {
+	if out.ptr == nil || W.ptr == nil || x.ptr == nil || normWeight.ptr == nil {
+		return fmt.Errorf("fused rmsnorm matvec buffer is nil")
+	}
+	if rows <= 0 || cols <= 0 {
+		return fmt.Errorf("fused rmsnorm matvec dimensions must be > 0")
+	}
+	return cudaErr(C.mantleFusedRMSNormMatVecF32(
+		(*C.float)(out.ptr),
+		(*C.float)(W.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(normWeight.ptr),
+		C.float(eps),
+		C.int(rows),
+		C.int(cols),
+		stream.ptr,
+	))
+}
+
+func RMSNormF32(out, x, weight DeviceBuffer, eps float32, n int, stream Stream) error {
+	if out.ptr == nil || x.ptr == nil || weight.ptr == nil {
+		return fmt.Errorf("rmsnorm buffer is nil")
+	}
+	if n <= 0 {
+		return fmt.Errorf("rmsnorm n must be > 0")
+	}
+	return cudaErr(C.mantleCudaRMSNormF32Wrapper(
+		(*C.float)(out.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(weight.ptr),
+		C.float(eps),
+		C.int(n),
+		stream.ptr,
+	))
+}
+
+func RMSNormBatchedF32(out, x, weight DeviceBuffer, eps float32, headDim, nHeads int, stream Stream) error {
+	if out.ptr == nil || x.ptr == nil || weight.ptr == nil {
+		return fmt.Errorf("batched rmsnorm buffer is nil")
+	}
+	if headDim <= 0 || nHeads <= 0 {
+		return fmt.Errorf("batched rmsnorm dimensions must be > 0")
+	}
+	return cudaErr(C.mantleCudaRMSNormBatchedF32Wrapper(
+		(*C.float)(out.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(weight.ptr),
+		C.float(eps),
+		C.int(headDim),
+		C.int(nHeads),
+		stream.ptr,
+	))
 }
 
 func cudaErr(code C.int) error {

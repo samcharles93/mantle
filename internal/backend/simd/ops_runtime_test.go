@@ -10,7 +10,7 @@ func TestDefaultOpsStoreKVF32(t *testing.T) {
 	k := []float32{1, 2, 3, 4}
 	v := []float32{5, 6, 7, 8}
 
-	ops.StoreKV(0, 1, stride, kDst, vDst, nil, nil, k, v)
+	ops.StoreKV(0, 1, stride, kDst, vDst, nil, nil, nil, nil, nil, nil, k, v)
 
 	for i, want := range k {
 		if got := kDst[stride+i]; got != want {
@@ -32,7 +32,7 @@ func TestDefaultOpsStoreKVF16(t *testing.T) {
 	k := []float32{1.5, -2.0}
 	v := []float32{3.25, 4.5}
 
-	ops.StoreKV(0, 1, stride, nil, nil, kDst, vDst, k, v)
+	ops.StoreKV(0, 1, stride, nil, nil, kDst, vDst, nil, nil, nil, nil, k, v)
 
 	for i, want := range k {
 		got := Float16ToFloat32(kDst[stride+i])

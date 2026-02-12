@@ -30,6 +30,7 @@ func NewServer(store *ResponseStore, service *InferenceService) *Server {
 }
 
 func (s *Server) Register(e *echo.Echo) {
+	// Responses API
 	e.POST("/v1/responses", s.handleCreateResponse)
 	e.GET("/v1/responses/:id", s.handleGetResponse)
 	e.DELETE("/v1/responses/:id", s.handleDeleteResponse)
@@ -37,6 +38,9 @@ func (s *Server) Register(e *echo.Echo) {
 	e.GET("/v1/responses/:id/input_items", s.handleInputItems)
 	e.POST("/v1/responses/compact", s.handleCompactResponse)
 	e.POST("/v1/responses/input_tokens", s.handleInputTokens)
+
+	// Chat Completions API (OpenAI-compatible)
+	s.RegisterChatCompletions(e)
 }
 
 func (s *Server) handleCreateResponse(c *echo.Context) error {

@@ -21,6 +21,10 @@ type EngineImpl struct {
 	hfConfigJSON     []byte
 	chatTemplatePath string
 	stopTokens       []int
+
+	generator   *Generator
+	lastPrompt  string // rendered prompt text from last Generate() call
+	lastGenText string // text generated in last Generate() call
 }
 
 func (e *EngineImpl) Close() error {
@@ -65,9 +69,34 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		stream(prompt)
 	}
 
-	ids, err := safeEncode(e.tokenizer, prompt)
-	if err != nil {
-		return nil, fmt.Errorf("encode prompt: %w", err)
+	// Build token sequence, reusing cached tokens when possible.
+	// On subsequent calls in the same conversation, the new prompt starts with
+	// lastPrompt + lastGenText. We skip past both (their tokens are already in
+	// ContextTokens) and encode only the truly new content (end-of-turn markup
+	// + new user message + generation prompt). This avoids re-encoding
+	// generated text, which can produce different BPE token splits.
+	var ids []int
+	if e.generator != nil && e.lastPrompt != "" && strings.HasPrefix(prompt, e.lastPrompt) {
+		afterLastPrompt := prompt[len(e.lastPrompt):]
+		if strings.HasPrefix(afterLastPrompt, e.lastGenText) {
+			newContent := afterLastPrompt[len(e.lastGenText):]
+			if newContent != "" {
+				newIDs, encErr := safeEncode(e.tokenizer, newContent)
+				if encErr == nil {
+					ids = make([]int, len(e.generator.ContextTokens)+len(newIDs))
+					copy(ids, e.generator.ContextTokens)
+					copy(ids[len(e.generator.ContextTokens):], newIDs)
+				}
+			} else {
+				ids = append([]int(nil), e.generator.ContextTokens...)
+			}
+		}
+	}
+	if ids == nil {
+		ids, err = safeEncode(e.tokenizer, prompt)
+		if err != nil {
+			return nil, fmt.Errorf("encode prompt: %w", err)
+		}
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -84,17 +113,19 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		RepeatLastN:   int(req.RepeatLastN),
 	})
 
-	gen := &Generator{
-		Model:         e.model,
-		Sampler:       sampler,
-		Tokenizer:     e.tokenizer,
-		StopTokens:    append([]int(nil), e.stopTokens...),
-		ContextTokens: make([]int, 0, len(ids)),
+	if e.generator == nil {
+		e.generator = &Generator{
+			Model:         e.model,
+			Sampler:       sampler,
+			Tokenizer:     e.tokenizer,
+			StopTokens:    append([]int(nil), e.stopTokens...),
+			ContextTokens: make([]int, 0, len(ids)),
+		}
+	} else {
+		e.generator.Sampler = sampler
 	}
 
-	if err := safeReset(e.model); err != nil {
-		return nil, err
-	}
+	gen := e.generator
 
 	var sb strings.Builder
 	streamWrapper := func(tok string) {
@@ -114,20 +145,23 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		return nil, err
 	}
 
+	genText := sb.String()
+	e.lastPrompt = prompt
+	e.lastGenText = genText
+
 	return &Result{
-		Text:  sb.String(),
+		Text:  genText,
 		Stats: stats,
 	}, nil
 }
 
-func safeReset(m simd.Model) (err error) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			err = fmt.Errorf("panic in Reset: %v", rec)
-		}
-	}()
-	m.Reset()
-	return nil
+func (e *EngineImpl) ResetContext() {
+	if e.generator != nil {
+		e.generator.ContextTokens = e.generator.ContextTokens[:0]
+		e.model.Reset()
+	}
+	e.lastPrompt = ""
+	e.lastGenText = ""
 }
 
 func safeEncode(tok tokenizer.Tokenizer, prompt string) (ids []int, err error) {

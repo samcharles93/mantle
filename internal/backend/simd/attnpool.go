@@ -9,10 +9,12 @@ type AttnTask struct {
 }
 
 type AttnContext struct {
-	Q, CacheK, CacheV  []float32
-	CacheK16, CacheV16 []uint16
-	AttnOut            []float32
-	Ops                Ops
+	Q, CacheK, CacheV    []float32
+	CacheK16, CacheV16   []uint16
+	CacheKQ8, CacheVQ8   []int8
+	CacheKQ8S, CacheVQ8S []float32
+	AttnOut              []float32
+	Ops                  Ops
 
 	Pos, Start        int
 	KvStride, HeadDim int
@@ -97,7 +99,10 @@ func RunAttnHeads(ctx *AttnContext, scoresBuf []float32, rs, re int) {
 				cachePos = t % cacheLen
 			}
 			koff := cachePos*ctx.KvStride + kvHead*ctx.HeadDim
-			if ctx.CacheK16 != nil {
+			if ctx.CacheKQ8 != nil {
+				kv := ctx.CacheKQ8[koff : koff+ctx.HeadDim]
+				scores[t-ctx.Start] = DotQ8(qh, kv, ctx.CacheKQ8S[cachePos]) * ctx.Scale
+			} else if ctx.CacheK16 != nil {
 				kv := ctx.CacheK16[koff : koff+ctx.HeadDim]
 				scores[t-ctx.Start] = DotF16(qh, kv) * ctx.Scale
 			} else {
@@ -113,7 +118,16 @@ func RunAttnHeads(ctx *AttnContext, scoresBuf []float32, rs, re int) {
 		out := ctx.AttnOut[h*ctx.HeadDim : (h+1)*ctx.HeadDim]
 		for d := range ctx.HeadDim {
 			var sum float32
-			if ctx.CacheV16 != nil {
+			if ctx.CacheVQ8 != nil {
+				for t := ctx.Start; t <= ctx.Pos; t++ {
+					cachePos := t
+					if useRing {
+						cachePos = t % cacheLen
+					}
+					voff := cachePos*ctx.KvStride + kvHead*ctx.HeadDim + d
+					sum += scores[t-ctx.Start] * float32(ctx.CacheVQ8[voff]) * ctx.CacheVQ8S[cachePos]
+				}
+			} else if ctx.CacheV16 != nil {
 				for t := ctx.Start; t <= ctx.Pos; t++ {
 					cachePos := t
 					if useRing {

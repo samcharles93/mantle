@@ -52,6 +52,8 @@ func main() {
 			quantizeCmd(),
 			inspectCmd(),
 			serveCmd(),
+			listModelsCmd(),
+			benchmarkCmd(),
 			versionCmd(),
 		},
 	}

@@ -374,6 +374,16 @@ func siluAndMulScalar(dst, x []float32) {
 	}
 }
 
+// DotQ8 computes the dot product of float32 vector a and quantized int8 vector b,
+// scaled by the per-position scale factor.
+func DotQ8(a []float32, b []int8, scale float32) float32 {
+	var sum float32
+	for i, v := range a {
+		sum += v * float32(b[i])
+	}
+	return sum * scale
+}
+
 // ApplyRoPE applies Rotary Positional Embeddings to x.
 // headDim must be even. attentionFactor scales the cos/sin components.
 func ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {

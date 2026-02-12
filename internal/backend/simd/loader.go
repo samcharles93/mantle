@@ -494,26 +494,34 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			}
 			cache := AttnCache{KvStride: kvStride, CacheLen: cacheLen}
 
-			// Key cache
+			// Key cache type — backing slices are lazily allocated via EnsurePos.
 			kt := modelCfg.Config.CacheTypeK
 			if kt == "" {
-				kt = CacheTypeF32 // Default for now, CLI will override
+				kt = CacheTypeF32
 			}
-			if kt == CacheTypeF16 {
-				cache.K16 = make([]uint16, cacheLen*kvStride)
-			} else {
-				cache.K = make([]float32, cacheLen*kvStride)
+			switch kt {
+			case CacheTypeF16:
+				cache.K16 = make([]uint16, 0)
+			case CacheTypeQ8_0:
+				cache.KQ8 = make([]int8, 0)
+				cache.KQ8S = make([]float32, 0)
+			default:
+				cache.K = make([]float32, 0)
 			}
 
-			// Value cache
+			// Value cache type
 			vt := modelCfg.Config.CacheTypeV
 			if vt == "" {
 				vt = CacheTypeF32
 			}
-			if vt == CacheTypeF16 {
-				cache.V16 = make([]uint16, cacheLen*kvStride)
-			} else {
-				cache.V = make([]float32, cacheLen*kvStride)
+			switch vt {
+			case CacheTypeF16:
+				cache.V16 = make([]uint16, 0)
+			case CacheTypeQ8_0:
+				cache.VQ8 = make([]int8, 0)
+				cache.VQ8S = make([]float32, 0)
+			default:
+				cache.V = make([]float32, 0)
 			}
 
 			layer.AttnCache = cache

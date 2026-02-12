@@ -222,9 +222,7 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		stats.TPS = float64(stats.TokensGenerated) / stats.Duration.Seconds()
 	}
 
-	callbackStart := time.Now()
 	flush()
-	streamingOverhead += time.Since(callbackStart)
 	return g.ContextTokens, stats, nil
 }
 

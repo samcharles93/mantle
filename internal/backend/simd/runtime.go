@@ -92,9 +92,8 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 		Add(x, ffnOut)
 	}
 
-	// Output norm
-	m.Ops().RMSNorm(m.Scratch.Tmp, x, m.OutputNorm, m.RMSEpsilon)
-	m.Ops().MatVec(m.Scratch.Logits, m.Output, m.Scratch.Tmp)
+	// Output norm + projection (try fused kernel)
+	FusedRMSNormMatVec(m.Ops(), m.Scratch.Logits, m.Output, x, m.OutputNorm, m.RMSEpsilon, m.Scratch.Tmp)
 	if scale := m.Config.Config.LMHeadMultiplier; scale != 0 && scale != 1 {
 		s := float32(scale)
 		for i := range m.Scratch.Logits {
@@ -112,14 +111,9 @@ func (m *Instance) Reset() {
 	m.Pos = 0
 	for i := range m.Layers {
 		layer := &m.Layers[i]
-		if layer.AttnCache.K != nil {
-			for j := range layer.AttnCache.K {
-				layer.AttnCache.K[j] = 0
-			}
-			for j := range layer.AttnCache.V {
-				layer.AttnCache.V[j] = 0
-			}
-		}
+		// KV caches do not need zeroing: attention reads positions [start, pos]
+		// which are always written by StoreKV before being read. After Pos = 0,
+		// old data is never accessed.
 		if layer.ShortConvState.Buf != nil {
 			for j := range layer.ShortConvState.Buf {
 				layer.ShortConvState.Buf[j] = 0

@@ -78,8 +78,54 @@ type AttnCache struct {
 	V        []float32
 	K16      []uint16
 	V16      []uint16
+	KQ8      []int8    // Q8 quantized data
+	VQ8      []int8    // Q8 quantized data
+	KQ8S     []float32 // Q8 scales (one per position)
+	VQ8S     []float32 // Q8 scales (one per position)
 	KvStride int
 	CacheLen int
+	Cap      int // Currently allocated positions (for lazy allocation)
+}
+
+const kvCachePageSize = 256
+
+// EnsurePos grows the cache backing slices so that position pos is addressable.
+func (c *AttnCache) EnsurePos(pos int) {
+	needed := pos + 1
+	if needed <= c.Cap {
+		return
+	}
+	newCap := ((needed + kvCachePageSize - 1) / kvCachePageSize) * kvCachePageSize
+	if newCap > c.CacheLen {
+		newCap = c.CacheLen
+	}
+	grow := newCap - c.Cap
+	stride := c.KvStride
+	if c.K != nil {
+		c.K = append(c.K, make([]float32, grow*stride)...)
+	}
+	if c.V != nil {
+		c.V = append(c.V, make([]float32, grow*stride)...)
+	}
+	if c.K16 != nil {
+		c.K16 = append(c.K16, make([]uint16, grow*stride)...)
+	}
+	if c.V16 != nil {
+		c.V16 = append(c.V16, make([]uint16, grow*stride)...)
+	}
+	if c.KQ8 != nil {
+		c.KQ8 = append(c.KQ8, make([]int8, grow*stride)...)
+	}
+	if c.VQ8 != nil {
+		c.VQ8 = append(c.VQ8, make([]int8, grow*stride)...)
+	}
+	if c.KQ8S != nil {
+		c.KQ8S = append(c.KQ8S, make([]float32, grow)...)
+	}
+	if c.VQ8S != nil {
+		c.VQ8S = append(c.VQ8S, make([]float32, grow)...)
+	}
+	c.Cap = newCap
 }
 
 // ShortConvState holds state for recurrent attention convolution.

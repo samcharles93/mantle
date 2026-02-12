@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -149,13 +150,13 @@ func runCmd() *cli.Command {
 		&cli.StringFlag{
 			Name:    "cache-type-k",
 			Aliases: []string{"cache_type_k", "ctk"},
-			Usage:   "KV cache data type for K (f32, f16)",
+			Usage:   "KV cache data type for K (f32, f16, q8_0)",
 			Value:   "f16",
 		},
 		&cli.StringFlag{
 			Name:    "cache-type-v",
 			Aliases: []string{"cache_type_v", "ctv"},
-			Usage:   "KV cache data type for V (f32, f16)",
+			Usage:   "KV cache data type for V (f32, f16, q8_0)",
 			Value:   "f16",
 		},
 		// Optional overrides
@@ -257,6 +258,11 @@ func runCmd() *cli.Command {
 		Flags: flags,
 		Action: func(ctx context.Context, c *cli.Command) error {
 			log := logger.FromContext(ctx)
+
+			// Apply config file defaults for flags not explicitly set
+			cfg := LoadConfig()
+			applyRunConfig(c, cfg, &modelsPath, &temp, &topK, &topP, &repeatPenalty,
+				&steps, &seed, &streamMode)
 
 			if cpuProfile != "" {
 				f, err := os.Create(cpuProfile)
@@ -401,6 +407,9 @@ func runCmd() *cli.Command {
 			}
 
 			minP := c.Float("min-p")
+			if cfg.MinP != nil && !c.IsSet("min-p") && !c.IsSet("min_p") && !c.IsSet("minp") {
+				minP = *cfg.MinP
+			}
 			repeatLastNVal := int(repeatLastN)
 			stepsVal := int(steps)
 			seedVal := seed
@@ -536,7 +545,7 @@ func runCmd() *cli.Command {
 					msgs = append(msgs, tokenizer.Message{Role: "user", Content: prompt})
 				} else {
 					interactive = true
-					log.Info("interactive mode enabled", "hint", "type /exit to quit")
+					log.Info("interactive mode enabled", "hint", "type /help for commands, /exit to quit")
 				}
 			}
 
@@ -550,10 +559,41 @@ func runCmd() *cli.Command {
 						break
 					}
 					input := scanner.Text()
-					if strings.TrimSpace(input) == "/exit" {
+					trimmed := strings.TrimSpace(input)
+					if trimmed == "/exit" || trimmed == "/quit" {
 						break
 					}
-					if strings.TrimSpace(input) == "" {
+					if trimmed == "" {
+						continue
+					}
+					if trimmed == "/help" {
+						fmt.Println("Commands:")
+						fmt.Println("  /help    - show this help")
+						fmt.Println("  /clear   - clear conversation history")
+						fmt.Println("  /stats   - show generation statistics")
+						fmt.Println("  /exit    - exit interactive mode")
+						continue
+					}
+					if trimmed == "/clear" {
+						msgs = msgs[:0]
+						if system != "" {
+							msgs = append(msgs, tokenizer.Message{Role: "system", Content: system})
+						}
+						loadResult.Engine.ResetContext()
+						fmt.Println("Conversation cleared.")
+						continue
+					}
+					if trimmed == "/stats" {
+						fmt.Printf("Messages in context: %d\n", len(msgs))
+						var mem runtime.MemStats
+						runtime.ReadMemStats(&mem)
+						fmt.Printf("Memory: %.1f MB alloc, %.1f MB sys\n",
+							float64(mem.Alloc)/(1024*1024),
+							float64(mem.Sys)/(1024*1024))
+						continue
+					}
+					if strings.HasPrefix(trimmed, "/") {
+						fmt.Printf("Unknown command: %s (type /help for commands)\n", trimmed)
 						continue
 					}
 					msgs = append(msgs, tokenizer.Message{Role: "user", Content: input})

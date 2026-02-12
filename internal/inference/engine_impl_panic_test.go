@@ -40,7 +40,41 @@ func (okTokenizer) Decode([]int) (string, error) { return "", nil }
 func (okTokenizer) TokenString(int) string       { return "" }
 func (okTokenizer) Decoder() []string            { return []string{"", "a"} }
 
-func TestEngineImplGenerateConvertsResetPanic(t *testing.T) {
+func TestEngineImplGenerateReusesGenerator(t *testing.T) {
+	t.Parallel()
+
+	e := &EngineImpl{
+		model:           okModel{},
+		tokenizer:       okTokenizer{},
+		tokenizerConfig: tokenizer.TokenizerConfig{},
+	}
+	// First call creates the generator
+	_, err := e.Generate(context.Background(), &Request{
+		Messages: []tokenizer.Message{{Role: "user", Content: "hello"}},
+		Steps:    0,
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error on first call: %v", err)
+	}
+	if e.generator == nil {
+		t.Fatal("expected generator to be stored on EngineImpl")
+	}
+
+	// Second call reuses the generator (no reset needed since tokens prefix-match)
+	gen := e.generator
+	_, err = e.Generate(context.Background(), &Request{
+		Messages: []tokenizer.Message{{Role: "user", Content: "hello"}},
+		Steps:    0,
+	}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error on second call: %v", err)
+	}
+	if e.generator != gen {
+		t.Fatal("expected generator to be reused")
+	}
+}
+
+func TestEngineImplResetContext(t *testing.T) {
 	t.Parallel()
 
 	e := &EngineImpl{
@@ -48,16 +82,22 @@ func TestEngineImplGenerateConvertsResetPanic(t *testing.T) {
 		tokenizer:       okTokenizer{},
 		tokenizerConfig: tokenizer.TokenizerConfig{},
 	}
+	// First call succeeds — no reset needed
 	_, err := e.Generate(context.Background(), &Request{
 		Messages: []tokenizer.Message{{Role: "user", Content: "hello"}},
 		Steps:    0,
 	}, nil)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if !strings.Contains(err.Error(), "panic in Reset") {
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+
+	// ResetContext on a model that panics on Reset — verify it propagates
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic from ResetContext")
+		}
+	}()
+	e.ResetContext()
 }
 
 func TestEngineImplGenerateConvertsEncodePanic(t *testing.T) {

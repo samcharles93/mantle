@@ -39,6 +39,10 @@ func serveCmd() *cli.Command {
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			log := logger.FromContext(ctx)
 
+			// Apply config file defaults for flags not explicitly set
+			cfg := LoadConfig()
+			applyServeConfig(cmd, cfg, &addr)
+
 			store := api.NewResponseStore()
 			loader := inference.Loader{
 				TokenizerJSONPath:   tokenizerJSONPath,

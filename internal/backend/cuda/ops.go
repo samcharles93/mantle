@@ -88,6 +88,81 @@ func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 	}
 }
 
+// FusedRMSNormMatVec performs fused RMSNorm + MatVec in a single kernel
+// This eliminates one memory roundtrip compared to calling them separately
+func (o *Ops) FusedRMSNormMatVec(out []float32, w *simd.Mat, x, normWeight []float32, eps float32) bool {
+	if os.Getenv("MANTLE_CUDA_FUSE") == "" {
+		return false // Fusion not enabled
+	}
+
+	native.RecordRMSNorm()
+	native.RecordMatVec()
+
+	n := len(x)
+	if len(out) < w.R || len(x) != w.C || len(normWeight) < n {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	rows := w.R
+	cols := w.C
+	bytes := int64(rows * 4)
+
+	// Ensure buffers
+	if err := o.ensureHostVecs(int(bytes), int(bytes)); err != nil {
+		return false
+	}
+	if err := o.ensureDeviceVecs(int(bytes), int(bytes)); err != nil {
+		return false
+	}
+
+	// Get weight matrix
+	wDev, err := o.deviceMat(w)
+	if err != nil {
+		return false
+	}
+
+	// Upload input vector
+	xBytes := int64(cols * 4)
+	if int(xBytes) > o.xDevBytes {
+		if err := o.ensureDeviceVecs(int(xBytes), int(bytes)); err != nil {
+			return false
+		}
+	}
+	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), cols), x[:cols])
+	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
+		return false
+	}
+
+	// Get norm weight
+	normDev, err := o.deviceNormWeight(normWeight)
+	if err != nil {
+		return false
+	}
+
+	// Call fused kernel
+	var kernelErr error
+	if wDev.dtype == native.BlasBF16 {
+		kernelErr = native.FusedRMSNormMatVecBF16(o.yDev, wDev.buf, o.xDev, normDev, eps, rows, cols, o.stream)
+	} else {
+		kernelErr = native.FusedRMSNormMatVecF32(o.yDev, wDev.buf, o.xDev, normDev, eps, rows, cols, o.stream)
+	}
+
+	if kernelErr != nil {
+		return false
+	}
+
+	// Download result
+	if err := o.waitForResult(o.yHost.Ptr(), o.yDev, bytes); err != nil {
+		return false
+	}
+
+	copy(out, unsafe.Slice((*float32)(o.yHost.Ptr()), rows))
+	return true
+}
+
 // PreloadModelWeights uploads all model matrices and RMSNorm weights to device memory.
 // This removes lazy first-use uploads from the decode hot path.
 func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
@@ -907,9 +982,6 @@ func (o *Ops) RMSNorm(dst, src, weight []float32, eps float32) {
 	if err := o.ensureDeviceVecs(int(bytes), int(bytes)); err != nil {
 		panic(fmt.Errorf("cuda rmsnorm device buffer alloc failed (%d bytes): %w", bytes, err))
 	}
-	if err := o.ensureNormTmp(int(bytes)); err != nil {
-		panic(fmt.Errorf("cuda rmsnorm temp buffer alloc failed (%d bytes): %w", bytes, err))
-	}
 
 	wDev, err := o.deviceNormWeight(weight)
 	if err != nil {
@@ -921,53 +993,66 @@ func (o *Ops) RMSNorm(dst, src, weight []float32, eps float32) {
 		panic(fmt.Errorf("cuda rmsnorm H2D copy failed (%d bytes): %w", bytes, err))
 	}
 
-	sumSq, err := native.DotF32(o.blas, n, o.xDev, 1, o.xDev, 1)
-	if err != nil {
-		panic(fmt.Errorf("cuda rmsnorm dot failed (n=%d): %w", n, err))
-	}
-	mean := sumSq / float32(n)
-	scale := float32(1.0 / math.Sqrt(float64(mean+eps)))
-
-	if err := native.CopyF32(o.blas, n, o.xDev, 1, o.yDev, 1); err != nil {
-		panic(fmt.Errorf("cuda rmsnorm copy failed (n=%d): %w", n, err))
-	}
-	if err := native.ScalF32(o.blas, n, scale, o.yDev, 1); err != nil {
-		panic(fmt.Errorf("cuda rmsnorm scale failed (n=%d): %w", n, err))
-	}
-	if err := native.DgmmF32(o.blas, native.BlasSideLeft, n, 1, o.yDev, n, wDev, 1, o.zDev, n); err != nil {
-		panic(fmt.Errorf("cuda rmsnorm dgmm failed (n=%d): %w", n, err))
+	// Single custom kernel: reduction + rsqrt + weight multiply, no CPU sync
+	if err := native.RMSNormF32(o.yDev, o.xDev, wDev, eps, n, o.stream); err != nil {
+		panic(fmt.Errorf("cuda rmsnorm kernel failed (n=%d): %w", n, err))
 	}
 
-	if err := o.waitForResult(o.yHost.Ptr(), o.zDev, bytes); err != nil {
+	if err := o.waitForResult(o.yHost.Ptr(), o.yDev, bytes); err != nil {
 		panic(fmt.Errorf("cuda rmsnorm result wait failed: %w", err))
 	}
 
 	copy(dst[:n], unsafe.Slice((*float32)(o.yHost.Ptr()), n))
 }
 
-// rmsNormDevice computes RMSNorm on device buffers.
+// RMSNormBatched applies RMSNorm to nHeads contiguous vectors of headDim each,
+// all sharing the same weight vector. Launched as a single kernel with one block per head.
+func (o *Ops) RMSNormBatched(dst, src, weight []float32, eps float32, headDim, nHeads int) bool {
+	totalElems := headDim * nHeads
+	if totalElems == 0 || len(src) < totalElems || len(dst) < totalElems || len(weight) < headDim {
+		return false
+	}
+	if o == nil {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	bytes := int64(totalElems) * int64(unsafe.Sizeof(float32(0)))
+	if err := o.ensureHostVecs(int(bytes), int(bytes)); err != nil {
+		return false
+	}
+	if err := o.ensureDeviceVecs(int(bytes), int(bytes)); err != nil {
+		return false
+	}
+
+	wDev, err := o.deviceNormWeight(weight[:headDim])
+	if err != nil {
+		return false
+	}
+
+	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), totalElems), src[:totalElems])
+	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), bytes, o.stream); err != nil {
+		return false
+	}
+
+	if err := native.RMSNormBatchedF32(o.yDev, o.xDev, wDev, eps, headDim, nHeads, o.stream); err != nil {
+		return false
+	}
+
+	if err := o.waitForResult(o.yHost.Ptr(), o.yDev, bytes); err != nil {
+		return false
+	}
+
+	copy(dst[:totalElems], unsafe.Slice((*float32)(o.yHost.Ptr()), totalElems))
+	return true
+}
+
+// rmsNormDevice computes RMSNorm on device buffers using a single custom kernel.
 // Requires o.mu locked, and buffers allocated.
 func (o *Ops) rmsNormDevice(srcDev native.DeviceBuffer, weightDev native.DeviceBuffer, dstDev native.DeviceBuffer, n int, eps float32) error {
-	// Compute sum of squares
-	sumSq, err := native.DotF32(o.blas, n, srcDev, 1, srcDev, 1)
-	if err != nil {
-		return fmt.Errorf("cuda rmsnorm dot failed (n=%d): %w", n, err)
-	}
-	mean := sumSq / float32(n)
-	scale := float32(1.0 / math.Sqrt(float64(mean+eps)))
-
-	// Copy srcDev to yDev (temporary) and scale
-	if err := native.CopyF32(o.blas, n, srcDev, 1, o.yDev, 1); err != nil {
-		return fmt.Errorf("cuda rmsnorm copy failed (n=%d): %w", n, err)
-	}
-	if err := native.ScalF32(o.blas, n, scale, o.yDev, 1); err != nil {
-		return fmt.Errorf("cuda rmsnorm scale failed (n=%d): %w", n, err)
-	}
-	// Multiply by weight (dgmm)
-	if err := native.DgmmF32(o.blas, native.BlasSideLeft, n, 1, o.yDev, n, weightDev, 1, dstDev, n); err != nil {
-		return fmt.Errorf("cuda rmsnorm dgmm failed (n=%d): %w", n, err)
-	}
-	return nil
+	return native.RMSNormF32(dstDev, srcDev, weightDev, eps, n, o.stream)
 }
 
 func (o *Ops) ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {
@@ -994,7 +1079,7 @@ func (o *Ops) ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64,
 	}
 }
 
-func (o *Ops) StoreKV(_ int, pos, kvStride int, kDst, vDst []float32, kDst16, vDst16 []uint16, k, v []float32) {
+func (o *Ops) StoreKV(_ int, pos, kvStride int, kDst, vDst []float32, kDst16, vDst16 []uint16, _, _ []int8, _, _ []float32, k, v []float32) {
 	native.RecordStoreKV()
 	if kvStride <= 0 {
 		return

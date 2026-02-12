@@ -10,6 +10,7 @@ type StreamFunc func(token string)
 
 type Engine interface {
 	Generate(ctx context.Context, req *Request, stream StreamFunc) (*Result, error)
+	ResetContext()
 	Close() error
 }
 

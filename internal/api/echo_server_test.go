@@ -41,7 +41,8 @@ func (e testEngine) Generate(ctx context.Context, req *inference.Request, stream
 	return &inference.Result{Text: e.text}, nil
 }
 
-func (e testEngine) Close() error { return nil }
+func (e testEngine) ResetContext() {}
+func (e testEngine) Close() error  { return nil }
 
 func newTestEcho() *echo.Echo {
 	provider := testProvider{

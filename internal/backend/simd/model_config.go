@@ -58,7 +58,7 @@ const (
 	CacheTypeF32  = "f32"
 	CacheTypeF16  = "f16"
 	CacheTypeBF16 = "bf16" // Reserved/future
-	CacheTypeQ8_0 = "q8_0" // Reserved/future
+	CacheTypeQ8_0 = "q8_0"
 	CacheTypeQ4_0 = "q4_0" // Reserved/future
 )
 

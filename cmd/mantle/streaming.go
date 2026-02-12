@@ -38,7 +38,6 @@ type StreamWriter struct {
 
 	// For raw output mode
 	rawOutput bool
-	rawBuffer strings.Builder
 }
 
 // NewStreamWriter creates a new streaming output handler
