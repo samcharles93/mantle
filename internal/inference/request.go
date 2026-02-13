@@ -18,6 +18,9 @@ type RequestOptions struct {
 
 	NoTemplate *bool
 	EchoPrompt *bool
+
+	ReasoningFormat *string
+	ReasoningBudget *int
 }
 
 func ResolveRequest(opts RequestOptions, defaults GenDefaults) Request {
@@ -34,6 +37,8 @@ func ResolveRequest(opts RequestOptions, defaults GenDefaults) Request {
 		RepeatLastN:   64,
 		NoTemplate:    false,
 		EchoPrompt:    false,
+		ReasoningFormat: "auto",
+		ReasoningBudget: -1,
 	}
 
 	if defaults.Temperature != nil && *defaults.Temperature > 0 {
@@ -78,6 +83,12 @@ func ResolveRequest(opts RequestOptions, defaults GenDefaults) Request {
 	}
 	if opts.EchoPrompt != nil {
 		req.EchoPrompt = *opts.EchoPrompt
+	}
+	if opts.ReasoningFormat != nil {
+		req.ReasoningFormat = *opts.ReasoningFormat
+	}
+	if opts.ReasoningBudget != nil {
+		req.ReasoningBudget = *opts.ReasoningBudget
 	}
 
 	return req

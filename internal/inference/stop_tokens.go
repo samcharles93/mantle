@@ -24,22 +24,29 @@ func BuildStopTokens(tok tokenizer.Tokenizer, cfg tokenizer.TokenizerConfig) []i
 		stopTokens = append(stopTokens, id)
 	}
 
-	token2 := strings.ToLower(strings.TrimSpace(tok.TokenString(2)))
-	if token2 == "<|endoftext|>" || token2 == "<|end_of_text|>" || token2 == "</s>" {
+	isKnownStopTokenString := func(s string) bool {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "<|im_end|>", "<|eot_id|>", "</s>":
+			return true
+		default:
+			return false
+		}
+	}
+
+	// Legacy fallback for tokenizers that don't expose a decoder table.
+	if isKnownStopTokenString(tok.TokenString(2)) {
 		addUnique(2)
 	}
 
 	for id, token := range cfg.Tokens {
-		if token == "<|im_end|>" {
+		if isKnownStopTokenString(token) {
 			addUnique(id)
-			break
 		}
 	}
 
 	for id, token := range tok.Decoder() {
-		if token == "<|im_end|>" {
+		if isKnownStopTokenString(token) {
 			addUnique(id)
-			break
 		}
 	}
 	return stopTokens

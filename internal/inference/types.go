@@ -30,9 +30,14 @@ type Request struct {
 
 	NoTemplate bool
 	EchoPrompt bool
+
+	ReasoningFormat string
+	ReasoningBudget int
 }
 
 type Result struct {
-	Text  string
-	Stats Stats
+	Text          string
+	ReasoningText string
+	RawText       string
+	Stats         Stats
 }

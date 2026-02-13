@@ -143,6 +143,12 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	tokCfgParsed.BOSTokenID = hfTok.BOSID()
 	tokCfgParsed.AddBOS = hfTok.AddBOS()
 	tokCfgParsed.EOSTokenID = hfTok.EOSID()
+	effectiveTemplate, templateSource := ResolveChatTemplate(l.ChatTemplatePath, tokCfgParsed, modelConfig.Arch, cfgBytes)
+	if strings.TrimSpace(effectiveTemplate) == "" {
+		log.Info("chat template resolved", "model_path", modelPath, "source", "none")
+	} else {
+		log.Info("chat template resolved", "model_path", modelPath, "source", templateSource, "length", len(effectiveTemplate))
+	}
 
 	stopTokens := BuildStopTokens(hfTok, tokCfgParsed)
 

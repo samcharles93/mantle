@@ -9,6 +9,7 @@ import (
 	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/logits"
 	"github.com/samcharles93/mantle/internal/mcfstore"
+	"github.com/samcharles93/mantle/internal/reasoning"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
@@ -145,13 +146,37 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		return nil, err
 	}
 
-	genText := sb.String()
+	rawText := sb.String()
+	if len(gen.ContextTokens) >= len(ids) {
+		genIDs := gen.ContextTokens[len(ids):]
+		if len(genIDs) > 0 {
+			decoded, decErr := safeDecode(e.tokenizer, genIDs)
+			if decErr == nil {
+				rawText = decoded
+			}
+		} else {
+			rawText = ""
+		}
+	}
+	contentText := rawText
+	reasoningText := ""
+	switch strings.ToLower(strings.TrimSpace(req.ReasoningFormat)) {
+	case "none":
+		// Keep raw output untouched.
+	default:
+		split := reasoning.SplitRaw(rawText)
+		contentText = split.Content
+		reasoningText = split.Reasoning
+	}
+
 	e.lastPrompt = prompt
-	e.lastGenText = genText
+	e.lastGenText = contentText
 
 	return &Result{
-		Text:  genText,
-		Stats: stats,
+		Text:          contentText,
+		ReasoningText: reasoningText,
+		RawText:       rawText,
+		Stats:         stats,
 	}, nil
 }
 
@@ -171,6 +196,15 @@ func safeEncode(tok tokenizer.Tokenizer, prompt string) (ids []int, err error) {
 		}
 	}()
 	return tok.Encode(prompt)
+}
+
+func safeDecode(tok tokenizer.Tokenizer, ids []int) (text string, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic in Decode: %v", rec)
+		}
+	}()
+	return tok.Decode(ids)
 }
 
 func (e *EngineImpl) renderPrompt(req *Request) (string, error) {

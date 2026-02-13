@@ -35,20 +35,20 @@ func TestBuildStopTokensLegacyID2(t *testing.T) {
 		want   []int
 	}{
 		{
-			name: "adds-legacy-2-when-eot",
+			name: "does-not-add-legacy-2-for-endoftext",
 			cfg:  tokenizer.TokenizerConfig{EOSTokenID: 1},
 			tokens: map[int]string{
 				2: "<|endoftext|>",
 			},
-			want: []int{1, 2},
+			want: []int{1},
 		},
 		{
-			name: "no-legacy-2-when-not-eot",
+			name: "adds-legacy-2-when-im-end",
 			cfg:  tokenizer.TokenizerConfig{EOSTokenID: 1},
 			tokens: map[int]string{
 				2: "<|im_end|>",
 			},
-			want: []int{1},
+			want: []int{1, 2},
 		},
 		{
 			name: "legacy-2-only-when-eos-absent",
@@ -59,15 +59,15 @@ func TestBuildStopTokensLegacyID2(t *testing.T) {
 			want: []int{2},
 		},
 		{
-			name: "no-legacy-2-when-eos-absent-and-not-eot",
+			name: "adds-legacy-2-when-eos-absent-and-im-end",
 			cfg:  tokenizer.TokenizerConfig{EOSTokenID: -1},
 			tokens: map[int]string{
 				2: "<|im_end|>",
 			},
-			want: []int{},
+			want: []int{2},
 		},
 		{
-			name: "no-duplicate-legacy-2-when-eos-is-2",
+			name: "does-not-add-legacy-2-for-end-of-text",
 			cfg:  tokenizer.TokenizerConfig{EOSTokenID: 2},
 			tokens: map[int]string{
 				2: "<|end_of_text|>",
@@ -118,6 +118,17 @@ func TestBuildStopTokensAddsImEndFromDecoder(t *testing.T) {
 	}
 	got := BuildStopTokens(fakeDecoderTokenizer{decoder: []string{"a", "b", "<|im_end|>"}}, cfg)
 	want := []int{5, 2}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestBuildStopTokensIgnoresEndOfTextFromDecoder(t *testing.T) {
+	cfg := tokenizer.TokenizerConfig{
+		EOSTokenID: -1,
+	}
+	got := BuildStopTokens(fakeDecoderTokenizer{decoder: []string{"a", "b", "c", "<|endoftext|>"}}, cfg)
+	want := []int{}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
