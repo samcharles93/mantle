@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANTLE_BIN="${SCRIPT_DIR}/../bin/mantle"
-MODEL="${1:-/work/models/mcf/LFM2.5-1.2B-Instruct.mcf}"
+MODEL="${1:-/work/models/mcf/Qwen3-1.7B.k4.mcf}"
 STEPS="${2:-128}"
 
 if [ ! -f "$MANTLE_BIN" ]; then

@@ -53,7 +53,7 @@ tasks:
   cuda:build-kernels:
     desc: Build optional CUDA kernel objects/static library
     cmds:
-      - 'bash scripts/build_cuda_softmax.sh'
+      - 'bash scripts/build_cuda.sh'
     preconditions:
       - sh: '[ -n "{{.CUDA_HOME_RESOLVED}}" ] && [ -d "{{.CUDA_LIBDIR}}" ] && [ -f "{{.CUDA_LIBDIR}}/libcudart.so" ] && [ -f "{{.CUDA_LIBDIR}}/libcublas.so" ]'
         msg: 'CUDA toolkit libraries not found. Set CUDA_HOME or ensure nvcc is in PATH so "{{.CUDA_LIBDIR}}" resolves with libcudart.so and libcublas.so.'
