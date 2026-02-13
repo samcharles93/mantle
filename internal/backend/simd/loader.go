@@ -12,6 +12,11 @@ import (
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
+type LoadModelOptions struct {
+	CacheTypeK string
+	CacheTypeV string
+}
+
 type tensorPayload struct {
 	DType mcf.TensorDType
 	Shape []int
@@ -47,7 +52,7 @@ func (s mcfSource) TensorShape(name string) ([]int, bool) {
 	return shape, true
 }
 
-func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int) (*Instance, error) {
+func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int, opts LoadModelOptions) (*Instance, error) {
 	if mcfFile == nil {
 		return nil, fmt.Errorf("mcf: nil file")
 	}
@@ -59,10 +64,10 @@ func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int) (*I
 	if err != nil {
 		return nil, err
 	}
-	return loadModelFromSource(cfg, spec, mcfSource{mf: mcfFile}, maxContext)
+	return loadModelFromSource(cfg, spec, mcfSource{mf: mcfFile}, maxContext, opts)
 }
 
-func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSource, maxContext int) (*Instance, error) {
+func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSource, maxContext int, opts LoadModelOptions) (*Instance, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("nil config")
 	}
@@ -265,6 +270,12 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			MuPEnabled:             cfg.MuPEnabled,
 			AttentionBias:          cfg.AttentionBias,
 		},
+	}
+	if opts.CacheTypeK != "" {
+		modelCfg.Config.CacheTypeK = opts.CacheTypeK
+	}
+	if opts.CacheTypeV != "" {
+		modelCfg.Config.CacheTypeV = opts.CacheTypeV
 	}
 
 	maxHeadKV := 0

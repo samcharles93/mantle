@@ -3,8 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANTLE_BIN="${SCRIPT_DIR}/../bin/mantle"
-MODEL="${1:-/work/models/mcf/Qwen3-1.7B.k4.mcf}"
+MODEL="${1:-/work/models/mcf/LFM2.5-1.2B-Instruct.k4.mcf}"
 STEPS="${2:-128}"
+KV_TYPE="${3:-q8_0}"
 
 if [ ! -f "$MANTLE_BIN" ]; then
     echo "Error: mantle binary not found at $MANTLE_BIN"
@@ -23,6 +24,7 @@ echo "CUDA Profiling"
 echo "=================================="
 echo "Model: $MODEL"
 echo "Steps: $STEPS"
+echo "Cache Type K/V: $KV_TYPE"
 echo "Output: ${REPORT_BASE}.*"
 echo ""
 
@@ -41,7 +43,7 @@ if command -v nsys &> /dev/null; then
         --export=sqlite \
         "$MANTLE_BIN" run --backend cuda \
         -m "$MODEL" \
-        --steps "$STEPS" \
+        --steps "$STEPS"  --ctv "$KV_TYPE" --ctk "$KV_TYPE" \
         --prompt "Write a short story about Python (programming language)"
 
     echo ""
@@ -72,7 +74,7 @@ elif command -v nvprof &> /dev/null; then
         --export-profile "${REPORT_BASE}.nvvp" \
         "$MANTLE_BIN" run --backend cuda \
         -m "$MODEL" \
-        --steps "$STEPS" \
+        --steps "$STEPS" --ctv "$KV_TYPE" --ctk "$KV_TYPE" \
         --prompt "Write a short story about Python (programming language)"
 
     echo ""
@@ -99,7 +101,7 @@ echo ""
 
 CUDA=1 MANTLE_CUDA_TRACE=1 "$MANTLE_BIN" run --backend cuda \
     -m "$MODEL" \
-    --steps "$STEPS" \
+    --steps "$STEPS" --ctv "$KV_TYPE" --ctk "$KV_TYPE"  \
     --prompt "Write a short story about Python (programming language)" \
     > "${REPORT_BASE}_internal.txt" 2>&1
 

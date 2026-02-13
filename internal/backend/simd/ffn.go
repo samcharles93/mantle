@@ -13,13 +13,32 @@ func FFN(m *Instance, layer *Layer, x []float32) []float32 {
 		return m.Scratch.Tmp2
 	}
 
-	var qx *QuantVec
-	if CanUseQuantVec(layer.FfnUp) || CanUseQuantVec(layer.FfnGate) {
-		qx = PrepareQuantVec(x)
-		defer ReleaseQuantVec(qx)
+	var dm deviceMatVecFastPath
+	if d, ok := m.Ops().(deviceMatVecFastPath); ok {
+		dm = d
 	}
-	m.Ops().MatVecWithQuant(m.Scratch.FfnUp, layer.FfnUp, x, qx)
-	m.Ops().MatVecWithQuant(m.Scratch.FfnGate, layer.FfnGate, x, qx)
+
+	var qx *QuantVec
+	defer func() {
+		if qx != nil {
+			ReleaseQuantVec(qx)
+		}
+	}()
+	ensureQX := func(w *Mat) {
+		if qx == nil && CanUseQuantVec(w) {
+			qx = PrepareQuantVec(x)
+		}
+	}
+	runInputMatVec := func(dst []float32, w *Mat) {
+		if dm != nil && dm.DeviceMatVec(dst, w, x) {
+			return
+		}
+		ensureQX(w)
+		m.Ops().MatVecWithQuant(dst, w, x, qx)
+	}
+
+	runInputMatVec(m.Scratch.FfnUp, layer.FfnUp)
+	runInputMatVec(m.Scratch.FfnGate, layer.FfnGate)
 
 	// Vectorized SiLU activation
 	n := len(m.Scratch.FfnAct)

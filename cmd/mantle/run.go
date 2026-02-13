@@ -358,6 +358,8 @@ func runCmd() *cli.Command {
 				Backend:             backend,
 				DisableSWA:          noSWA,
 			}
+			loader.LoadOptions.CacheTypeK = c.String("cache-type-k")
+			loader.LoadOptions.CacheTypeV = c.String("cache-type-v")
 			loadResult, err := loader.Load(ctx, modelPath, int(maxContext))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)
@@ -368,8 +370,6 @@ func runCmd() *cli.Command {
 			if modelCfg == nil {
 				return cli.Exit("error: backend returned nil model config", 1)
 			}
-			modelCfg.Config.CacheTypeK = c.String("cache-type-k")
-			modelCfg.Config.CacheTypeV = c.String("cache-type-v")
 
 			// RoPE Scaling Overrides
 			ropeOverride := false

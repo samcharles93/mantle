@@ -18,6 +18,10 @@ type attentionInnerProjectionFastPath interface {
 	AttentionInnerProjection(projOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon float32) bool
 }
 
+type deviceMatVecFastPath interface {
+	DeviceMatVec(dst []float32, w *Mat, x []float32) bool
+}
+
 type batchedNormOps interface {
 	RMSNormBatched(dst, src, weight []float32, eps float32, headDim, nHeads int) bool
 }
@@ -41,16 +45,35 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	attnOut := m.Scratch.AttnOut
 
 	var qx *QuantVec
+	defer func() {
+		if qx != nil {
+			ReleaseQuantVec(qx)
+		}
+	}()
+
 	if fp, ok := ops.(attentionQKVFastPath); ok && fp.MatVecQKV(q, k, v, layer.Wq, layer.Wk, layer.Wv, x) {
 		qx = nil
 	} else {
-		if CanUseQuantVec(layer.Wq) || CanUseQuantVec(layer.Wk) || CanUseQuantVec(layer.Wv) {
-			qx = PrepareQuantVec(x)
-			defer ReleaseQuantVec(qx)
+		var dm deviceMatVecFastPath
+		if d, ok := ops.(deviceMatVecFastPath); ok {
+			dm = d
 		}
-		ops.MatVecWithQuant(q, layer.Wq, x, qx)
-		ops.MatVecWithQuant(k, layer.Wk, x, qx)
-		ops.MatVecWithQuant(v, layer.Wv, x, qx)
+		ensureQX := func(w *Mat) {
+			if qx == nil && CanUseQuantVec(w) {
+				qx = PrepareQuantVec(x)
+			}
+		}
+		project := func(dst []float32, w *Mat) {
+			if dm != nil && dm.DeviceMatVec(dst, w, x) {
+				return
+			}
+			ensureQX(w)
+			ops.MatVecWithQuant(dst, w, x, qx)
+		}
+
+		project(q, layer.Wq)
+		project(k, layer.Wk)
+		project(v, layer.Wv)
 	}
 
 	if len(layer.WqBias) > 0 {
@@ -184,7 +207,12 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 
 	if layer.AttnGate != nil {
 		gate := m.Scratch.AttnGate[:nHead*headDim]
-		ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
+		if dm, ok := ops.(deviceMatVecFastPath); !(ok && dm.DeviceMatVec(gate, layer.AttnGate, x)) {
+			if qx == nil && CanUseQuantVec(layer.AttnGate) {
+				qx = PrepareQuantVec(x)
+			}
+			ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
+		}
 
 		// Vectorized Sigmoid with multiplication
 		n := len(gate)

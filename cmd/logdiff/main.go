@@ -96,12 +96,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	bfModel, err := simd.LoadModelMCF(bf16File, bfCfgBytes, maxContext)
+	bfModel, err := simd.LoadModelMCF(bf16File, bfCfgBytes, maxContext, simd.LoadModelOptions{})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "bf16 load:", err)
 		os.Exit(1)
 	}
-	k4Model, err := simd.LoadModelMCF(k4File, k4CfgBytes, maxContext)
+	k4Model, err := simd.LoadModelMCF(k4File, k4CfgBytes, maxContext, simd.LoadModelOptions{})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "k4 load:", err)
 		os.Exit(1)

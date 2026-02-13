@@ -12,6 +12,6 @@ func (b *Backend) Name() string {
 	return "cpu"
 }
 
-func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int) (Runtime, error) {
-	return LoadModelMCF(mcfFile, cfgBytes, maxContext)
+func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int, opts LoadModelOptions) (Runtime, error) {
+	return LoadModelMCF(mcfFile, cfgBytes, maxContext, opts)
 }

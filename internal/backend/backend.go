@@ -16,7 +16,7 @@ const (
 
 type Backend interface {
 	Name() string
-	LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int) (simd.Runtime, error)
+	LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int, opts simd.LoadModelOptions) (simd.Runtime, error)
 }
 
 func Has(name string) bool {

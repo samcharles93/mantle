@@ -22,6 +22,7 @@ type Loader struct {
 	HFConfigPath        string
 	Backend             string
 	DisableSWA          bool
+	LoadOptions         simd.LoadModelOptions
 }
 
 type LoadResult struct {
@@ -112,7 +113,7 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 		return cleanup(fmt.Errorf("unknown backend %q (expected auto, cpu, or cuda)", backendName))
 	}
 
-	modelRuntime, err := runtime.LoadModel(mcfFile, cfgBytes, maxContext)
+	modelRuntime, err := runtime.LoadModel(mcfFile, cfgBytes, maxContext, l.LoadOptions)
 	if err != nil {
 		return cleanup(err)
 	}

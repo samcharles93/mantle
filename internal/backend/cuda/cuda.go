@@ -34,7 +34,7 @@ func (b *Backend) Name() string {
 	return "cuda"
 }
 
-func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int) (simd.Runtime, error) {
+func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int, opts simd.LoadModelOptions) (simd.Runtime, error) {
 	native.ResetManagedFallbackFlag()
 	stream, err := native.NewStream()
 	if err != nil {
@@ -49,7 +49,7 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 	restoreQuantCache := simd.SetQuantCacheBuildEnabledForLoad(false)
 	m, err := func() (*simd.Instance, error) {
 		defer restoreQuantCache()
-		return simd.LoadModelMCF(mcfFile, cfgBytes, maxContext)
+		return simd.LoadModelMCF(mcfFile, cfgBytes, maxContext, opts)
 	}()
 	if err != nil {
 		_ = blas.Destroy()

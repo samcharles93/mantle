@@ -27,11 +27,25 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 		}
 	}
 
+	var ds DeviceStateOps
+	if d, ok := m.Ops().(DeviceStateOps); ok {
+		ds = d
+		ds.BeginToken(x)
+		defer ds.EndToken(x)
+	}
+
 	for i := range m.Layers {
 		layer := &m.Layers[i]
 
 		// Attention block: pre-norm, attention, optional post-norm, residual
-		m.Ops().RMSNorm(m.Scratch.Tmp, x, layer.AttnNorm, m.RMSEpsilon)
+		if ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp, x, layer.AttnNorm, m.RMSEpsilon) {
+			// device-side pre-norm succeeded
+		} else {
+			if ds != nil {
+				ds.SyncHostState(x)
+			}
+			m.Ops().RMSNorm(m.Scratch.Tmp, x, layer.AttnNorm, m.RMSEpsilon)
+		}
 
 		var opOut []float32
 		if layer.Mamba != nil {
@@ -75,10 +89,17 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 			m.Ops().RMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
 			opOut = m.Scratch.Tmp2
 		}
-		Add(x, opOut)
+		addResidual(ds, x, opOut)
 
 		// FFN block: pre-norm, dense/MoE, optional post-norm, residual
-		m.Ops().RMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon)
+		if ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon) {
+			// device-side pre-norm succeeded
+		} else {
+			if ds != nil {
+				ds.SyncHostState(x)
+			}
+			m.Ops().RMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon)
+		}
 		var ffnOut []float32
 		if layer.MoE != nil {
 			ffnOut = MoE(m, layer, m.Scratch.Tmp)
@@ -89,10 +110,13 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 			m.Ops().RMSNorm(m.Scratch.Tmp, ffnOut, layer.PostFfnNorm, m.RMSEpsilon)
 			ffnOut = m.Scratch.Tmp
 		}
-		Add(x, ffnOut)
+		addResidual(ds, x, ffnOut)
 	}
 
 	// Output norm + projection (try fused kernel)
+	if ds != nil {
+		ds.SyncHostState(x)
+	}
 	FusedRMSNormMatVec(m.Ops(), m.Scratch.Logits, m.Output, x, m.OutputNorm, m.RMSEpsilon, m.Scratch.Tmp)
 	if scale := m.Config.Config.LMHeadMultiplier; scale != 0 && scale != 1 {
 		s := float32(scale)
@@ -103,6 +127,19 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 
 	m.Pos++
 	return m.Scratch.Logits, nil
+}
+
+func addResidual(ds DeviceStateOps, dst, src []float32) {
+	if ds != nil && ds.DeviceAdd(dst, src) {
+		return
+	}
+	if ds != nil {
+		ds.SyncHostState(dst)
+	}
+	Add(dst, src)
+	if ds != nil {
+		ds.HostStateDirty(dst)
+	}
 }
 
 // Reset clears the model's internal state (KV cache, etc.).

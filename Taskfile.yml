@@ -5,7 +5,7 @@ vars:
   MODELS_DIR: '{{.MODELS_DIR | default (joinPath .WORK_DIR "models")}}'
   MCF_DIR: '{{.MCF_DIR | default (joinPath .MODELS_DIR "mcf")}}'
   RAW_MODELS_DIR: '{{.RAW_MODELS_DIR | default (joinPath .MODELS_DIR "raw")}}'
-  BUILD_FLAGS: '-ldflags="-w -s" -trimpath'
+  BUILD_FLAGS: '-a -ldflags="-w -s" -trimpath'
   VERSION: '{{.VERSION | default ""}}'
   COMMIT: '{{.COMMIT | default ""}}'
   BUILD_TIME: '{{.BUILD_TIME | default ""}}'

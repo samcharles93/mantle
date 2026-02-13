@@ -34,9 +34,20 @@ type QuantVec struct {
 	Blocks int
 }
 
+type quantDecodeScratch struct {
+	qbuf   []int8
+	scales []float32
+}
+
 var quantVecPool = sync.Pool{
 	New: func() any {
 		return &QuantVec{}
+	},
+}
+
+var quantDecodeScratchPool = sync.Pool{
+	New: func() any {
+		return &quantDecodeScratch{}
 	},
 }
 
@@ -54,6 +65,20 @@ func putQuantVec(qx *QuantVec) {
 		return
 	}
 	quantVecPool.Put(qx)
+}
+
+func getQuantDecodeScratch(qbufLen, scalesLen int) *quantDecodeScratch {
+	scratch := quantDecodeScratchPool.Get().(*quantDecodeScratch)
+	scratch.qbuf = ensureInt8Slice(scratch.qbuf, qbufLen)
+	scratch.scales = ensureFloat32Slice(scratch.scales, scalesLen)
+	return scratch
+}
+
+func putQuantDecodeScratch(scratch *quantDecodeScratch) {
+	if scratch == nil {
+		return
+	}
+	quantDecodeScratchPool.Put(scratch)
 }
 
 func ensureInt8Slice(dst []int8, n int) []int8 {
@@ -298,6 +323,12 @@ func matVecRangeQWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 		batchSize = totalRows
 	}
 
+	var scratch *quantDecodeScratch
+	if worker == nil {
+		scratch = getQuantDecodeScratch(batchSize*layout.blocksPerRow*32, batchSize*layout.blocksPerRow)
+		defer putQuantDecodeScratch(scratch)
+	}
+
 	for batchStart := rs; batchStart < re; batchStart += batchSize {
 		batchEnd := min(batchStart+batchSize, re)
 		actualBatch := batchEnd - batchStart
@@ -308,8 +339,10 @@ func matVecRangeQWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 		if worker != nil {
 			qbuf, scales = worker.ensureWorkerBuffers(actualBatch*layout.blocksPerRow*32, actualBatch*layout.blocksPerRow)
 		} else {
-			qbuf = make([]int8, actualBatch*layout.blocksPerRow*32)
-			scales = make([]float32, actualBatch*layout.blocksPerRow)
+			requiredQbuf := actualBatch * layout.blocksPerRow * 32
+			requiredScales := actualBatch * layout.blocksPerRow
+			qbuf = scratch.qbuf[:requiredQbuf]
+			scales = scratch.scales[:requiredScales]
 		}
 
 		// Decode all blocks for this batch
@@ -387,6 +420,12 @@ func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 		batchSize = totalRows
 	}
 
+	var scratch *quantDecodeScratch
+	if worker == nil {
+		scratch = getQuantDecodeScratch(batchSize*layout.blocksPerRow*32, batchSize*layout.blocksPerRow)
+		defer putQuantDecodeScratch(scratch)
+	}
+
 	for batchStart := rs; batchStart < re; batchStart += batchSize {
 		batchEnd := min(batchStart+batchSize, re)
 		actualBatch := batchEnd - batchStart
@@ -397,8 +436,10 @@ func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 		if worker != nil {
 			qbuf, scales = worker.ensureWorkerBuffers(actualBatch*layout.blocksPerRow*32, actualBatch*layout.blocksPerRow)
 		} else {
-			qbuf = make([]int8, actualBatch*layout.blocksPerRow*32)
-			scales = make([]float32, actualBatch*layout.blocksPerRow)
+			requiredQbuf := actualBatch * layout.blocksPerRow * 32
+			requiredScales := actualBatch * layout.blocksPerRow
+			qbuf = scratch.qbuf[:requiredQbuf]
+			scales = scratch.scales[:requiredScales]
 		}
 
 		// Decode all blocks for this batch
