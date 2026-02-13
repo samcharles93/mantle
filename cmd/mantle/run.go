@@ -16,6 +16,7 @@ import (
 	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/inference"
 	"github.com/samcharles93/mantle/internal/logger"
+	"github.com/samcharles93/mantle/internal/reasoning"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
@@ -32,6 +33,8 @@ func runCmd() *cli.Command {
 		seed          int64
 		noTemplate    bool
 		echoPrompt    bool
+		reasoningFmt  string
+		reasoningBgt  int64
 
 		// Optional overrides
 		messagesJSON string
@@ -42,10 +45,11 @@ func runCmd() *cli.Command {
 		streamMode string
 
 		// Debug flags
-		showConfig bool
-		showTokens bool
-		rawOutput  bool
-		noSWA      bool
+		showConfig     bool
+		showTokens     bool
+		rawOutput      bool
+		noSWA          bool
+		cudaWeightMode string
 		// Profiling
 		cpuProfile string
 		memProfile string
@@ -148,6 +152,18 @@ func runCmd() *cli.Command {
 			Destination: &echoPrompt,
 		},
 		&cli.StringFlag{
+			Name:        "reasoning-format",
+			Usage:       "reasoning extraction mode: auto, none, deepseek, deepseek-legacy",
+			Value:       "auto",
+			Destination: &reasoningFmt,
+		},
+		&cli.Int64Flag{
+			Name:        "reasoning-budget",
+			Usage:       "reasoning budget control: -1 unrestricted, 0 disable thinking in template when supported",
+			Value:       -1,
+			Destination: &reasoningBgt,
+		},
+		&cli.StringFlag{
 			Name:    "cache-type-k",
 			Aliases: []string{"cache_type_k", "ctk"},
 			Usage:   "KV cache data type for K (f32, f16, q8_0)",
@@ -237,6 +253,12 @@ func runCmd() *cli.Command {
 			Usage:       "disable sliding window attention (force full-size KV cache)",
 			Destination: &noSWA,
 		},
+		&cli.StringFlag{
+			Name:        "cuda-weight-mode",
+			Usage:       "cuda weight loading mode: auto, quant, dequant",
+			Value:       "auto",
+			Destination: &cudaWeightMode,
+		},
 		// Profiling flags
 		&cli.StringFlag{
 			Name:        "cpuprofile",
@@ -263,6 +285,24 @@ func runCmd() *cli.Command {
 			cfg := LoadConfig()
 			applyRunConfig(c, cfg, &modelsPath, &temp, &topK, &topP, &repeatPenalty,
 				&steps, &seed, &streamMode)
+			if reasoningBgt != -1 && reasoningBgt != 0 {
+				return cli.Exit("error: --reasoning-budget must be -1 or 0", 1)
+			}
+			switch reasoningFmt {
+			case "auto", "none", "deepseek", "deepseek-legacy":
+			default:
+				return cli.Exit("error: --reasoning-format must be one of: auto, none, deepseek, deepseek-legacy", 1)
+			}
+			switch strings.ToLower(strings.TrimSpace(cudaWeightMode)) {
+			case "auto", "quant", "dequant":
+				_ = os.Setenv("MANTLE_CUDA_WEIGHT_MODE", strings.ToLower(strings.TrimSpace(cudaWeightMode)))
+			default:
+				return cli.Exit("error: --cuda-weight-mode must be one of: auto, quant, dequant", 1)
+			}
+			// Keep verbose CUDA diagnostics gated behind debug mode.
+			if debug && os.Getenv("MANTLE_CUDA_TRACE") == "" {
+				_ = os.Setenv("MANTLE_CUDA_TRACE", "1")
+			}
 
 			if cpuProfile != "" {
 				f, err := os.Create(cpuProfile)
@@ -414,12 +454,15 @@ func runCmd() *cli.Command {
 			stepsVal := int(steps)
 			seedVal := seed
 			baseOpts := inference.RequestOptions{
-				Steps:       &stepsVal,
-				Seed:        &seedVal,
-				MinP:        &minP,
-				RepeatLastN: &repeatLastNVal,
-				NoTemplate:  &noTemplate,
+				Steps:           &stepsVal,
+				Seed:            &seedVal,
+				MinP:            &minP,
+				RepeatLastN:     &repeatLastNVal,
+				NoTemplate:      &noTemplate,
+				ReasoningFormat: &reasoningFmt,
 			}
+			reasoningBudgetVal := int(reasoningBgt)
+			baseOpts.ReasoningBudget = &reasoningBudgetVal
 			if isSet("temp", "temperature", "t") {
 				baseOpts.Temperature = &temp
 			}
@@ -639,16 +682,45 @@ func runCmd() *cli.Command {
 
 				if showConfig {
 					log.Info("streaming mode", "mode", mode)
+					log.Info("reasoning mode", "format", reasoningFmt, "budget", reasoningBgt)
 				}
 
 				writer := NewStreamWriter(mode, rawOutput)
+				var split reasoning.Splitter
+				reasoningOpen := false
+				assistantStarted := false
 				result, err := loadResult.Engine.Generate(ctx, &req, func(s string) {
-					writer.Write(s)
+					contentDelta, reasoningDelta := split.Push(s)
+					if reasoningDelta != "" && reasoningFmt != "none" {
+						if !reasoningOpen {
+							fmt.Print("\x1b[2m")
+							reasoningOpen = true
+						}
+						fmt.Print(reasoningDelta)
+					}
+					if contentDelta != "" {
+						if reasoningOpen {
+							fmt.Print("\x1b[0m")
+							reasoningOpen = false
+						}
+						if !assistantStarted && !rawOutput {
+							fmt.Print("\nassistant: ")
+							assistantStarted = true
+						}
+						writer.Write(contentDelta)
+					}
 				})
-				responseText := writer.Flush()
+				if reasoningOpen {
+					fmt.Print("\x1b[0m")
+				}
+				streamedText := writer.Flush()
 				if err != nil {
 					log.Error("generation failed", "error", err)
 					break
+				}
+				responseText := result.Text
+				if responseText == "" {
+					responseText = streamedText
 				}
 
 				if !rawOutput {
@@ -663,7 +735,6 @@ func runCmd() *cli.Command {
 					"duration", result.Stats.Duration,
 				)
 
-				// Append assistant response to history
 				msgs = append(msgs, tokenizer.Message{Role: "assistant", Content: responseText})
 
 				if !interactive {
