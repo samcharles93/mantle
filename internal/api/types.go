@@ -18,6 +18,8 @@ type ResponsesRequest struct {
 	PromptCacheKey       string             `json:"prompt_cache_key,omitempty"`
 	PromptCacheRetention string             `json:"prompt_cache_retention,omitempty"`
 	Reasoning            *ResponseReasoning `json:"reasoning,omitempty"`
+	ReasoningFormat      string             `json:"reasoning_format,omitempty"`
+	ReasoningBudget      *int               `json:"reasoning_budget,omitempty"`
 	SafetyIdentifier     string             `json:"safety_identifier,omitempty"`
 	ServiceTier          string             `json:"service_tier,omitempty"`
 	Store                *bool              `json:"store,omitempty"`
@@ -49,6 +51,7 @@ type ResponsesResponse struct {
 	Model                string              `json:"model,omitempty"`
 	Output               []ResponseItem      `json:"output,omitempty"`
 	OutputText           string              `json:"output_text,omitempty"`
+	ReasoningText        string              `json:"reasoning_text,omitempty"`
 	ParallelToolCalls    *bool               `json:"parallel_tool_calls,omitempty"`
 	PreviousResponseID   string              `json:"previous_response_id,omitempty"`
 	Prompt               map[string]any      `json:"prompt,omitempty"`

@@ -7,18 +7,22 @@ import (
 
 	"github.com/labstack/echo/v5"
 	"github.com/samcharles93/mantle/internal/inference"
+	"github.com/samcharles93/mantle/internal/reasoning"
 )
 
 type SSEStreamWriter struct {
-	w             io.Writer
-	flusher       func()
-	startingAfter int
-	seq           int
-	itemID        string
-	outputIndex   int
-	contentIndex  int
-	startedItem   bool
-	begun         bool
+	w               io.Writer
+	flusher         func()
+	startingAfter   int
+	seq             int
+	itemID          string
+	outputIndex     int
+	contentIndex    int
+	startedItem     bool
+	startedTextPart bool
+	begun           bool
+	splitter        reasoning.Splitter
+	hadReasoning    bool
 }
 
 func NewSSEStreamWriter(c *echo.Context) (*SSEStreamWriter, error) {
@@ -75,27 +79,36 @@ func (s *SSEStreamWriter) Started() bool {
 }
 
 func (s *SSEStreamWriter) EmitToken(delta string) error {
-	if !s.startedItem {
-		s.itemID = newOutputItemID()
-		s.startedItem = true
-		added := ResponseItem{
-			ID:      s.itemID,
-			Type:    "message",
-			Role:    "assistant",
-			Status:  "in_progress",
-			Content: []ResponseContent{},
+	contentDelta, reasoningDelta := s.splitter.Push(delta)
+	if reasoningDelta != "" {
+		if err := s.ensureOutputItem(); err != nil {
+			return err
 		}
+		s.hadReasoning = true
 		if err := s.send(map[string]any{
-			"type":            "response.output_item.added",
+			"type":            "response.output_reasoning.delta",
+			"item_id":         s.itemID,
 			"output_index":    s.outputIndex,
-			"item":            added,
+			"content_index":   s.contentIndex,
+			"delta":           reasoningDelta,
 			"sequence_number": s.seq,
 		}); err != nil {
 			return err
 		}
 		s.flush()
 		s.seq++
+	}
 
+	if contentDelta == "" {
+		return nil
+	}
+
+	if !s.startedItem {
+		if err := s.ensureOutputItem(); err != nil {
+			return err
+		}
+	}
+	if !s.startedTextPart {
 		part := ResponseContent{
 			Type: "output_text",
 			Text: "",
@@ -112,6 +125,7 @@ func (s *SSEStreamWriter) EmitToken(delta string) error {
 		}
 		s.flush()
 		s.seq++
+		s.startedTextPart = true
 	}
 
 	if err := s.send(map[string]any{
@@ -119,7 +133,33 @@ func (s *SSEStreamWriter) EmitToken(delta string) error {
 		"item_id":         s.itemID,
 		"output_index":    s.outputIndex,
 		"content_index":   s.contentIndex,
-		"delta":           delta,
+		"delta":           contentDelta,
+		"sequence_number": s.seq,
+	}); err != nil {
+		return err
+	}
+	s.flush()
+	s.seq++
+	return nil
+}
+
+func (s *SSEStreamWriter) ensureOutputItem() error {
+	if s.startedItem {
+		return nil
+	}
+	s.itemID = newOutputItemID()
+	s.startedItem = true
+	added := ResponseItem{
+		ID:      s.itemID,
+		Type:    "message",
+		Role:    "assistant",
+		Status:  "in_progress",
+		Content: []ResponseContent{},
+	}
+	if err := s.send(map[string]any{
+		"type":            "response.output_item.added",
+		"output_index":    s.outputIndex,
+		"item":            added,
 		"sequence_number": s.seq,
 	}); err != nil {
 		return err
@@ -130,49 +170,68 @@ func (s *SSEStreamWriter) EmitToken(delta string) error {
 }
 
 func (s *SSEStreamWriter) Complete(resp ResponsesResponse, result *inference.Result) error {
-	if s.startedItem {
+	if s.hadReasoning {
 		if err := s.send(map[string]any{
-			"type":            "response.output_text.done",
+			"type":            "response.output_reasoning.done",
 			"item_id":         s.itemID,
 			"output_index":    s.outputIndex,
 			"content_index":   s.contentIndex,
-			"text":            result.Text,
+			"text":            result.ReasoningText,
 			"sequence_number": s.seq,
 		}); err != nil {
 			return err
 		}
 		s.flush()
 		s.seq++
+	}
+	if s.startedItem {
+		if s.startedTextPart {
+			if err := s.send(map[string]any{
+				"type":            "response.output_text.done",
+				"item_id":         s.itemID,
+				"output_index":    s.outputIndex,
+				"content_index":   s.contentIndex,
+				"text":            result.Text,
+				"sequence_number": s.seq,
+			}); err != nil {
+				return err
+			}
+			s.flush()
+			s.seq++
 
-		if err := s.send(map[string]any{
-			"type":          "response.content_part.done",
-			"item_id":       s.itemID,
-			"output_index":  s.outputIndex,
-			"content_index": s.contentIndex,
-			"part": ResponseContent{
-				Type: "output_text",
-				Text: result.Text,
-			},
-			"sequence_number": s.seq,
-		}); err != nil {
-			return err
-		}
-		s.flush()
-		s.seq++
-
-		if err := s.send(map[string]any{
-			"type":         "response.output_item.done",
-			"output_index": s.outputIndex,
-			"item": ResponseItem{
-				ID:     s.itemID,
-				Type:   "message",
-				Role:   "assistant",
-				Status: "completed",
-				Content: []ResponseContent{{
+			if err := s.send(map[string]any{
+				"type":          "response.content_part.done",
+				"item_id":       s.itemID,
+				"output_index":  s.outputIndex,
+				"content_index": s.contentIndex,
+				"part": ResponseContent{
 					Type: "output_text",
 					Text: result.Text,
-				}},
-			},
+				},
+				"sequence_number": s.seq,
+			}); err != nil {
+				return err
+			}
+			s.flush()
+			s.seq++
+		}
+
+		item := ResponseItem{
+			ID:     s.itemID,
+			Type:   "message",
+			Role:   "assistant",
+			Status: "completed",
+		}
+		if s.startedTextPart {
+			item.Content = []ResponseContent{{
+				Type: "output_text",
+				Text: result.Text,
+			}}
+		}
+		if err := s.send(map[string]any{
+			"type":            "response.output_item.done",
+			"output_index":    s.outputIndex,
+			"item":            item,
 			"sequence_number": s.seq,
 		}); err != nil {
 			return err

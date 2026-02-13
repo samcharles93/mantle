@@ -10,11 +10,26 @@ import (
 )
 
 type InferenceService struct {
-	provider EngineProvider
+	provider               EngineProvider
+	defaultReasoningFormat string
+	defaultReasoningBudget int
 }
 
 func NewInferenceService(provider EngineProvider) *InferenceService {
-	return &InferenceService{provider: provider}
+	return &InferenceService{
+		provider:               provider,
+		defaultReasoningFormat: "auto",
+		defaultReasoningBudget: -1,
+	}
+}
+
+func (s *InferenceService) SetReasoningDefaults(format string, budget int) {
+	if format != "" {
+		s.defaultReasoningFormat = format
+	}
+	if budget == -1 || budget == 0 {
+		s.defaultReasoningBudget = budget
+	}
 }
 
 type StreamWriter interface {
@@ -71,7 +86,7 @@ func (s *InferenceService) CreateResponse(ctx context.Context, req *ResponsesReq
 	}
 
 	err = s.provider.WithEngine(ctx, req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
-		reqOpts := toInferenceRequest(req, msgs, defaults)
+		reqOpts := toInferenceRequest(req, msgs, defaults, s.defaultReasoningFormat, s.defaultReasoningBudget)
 		result, genErr := engine.Generate(ctx, &reqOpts, func(tok string) {
 			if stream != nil {
 				_ = stream.EmitToken(tok)
@@ -85,11 +100,16 @@ func (s *InferenceService) CreateResponse(ctx context.Context, req *ResponsesReq
 		returnResp.CompletedAt = &now
 		returnResp.Output = buildOutputMessage(result.Text)
 		returnResp.OutputText = result.Text
+		returnResp.ReasoningText = result.ReasoningText
 		returnResp.Usage = &ResponseUsage{
 			InputTokens:  approximateTokenCount(inputItems),
 			OutputTokens: approximateTokenCount(returnResp.Output),
 			TotalTokens:  approximateTokenCount(inputItems) + approximateTokenCount(returnResp.Output),
 		}
+		if returnResp.Usage.OutputTokensDetails == nil {
+			returnResp.Usage.OutputTokensDetails = &ResponseTokenDetails{}
+		}
+		returnResp.Usage.OutputTokensDetails.ReasoningTokens = max(len([]rune(result.ReasoningText))/4, 0)
 		if stream != nil {
 			if err := stream.Complete(returnResp, result); err != nil {
 				return err
@@ -125,12 +145,14 @@ var timeNow = func() time.Time {
 	return time.Now()
 }
 
-func toInferenceRequest(req *ResponsesRequest, msgs []tokenizer.Message, defaults inference.GenDefaults) inference.Request {
+func toInferenceRequest(req *ResponsesRequest, msgs []tokenizer.Message, defaults inference.GenDefaults, defaultReasoningFormat string, defaultReasoningBudget int) inference.Request {
 	var opts inference.RequestOptions
 	opts.Messages = msgs
 	opts.Tools = toolsToAny(req.Tools)
 	opts.NoTemplate = boolPtr(false)
 	opts.EchoPrompt = boolPtr(false)
+	opts.ReasoningFormat = stringPtr(defaultReasoningFormat)
+	opts.ReasoningBudget = intPtr(defaultReasoningBudget)
 
 	if req.MaxOutputTokens != nil {
 		steps := int(*req.MaxOutputTokens)
@@ -144,6 +166,12 @@ func toInferenceRequest(req *ResponsesRequest, msgs []tokenizer.Message, default
 	}
 	if req.TopLogprobs != nil {
 		_ = req.TopLogprobs
+	}
+	if req.ReasoningFormat != "" {
+		opts.ReasoningFormat = stringPtr(req.ReasoningFormat)
+	}
+	if req.ReasoningBudget != nil {
+		opts.ReasoningBudget = req.ReasoningBudget
 	}
 
 	return inference.ResolveRequest(opts, defaults)
@@ -176,5 +204,13 @@ func buildOutputMessage(text string) []ResponseItem {
 }
 
 func boolPtr(v bool) *bool {
+	return &v
+}
+
+func intPtr(v int) *int {
+	return &v
+}
+
+func stringPtr(v string) *string {
 	return &v
 }

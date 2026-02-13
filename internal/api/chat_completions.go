@@ -109,16 +109,34 @@ func (s *Server) RegisterChatCompletions(e *echo.Echo) {
 }
 
 func (s *Server) handleListModels(c *echo.Context) error {
+	modelIDs := []string{"mantle"}
+	if s.service != nil && s.service.provider != nil {
+		if provider, ok := s.service.provider.(interface {
+			ListModels() ([]string, error)
+		}); ok {
+			discovered, err := provider.ListModels()
+			if err != nil {
+				return writeError(c, http.StatusInternalServerError, "server_error", err.Error(), "", "")
+			}
+			if len(discovered) > 0 {
+				modelIDs = discovered
+			}
+		}
+	}
+
+	data := make([]map[string]any, 0, len(modelIDs))
+	for _, id := range modelIDs {
+		data = append(data, map[string]any{
+			"id":       id,
+			"object":   "model",
+			"created":  time.Now().Unix(),
+			"owned_by": "local",
+		})
+	}
+
 	return c.JSON(http.StatusOK, map[string]any{
 		"object": "list",
-		"data": []map[string]any{
-			{
-				"id":       "mantle",
-				"object":   "model",
-				"created":  time.Now().Unix(),
-				"owned_by": "local",
-			},
-		},
+		"data":   data,
 	})
 }
 
