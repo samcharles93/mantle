@@ -704,7 +704,7 @@ func runCmd() *cli.Command {
 							reasoningOpen = false
 						}
 						if !assistantStarted && !rawOutput {
-							fmt.Print("\nassistant: ")
+							fmt.Print("\n")
 							assistantStarted = true
 						}
 						writer.Write(contentDelta)
