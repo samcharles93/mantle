@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"unsafe"
 
@@ -75,6 +76,14 @@ const (
 	quantMatFormatCachedInt8 quantMatFormat = iota
 	quantMatFormatQ4Raw
 	quantMatFormatK4Raw
+)
+
+type cudaWeightMode int
+
+const (
+	cudaWeightModeAuto cudaWeightMode = iota
+	cudaWeightModeQuant
+	cudaWeightModeDequant
 )
 
 func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
@@ -173,18 +182,36 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	mode := currentCUDAWeightMode()
 	uploadMat := func(name string, mat *simd.Mat) error {
 		if mat == nil {
 			return nil
 		}
-		if useQuantKernel() && mat.Quant != nil && mat.Quant.ValidFor(mat) {
+		preferQuant := shouldPreferQuantWeights(mat, mode)
+		if preferQuant {
 			if _, err := o.ensureQuantMat(mat); err != nil {
-				return fmt.Errorf("%s: %w", name, err)
+				if mode == cudaWeightModeQuant {
+					return fmt.Errorf(
+						"%s: quant preload failed (dtype=%s shape=[%d %d] raw=%d): %w",
+						name, dtypeString(mat.DType), mat.R, mat.C, len(mat.Raw), err,
+					)
+				}
+				if cudaTraceEnabled() {
+					fmt.Fprintf(
+						os.Stderr,
+						"CUDA preload fallback %s: quant path failed (dtype=%s shape=[%d %d] raw=%d): %v\n",
+						name, dtypeString(mat.DType), mat.R, mat.C, len(mat.Raw), err,
+					)
+				}
+			} else {
+				return nil
 			}
-			return nil
 		}
 		if _, err := o.deviceMat(mat); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+			return fmt.Errorf(
+				"%s: device upload failed (mode=%s dtype=%s shape=[%d %d] raw=%d): %w",
+				name, cudaWeightModeString(mode), dtypeString(mat.DType), mat.R, mat.C, len(mat.Raw), err,
+			)
 		}
 		return nil
 	}
@@ -389,6 +416,10 @@ func (o *Ops) MatVec(dst []float32, w *simd.Mat, x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	if useQuantKernel() && shouldPreferQuantWeights(w, currentCUDAWeightMode()) {
+		o.matVecQuant(dst, w, x)
+		return
+	}
 	if useQuantKernel() && w.Quant != nil && w.Quant.ValidFor(w) {
 		o.matVecQuant(dst, w, x)
 		return
@@ -497,6 +528,15 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 		return false
 	}
 	if o == nil || layer == nil || layer.FfnUp == nil || layer.FfnGate == nil || layer.FfnDown == nil {
+		return false
+	}
+	// In quant-first modes, FFN fastpath would force dequantized deviceMat uploads for
+	// quantized FFN weights. Keep stable behavior by using the regular quant matvec path.
+	mode := currentCUDAWeightMode()
+	if mode != cudaWeightModeDequant &&
+		(shouldPreferQuantWeights(layer.FfnUp, mode) ||
+			shouldPreferQuantWeights(layer.FfnGate, mode) ||
+			shouldPreferQuantWeights(layer.FfnDown, mode)) {
 		return false
 	}
 	if len(x) < layer.FfnUp.C || len(out) < layer.FfnDown.R {
@@ -842,7 +882,7 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, 
 		return false
 	}
 
-	if useQuantKernel() && layer.Wo.Quant != nil && layer.Wo.Quant.ValidFor(layer.Wo) {
+	if useQuantKernel() && (shouldPreferQuantWeights(layer.Wo, currentCUDAWeightMode()) || (layer.Wo.Quant != nil && layer.Wo.Quant.ValidFor(layer.Wo))) {
 		qw, err := o.ensureQuantMat(layer.Wo)
 		if err != nil {
 			return false
@@ -1196,6 +1236,12 @@ func (o *Ops) uploadQuantAsF16Device(w *simd.Mat) (native.DeviceBuffer, error) {
 			_ = out.Free()
 			return native.DeviceBuffer{}, err
 		}
+		if cudaTraceEnabled() {
+			if err := o.stream.Synchronize(); err != nil {
+				_ = out.Free()
+				return native.DeviceBuffer{}, err
+			}
+		}
 	case mcf.DTypeK4:
 		v, err := parseK4PayloadView(w)
 		if err != nil {
@@ -1213,6 +1259,12 @@ func (o *Ops) uploadQuantAsF16Device(w *simd.Mat) (native.DeviceBuffer, error) {
 		if err := native.DequantizeK4ToF16(qBuf, superBuf, subBuf, out, w.R, v.blocksPerRow, w.C, o.stream); err != nil {
 			_ = out.Free()
 			return native.DeviceBuffer{}, err
+		}
+		if cudaTraceEnabled() {
+			if err := o.stream.Synchronize(); err != nil {
+				_ = out.Free()
+				return native.DeviceBuffer{}, err
+			}
 		}
 	default:
 		_ = out.Free()
@@ -1242,7 +1294,15 @@ func decodeQuantToF16(w *simd.Mat) ([]uint16, error) {
 }
 
 func useQuantKernel() bool {
-	return envEnabled("MANTLE_CUDA_QUANT_KERNEL")
+	if _, ok := os.LookupEnv("MANTLE_CUDA_QUANT_KERNEL"); ok {
+		return envEnabled("MANTLE_CUDA_QUANT_KERNEL")
+	}
+	return currentCUDAWeightMode() != cudaWeightModeDequant
+}
+
+func useK4RawKernel() bool {
+	// K4 raw CUDA kernels are currently opt-in; default to cached int8 path for stability.
+	return envEnabled("MANTLE_CUDA_K4_RAW")
 }
 
 func useLegacyStreamSync() bool {
@@ -1281,6 +1341,51 @@ func envEnabled(name string) bool {
 	}
 }
 
+func cudaTraceEnabled() bool {
+	return os.Getenv("MANTLE_CUDA_TRACE") != ""
+}
+
+func cudaWeightModeString(mode cudaWeightMode) string {
+	switch mode {
+	case cudaWeightModeQuant:
+		return "quant"
+	case cudaWeightModeDequant:
+		return "dequant"
+	default:
+		return "auto"
+	}
+}
+
+func currentCUDAWeightMode() cudaWeightMode {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("MANTLE_CUDA_WEIGHT_MODE")))
+	switch v {
+	case "quant":
+		return cudaWeightModeQuant
+	case "dequant":
+		return cudaWeightModeDequant
+	default:
+		return cudaWeightModeAuto
+	}
+}
+
+func shouldPreferQuantWeights(mat *simd.Mat, mode cudaWeightMode) bool {
+	if mat == nil {
+		return false
+	}
+	if !mcf.DTypeRequiresAligned64(mat.DType) || len(mat.Raw) == 0 {
+		return false
+	}
+	switch mode {
+	case cudaWeightModeQuant:
+		return true
+	case cudaWeightModeDequant:
+		return false
+	default:
+		// Memory-safe default: keep quantized payloads on-device unless explicitly overridden.
+		return true
+	}
+}
+
 func (o *Ops) waitForResult(hostDst unsafe.Pointer, devSrc native.DeviceBuffer, bytes int64) error {
 	if useLegacyStreamSync() {
 		if err := native.MemcpyD2HAsync(hostDst, devSrc, bytes, o.stream); err != nil {
@@ -1311,7 +1416,7 @@ func (o *Ops) ensureQuantMat(w *simd.Mat) (deviceQuantMat, error) {
 		runtime.KeepAlive(w)
 		return info, nil
 	}
-	if w.DType == mcf.DTypeK4 && len(w.Raw) > 0 {
+	if w.DType == mcf.DTypeK4 && len(w.Raw) > 0 && useK4RawKernel() {
 		info, err := o.ensureQuantMatK4Raw(w)
 		if err != nil {
 			return deviceQuantMat{}, err
@@ -1319,6 +1424,13 @@ func (o *Ops) ensureQuantMat(w *simd.Mat) (deviceQuantMat, error) {
 		o.qweights[w] = info
 		runtime.KeepAlive(w)
 		return info, nil
+	}
+	if w.Quant == nil && mcf.DTypeRequiresAligned64(w.DType) && len(w.Raw) > 0 {
+		qc, err := simd.BuildQuantCache(w)
+		if err != nil {
+			return deviceQuantMat{}, fmt.Errorf("quant cache build failed for %s matrix [%d x %d]: %w", dtypeString(w.DType), w.R, w.C, err)
+		}
+		w.Quant = qc
 	}
 	if w.Quant == nil || !w.Quant.ValidFor(w) {
 		return deviceQuantMat{}, fmt.Errorf("missing quant cache")
@@ -1808,6 +1920,74 @@ func bf16FromF32(v float32) uint16 {
 	// Round-to-nearest-even on truncated 16 bits to match SIMD path.
 	rnd := uint32(0x7FFF + ((u >> 16) & 1))
 	return uint16((u + rnd) >> 16)
+}
+
+func estimateModelWeightBytes(m *simd.Instance, mode cudaWeightMode) int64 {
+	if m == nil {
+		return 0
+	}
+	var total int64
+	addMat := func(mat *simd.Mat) {
+		total += estimateMatBytes(mat, mode)
+	}
+	addNorm := func(v []float32) {
+		total += int64(len(v)) * 4
+	}
+
+	addMat(m.Embeddings)
+	addMat(m.Output)
+	addNorm(m.OutputNorm)
+	for i := range m.Layers {
+		layer := &m.Layers[i]
+		addNorm(layer.AttnNorm)
+		addNorm(layer.PostAttnNorm)
+		addNorm(layer.FfnNorm)
+		addNorm(layer.PostFfnNorm)
+		addNorm(layer.AttnQNorm)
+		addNorm(layer.AttnKNorm)
+		addMat(layer.Wq)
+		addMat(layer.Wk)
+		addMat(layer.Wv)
+		addMat(layer.Wo)
+		addMat(layer.AttnGate)
+		addMat(layer.ShortConvKernel)
+		addMat(layer.ShortConvInProj)
+		addMat(layer.ShortConvOutProj)
+		addMat(layer.FfnUp)
+		addMat(layer.FfnGate)
+		addMat(layer.FfnDown)
+		if layer.MoE != nil {
+			addMat(layer.MoE.Router)
+			addMat(layer.MoE.Shared.Up)
+			addMat(layer.MoE.Shared.Gate)
+			addMat(layer.MoE.Shared.Down)
+			for j := range layer.MoE.Experts {
+				addMat(layer.MoE.Experts[j].Up)
+				addMat(layer.MoE.Experts[j].Gate)
+				addMat(layer.MoE.Experts[j].Down)
+			}
+		}
+	}
+	return total
+}
+
+func estimateMatBytes(mat *simd.Mat, mode cudaWeightMode) int64 {
+	if mat == nil {
+		return 0
+	}
+	if shouldPreferQuantWeights(mat, mode) {
+		if len(mat.Raw) > 0 {
+			return int64(len(mat.Raw))
+		}
+	}
+	// Dequantized upload target is fp16 for quant payloads.
+	if mcf.DTypeRequiresAligned64(mat.DType) && len(mat.Raw) > 0 {
+		return int64(mat.R) * int64(mat.C) * 2
+	}
+	if len(mat.Raw) > 0 {
+		return int64(len(mat.Raw))
+	}
+	return int64(len(mat.Data)) * 4
 }
 
 func dtypeString(dt mcf.TensorDType) string {

@@ -59,6 +59,31 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 
 	ops := NewOps(stream, blas)
 	m.SetOps(ops)
+	mode := currentCUDAWeightMode()
+	estimatedWeights := estimateModelWeightBytes(m, mode)
+	if freeBytes, totalBytes, memErr := native.MemInfo(); memErr == nil {
+		if os.Getenv("MANTLE_CUDA_TRACE") != "" {
+			fmt.Fprintf(
+				os.Stderr,
+				"CUDA mem preflight: free=%d MiB total=%d MiB estimated_weight=%d MiB mode=%s\n",
+				freeBytes/1024/1024,
+				totalBytes/1024/1024,
+				estimatedWeights/1024/1024,
+				cudaWeightModeString(mode),
+			)
+		}
+		// Keep a safety headroom for KV + scratch allocations.
+		if mode == cudaWeightModeDequant && estimatedWeights > int64(float64(freeBytes)*0.90) {
+			_ = ops.Close()
+			_ = blas.Destroy()
+			_ = stream.Destroy()
+			return nil, fmt.Errorf(
+				"cuda preload aborted: dequant mode likely exceeds free VRAM (need ~%d MiB weights, free %d MiB). try --cuda-weight-mode quant",
+				estimatedWeights/1024/1024,
+				freeBytes/1024/1024,
+			)
+		}
+	}
 	preloadStart := time.Now()
 	if err := ops.PreloadModelWeights(m); err != nil {
 		_ = ops.Close()

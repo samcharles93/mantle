@@ -17,6 +17,7 @@ extern cudaError_t cudaStreamSynchronize(cudaStream_t stream);
 extern cudaError_t cudaMalloc(void** ptr, unsigned long long size);
 extern cudaError_t cudaMallocManaged(void** ptr, unsigned long long size, unsigned int flags);
 extern cudaError_t cudaFree(void* ptr);
+extern cudaError_t cudaMemGetInfo(unsigned long long* free_bytes, unsigned long long* total_bytes);
 extern cudaError_t cudaMemcpy(void* dst, const void* src, unsigned long long size, int kind);
 extern cudaError_t cudaMemcpyAsync(void* dst, const void* src, unsigned long long size, int kind, cudaStream_t stream);
 extern cudaError_t cudaMallocHost(void** ptr, unsigned long long size);
@@ -241,6 +242,11 @@ static int mantleCudaMallocManaged(void** ptr, unsigned long long size) {
 
 static int mantleCudaFree(void* ptr) {
 	cudaError_t err = cudaFree(ptr);
+	return (int)err;
+}
+
+static int mantleCudaMemGetInfo(unsigned long long* free_bytes, unsigned long long* total_bytes) {
+	cudaError_t err = cudaMemGetInfo(free_bytes, total_bytes);
 	return (int)err;
 }
 
@@ -671,6 +677,15 @@ func DeviceCount() (int, error) {
 		return 0, err
 	}
 	return int(count), nil
+}
+
+func MemInfo() (freeBytes int64, totalBytes int64, err error) {
+	var freeC C.ulonglong
+	var totalC C.ulonglong
+	if e := cudaErr(C.mantleCudaMemGetInfo(&freeC, &totalC)); e != nil {
+		return 0, 0, e
+	}
+	return int64(freeC), int64(totalC), nil
 }
 
 type DeviceAttribute int
