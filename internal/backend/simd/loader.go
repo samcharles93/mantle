@@ -146,6 +146,13 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	}
 
 	ffnLength := cfg.IntermediateSize
+	if len(cfg.FeedForwardLength) > 0 {
+		for _, n := range cfg.FeedForwardLength {
+			if n > ffnLength {
+				ffnLength = n
+			}
+		}
+	}
 	if ffnLength <= 0 {
 		ffnLength = inferFFNLength(src, names, 0)
 	}
@@ -198,6 +205,15 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	if len(cfg.LayerTypes) == blockCount {
 		layerTypes = make([]string, blockCount)
 		copy(layerTypes, cfg.LayerTypes)
+	} else if len(cfg.SlidingWindowPattern.Pattern) == blockCount && cfg.SlidingWindow > 0 {
+		layerTypes = make([]string, blockCount)
+		for i := range cfg.SlidingWindowPattern.Pattern {
+			if cfg.SlidingWindowPattern.Pattern[i] {
+				layerTypes[i] = "sliding_attention"
+			} else {
+				layerTypes[i] = "full_attention"
+			}
+		}
 	} else if cfg.GlobalAttnEveryN > 0 && cfg.SlidingWindow > 0 {
 		layerTypes = make([]string, blockCount)
 		for i := 0; i < blockCount; i++ {
@@ -1083,6 +1099,9 @@ func blockCountForConfig(cfg *model.HFConfig, spec *model.ArchSpec) (int, error)
 	}
 	if cfg.NumHiddenLayers > 0 {
 		return cfg.NumHiddenLayers, nil
+	}
+	if len(cfg.FeedForwardLength) > 0 {
+		return len(cfg.FeedForwardLength), nil
 	}
 	if len(cfg.LayerTypes) > 0 {
 		return len(cfg.LayerTypes), nil
