@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -130,6 +131,40 @@ func (p *CachedEngineProvider) modelsDir() string {
 	return strings.TrimSpace(os.Getenv(envMantleModelsDir))
 }
 
+func (p *CachedEngineProvider) ListModels() ([]string, error) {
+	seen := map[string]struct{}{}
+	models := make([]string, 0)
+
+	add := func(path string) {
+		id := modelIDFromPath(path)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		models = append(models, id)
+	}
+
+	if strings.TrimSpace(p.cfg.DefaultModelPath) != "" {
+		add(p.cfg.DefaultModelPath)
+	}
+
+	if dir := p.modelsDir(); dir != "" {
+		discovered, err := discoverModels(dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, path := range discovered {
+			add(path)
+		}
+	}
+
+	sort.Strings(models)
+	return models, nil
+}
+
 func looksLikePath(v string) bool {
 	if strings.Contains(v, string(filepath.Separator)) {
 		return true
@@ -186,4 +221,15 @@ func fileExists(path string) bool {
 	}
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func modelIDFromPath(path string) string {
+	base := filepath.Base(strings.TrimSpace(path))
+	if base == "." || base == "" {
+		return ""
+	}
+	if strings.HasSuffix(strings.ToLower(base), ".mcf") {
+		return base[:len(base)-4]
+	}
+	return base
 }
