@@ -187,3 +187,40 @@ func TestCompactAndInputTokensEndpoints(t *testing.T) {
 		t.Fatalf("expected positive token count, got %d", tokResp.InputTokens)
 	}
 }
+
+func TestPreviousResponseIDCarriesHistoryButStoresOnlyCurrentInput(t *testing.T) {
+	t.Parallel()
+
+	e := newTestEcho()
+
+	first := doJSON(t, e, http.MethodPost, "/v1/responses", `{"input":"hello"}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first create status: got %d body=%s", first.Code, first.Body.String())
+	}
+	var firstResp ResponsesResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+
+	secondBody := `{"previous_response_id":"` + firstResp.ID + `","input":"follow-up"}`
+	second := doJSON(t, e, http.MethodPost, "/v1/responses", secondBody)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second create status: got %d body=%s", second.Code, second.Body.String())
+	}
+	var secondResp ResponsesResponse
+	if err := json.Unmarshal(second.Body.Bytes(), &secondResp); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+
+	items := doJSON(t, e, http.MethodGet, "/v1/responses/"+secondResp.ID+"/input_items", "")
+	if items.Code != http.StatusOK {
+		t.Fatalf("input_items status: got %d body=%s", items.Code, items.Body.String())
+	}
+	var list ResponseInputItemList
+	if err := json.Unmarshal(items.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode input_items: %v", err)
+	}
+	if len(list.Data) != 1 {
+		t.Fatalf("expected only current turn input item, got %d", len(list.Data))
+	}
+}

@@ -58,6 +58,28 @@ func (s *Server) handleCreateResponse(c *echo.Context) error {
 		return writeBadRequest(c, "previous_response_id and conversation are mutually exclusive")
 	}
 
+	var (
+		saveInputItems     []ResponseItem
+		overrideInputItems bool
+	)
+	if req.PreviousResponseID != "" {
+		historyItems, err := s.resolvePreviousInputItems(req.PreviousResponseID)
+		if err != nil {
+			return writeBadRequest(c, err.Error())
+		}
+		currentItems, err := normalizeInputItems(req.Input)
+		if err != nil {
+			return writeBadRequest(c, fmt.Sprintf("input: %v", err))
+		}
+		merged := make([]ResponseItem, 0, len(historyItems)+len(currentItems))
+		merged = append(merged, historyItems...)
+		merged = append(merged, currentItems...)
+		req.Input = merged
+
+		saveInputItems = currentItems
+		overrideInputItems = true
+	}
+
 	var writer *SSEStreamWriter
 	var streamWriter StreamWriter
 	if req.Stream != nil && *req.Stream {
@@ -81,13 +103,47 @@ func (s *Server) handleCreateResponse(c *echo.Context) error {
 	}
 
 	if resp != nil {
-		s.store.Save(*resp, inputItems)
+		if overrideInputItems {
+			s.store.Save(*resp, saveInputItems)
+		} else {
+			s.store.Save(*resp, inputItems)
+		}
 	}
 
 	if writer != nil {
 		return nil
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) resolvePreviousInputItems(responseID string) ([]ResponseItem, error) {
+	if strings.TrimSpace(responseID) == "" {
+		return nil, fmt.Errorf("previous_response_id is required")
+	}
+	visited := make(map[string]struct{})
+	chain := make([]*responseRecord, 0, 8)
+	id := responseID
+	for id != "" {
+		if _, ok := visited[id]; ok {
+			return nil, fmt.Errorf("previous_response_id chain contains a cycle")
+		}
+		visited[id] = struct{}{}
+
+		rec, ok := s.store.Get(id)
+		if !ok || !rec.Visible {
+			return nil, fmt.Errorf("previous_response_id %q not found", id)
+		}
+		chain = append(chain, rec)
+		id = rec.Response.PreviousResponseID
+	}
+
+	merged := make([]ResponseItem, 0, len(chain)*2)
+	for i := len(chain) - 1; i >= 0; i-- {
+		rec := chain[i]
+		merged = append(merged, rec.InputItems...)
+		merged = append(merged, rec.Response.Output...)
+	}
+	return merged, nil
 }
 
 func (s *Server) handleGetResponse(c *echo.Context) error {
