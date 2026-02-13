@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mantle Console</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+  <script type="importmap">
+  {
+    "imports": {
+      "preact": "https://esm.sh/preact@10.23.1",
+      "preact/hooks": "https://esm.sh/preact@10.23.1/hooks",
+      "htm/preact": "https://esm.sh/htm@3.1.1/preact?external=preact"
+    }
+  }
+  </script>
+
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="modulepreload" href="https://esm.sh/preact@10.23.1">
+  <link rel="modulepreload" href="/static/app.js">
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

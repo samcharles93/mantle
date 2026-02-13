@@ -21,18 +21,21 @@ type HFConfig struct {
 	RopeParameters    *ropeParams  `json:"rope_parameters"`
 
 	// MoE specific fields.
-	MoEIntermediateSize  int     `json:"moe_intermediate_size"`
-	NumDenseLayers       int     `json:"num_dense_layers"`
-	NumSharedExperts     int     `json:"num_shared_experts"`
-	RouteScale           float64 `json:"route_scale"`
-	SlidingWindow        int     `json:"sliding_window"`
-	SlidingWindowPattern int     `json:"sliding_window_pattern"`
-	GlobalAttnEveryN     int     `json:"global_attn_every_n_layers"`
-	AttentionBias        bool    `json:"attention_bias"`
-	MuPEnabled           bool    `json:"mup_enabled"`
+	MoEIntermediateSize  int                        `json:"moe_intermediate_size"`
+	NumDenseLayers       int                        `json:"num_dense_layers"`
+	NumSharedExperts     int                        `json:"num_shared_experts"`
+	RouteScale           float64                    `json:"route_scale"`
+	SlidingWindow        int                        `json:"sliding_window"`
+	SlidingWindowPattern SlidingWindowPatternConfig `json:"sliding_window_pattern"`
+	SharedKVLayers       int                        `json:"shared_kv_layers"`
+	SharedKVLayersAlt    int                        `json:"attention.shared_kv_layers"`
+	GlobalAttnEveryN     int                        `json:"global_attn_every_n_layers"`
+	AttentionBias        bool                       `json:"attention_bias"`
+	MuPEnabled           bool                       `json:"mup_enabled"`
 
 	HiddenSize        int     `json:"hidden_size"`
 	IntermediateSize  int     `json:"intermediate_size"`
+	FeedForwardLength []int   `json:"feed_forward_length"`
 	NumHiddenLayers   int     `json:"num_hidden_layers"`
 	HeadDim           int     `json:"head_dim"`
 	RMSNormEps        float64 `json:"rms_norm_eps"`
@@ -72,6 +75,32 @@ type HFConfig struct {
 	NumExpertsPerTok  int `json:"num_experts_per_tok"`
 	MoENumExperts     int `json:"moe_num_experts"`
 	MoENumExpertsUsed int `json:"moe_num_experts_used"`
+}
+
+type SlidingWindowPatternConfig struct {
+	EveryN  int
+	Pattern []bool
+}
+
+func (c *SlidingWindowPatternConfig) UnmarshalJSON(data []byte) error {
+	if c == nil {
+		return fmt.Errorf("nil sliding window pattern receiver")
+	}
+	*c = SlidingWindowPatternConfig{}
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		c.EveryN = n
+		return nil
+	}
+	var list []bool
+	if err := json.Unmarshal(data, &list); err == nil {
+		c.Pattern = list
+		return nil
+	}
+	return fmt.Errorf("sliding_window_pattern must be int or bool array")
 }
 
 type ropeScaling struct {
@@ -183,8 +212,11 @@ func LoadHFConfigBytes(raw []byte) (*HFConfig, error) {
 	if err := mergeTextConfigMissing(&cfg, raw); err != nil {
 		return nil, err
 	}
-	if cfg.GlobalAttnEveryN == 0 && cfg.SlidingWindowPattern > 0 {
-		cfg.GlobalAttnEveryN = cfg.SlidingWindowPattern
+	if cfg.GlobalAttnEveryN == 0 && cfg.SlidingWindowPattern.EveryN > 0 {
+		cfg.GlobalAttnEveryN = cfg.SlidingWindowPattern.EveryN
+	}
+	if cfg.SharedKVLayers == 0 && cfg.SharedKVLayersAlt > 0 {
+		cfg.SharedKVLayers = cfg.SharedKVLayersAlt
 	}
 	if cfg.HiddenSize == 0 && cfg.BlockDim > 0 {
 		cfg.HiddenSize = cfg.BlockDim
@@ -248,6 +280,9 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	if dst.IntermediateSize == 0 && textCfg.IntermediateSize > 0 {
 		dst.IntermediateSize = textCfg.IntermediateSize
 	}
+	if len(dst.FeedForwardLength) == 0 && len(textCfg.FeedForwardLength) > 0 {
+		dst.FeedForwardLength = textCfg.FeedForwardLength
+	}
 	if dst.NumHiddenLayers == 0 && textCfg.NumHiddenLayers > 0 {
 		dst.NumHiddenLayers = textCfg.NumHiddenLayers
 	}
@@ -288,8 +323,17 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	if dst.SlidingWindow == 0 && textCfg.SlidingWindow > 0 {
 		dst.SlidingWindow = textCfg.SlidingWindow
 	}
-	if dst.SlidingWindowPattern == 0 && textCfg.SlidingWindowPattern > 0 {
-		dst.SlidingWindowPattern = textCfg.SlidingWindowPattern
+	if dst.SlidingWindowPattern.EveryN == 0 && textCfg.SlidingWindowPattern.EveryN > 0 {
+		dst.SlidingWindowPattern.EveryN = textCfg.SlidingWindowPattern.EveryN
+	}
+	if len(dst.SlidingWindowPattern.Pattern) == 0 && len(textCfg.SlidingWindowPattern.Pattern) > 0 {
+		dst.SlidingWindowPattern.Pattern = textCfg.SlidingWindowPattern.Pattern
+	}
+	if dst.SharedKVLayers == 0 && textCfg.SharedKVLayers > 0 {
+		dst.SharedKVLayers = textCfg.SharedKVLayers
+	}
+	if dst.SharedKVLayersAlt == 0 && textCfg.SharedKVLayersAlt > 0 {
+		dst.SharedKVLayersAlt = textCfg.SharedKVLayersAlt
 	}
 	if dst.GlobalAttnEveryN == 0 && textCfg.GlobalAttnEveryN > 0 {
 		dst.GlobalAttnEveryN = textCfg.GlobalAttnEveryN
