@@ -7,6 +7,8 @@ package native
 // Minimal CUDA runtime forward declarations to avoid requiring headers at compile time.
 // Linker will still require libcudart when building with the cuda tag.
 typedef void* cudaStream_t;
+typedef void* cudaGraph_t;
+typedef void* cudaGraphExec_t;
 typedef int cudaError_t;
 
 extern const char* cudaGetErrorString(cudaError_t err);
@@ -14,6 +16,12 @@ extern cudaError_t cudaGetDeviceCount(int* count);
 extern cudaError_t cudaStreamCreate(cudaStream_t* stream);
 extern cudaError_t cudaStreamDestroy(cudaStream_t stream);
 extern cudaError_t cudaStreamSynchronize(cudaStream_t stream);
+extern cudaError_t cudaStreamBeginCapture(cudaStream_t stream, int mode);
+extern cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t* graph);
+extern cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t* graphExec, cudaGraph_t graph, unsigned long long flags);
+extern cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream);
+extern cudaError_t cudaGraphDestroy(cudaGraph_t graph);
+extern cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec);
 extern cudaError_t cudaMalloc(void** ptr, unsigned long long size);
 extern cudaError_t cudaMallocManaged(void** ptr, unsigned long long size, unsigned int flags);
 extern cudaError_t cudaFree(void* ptr);
@@ -162,6 +170,14 @@ extern int mantleCudaConvertF32ToF16(
 	unsigned short* out,
 	int n,
 	cudaStream_t stream);
+extern int mantleCudaShortConvDepthwise(
+	const float* proj,
+	const float* conv_w,
+	float* state,
+	float* out,
+	int embd,
+	int klen,
+	cudaStream_t stream);
 extern int launchFusedRMSNormMatVecBF16(
 	float* out,
 	const unsigned short* W,
@@ -251,6 +267,36 @@ static int mantleCudaStreamDestroy(cudaStream_t stream) {
 
 static int mantleCudaStreamSynchronize(cudaStream_t stream) {
 	cudaError_t err = cudaStreamSynchronize(stream);
+	return (int)err;
+}
+
+static int mantleCudaStreamBeginCapture(cudaStream_t stream, int mode) {
+	cudaError_t err = cudaStreamBeginCapture(stream, mode);
+	return (int)err;
+}
+
+static int mantleCudaStreamEndCapture(cudaStream_t stream, cudaGraph_t* graph) {
+	cudaError_t err = cudaStreamEndCapture(stream, graph);
+	return (int)err;
+}
+
+static int mantleCudaGraphInstantiate(cudaGraphExec_t* graphExec, cudaGraph_t graph) {
+	cudaError_t err = cudaGraphInstantiateWithFlags(graphExec, graph, 0ULL);
+	return (int)err;
+}
+
+static int mantleCudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
+	cudaError_t err = cudaGraphLaunch(graphExec, stream);
+	return (int)err;
+}
+
+static int mantleCudaGraphDestroy(cudaGraph_t graph) {
+	cudaError_t err = cudaGraphDestroy(graph);
+	return (int)err;
+}
+
+static int mantleCudaGraphExecDestroy(cudaGraphExec_t graphExec) {
+	cudaError_t err = cudaGraphExecDestroy(graphExec);
 	return (int)err;
 }
 
@@ -493,6 +539,17 @@ static int mantleCudaConvertF32ToF16Wrapper(
 	return mantleCudaConvertF32ToF16(in, out, n, stream);
 }
 
+static int mantleCudaShortConvDepthwiseWrapper(
+	const float* proj,
+	const float* conv_w,
+	float* state,
+	float* out,
+	int embd,
+	int klen,
+	cudaStream_t stream) {
+	return mantleCudaShortConvDepthwise(proj, conv_w, state, out, embd, klen, stream);
+}
+
 static int mantleCudaAttentionInnerF16CacheF32Wrapper(
 	const float* q,
 	const unsigned short* cacheK,
@@ -612,6 +669,14 @@ type Stream struct {
 	ptr C.cudaStream_t
 }
 
+type Graph struct {
+	ptr C.cudaGraph_t
+}
+
+type GraphExec struct {
+	ptr C.cudaGraphExec_t
+}
+
 type BlasHandle struct {
 	ptr C.cublasHandle_t
 }
@@ -633,6 +698,9 @@ type PerfCounters struct {
 	RMSNormCalls  int64
 	StoreKVCalls  int64
 	StreamSyncs   int64
+	GraphCaptures int64
+	GraphLaunches int64
+	GraphFailures int64
 	H2DBytes      int64
 	D2HBytes      int64
 	ManagedAllocs int64
@@ -652,6 +720,9 @@ func GetPerfCounters() PerfCounters {
 		RMSNormCalls:  globalPerfCounters.RMSNormCalls,
 		StoreKVCalls:  globalPerfCounters.StoreKVCalls,
 		StreamSyncs:   globalPerfCounters.StreamSyncs,
+		GraphCaptures: globalPerfCounters.GraphCaptures,
+		GraphLaunches: globalPerfCounters.GraphLaunches,
+		GraphFailures: globalPerfCounters.GraphFailures,
 		H2DBytes:      globalPerfCounters.H2DBytes,
 		D2HBytes:      globalPerfCounters.D2HBytes,
 		ManagedAllocs: globalPerfCounters.ManagedAllocs,
@@ -698,6 +769,24 @@ func recordStreamSync() {
 	}
 }
 
+func recordGraphCapture() {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.GraphCaptures, 1)
+	}
+}
+
+func recordGraphLaunch() {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.GraphLaunches, 1)
+	}
+}
+
+func recordGraphFailure() {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.GraphFailures, 1)
+	}
+}
+
 func recordH2D(bytes int64) {
 	if perfEnabled() {
 		atomic.AddInt64(&globalPerfCounters.H2DBytes, bytes)
@@ -731,6 +820,15 @@ func RecordRMSNorm() { recordRMSNorm() }
 
 // RecordStoreKV records a StoreKV operation.
 func RecordStoreKV() { recordStoreKV() }
+
+// RecordGraphCapture records a CUDA Graph capture event.
+func RecordGraphCapture() { recordGraphCapture() }
+
+// RecordGraphLaunch records a CUDA Graph launch event.
+func RecordGraphLaunch() { recordGraphLaunch() }
+
+// RecordGraphFailure records a CUDA Graph capture/launch failure.
+func RecordGraphFailure() { recordGraphFailure() }
 
 type CUDAError struct {
 	Code int
@@ -804,6 +902,61 @@ func (s Stream) Synchronize() error {
 	}
 	recordStreamSync()
 	return cudaErr(C.mantleCudaStreamSynchronize(s.ptr))
+}
+
+const streamCaptureModeGlobal = 0
+
+func (s Stream) BeginCapture() error {
+	if s.ptr == nil {
+		return fmt.Errorf("nil cuda stream")
+	}
+	return cudaErr(C.mantleCudaStreamBeginCapture(s.ptr, C.int(streamCaptureModeGlobal)))
+}
+
+func (s Stream) EndCapture() (Graph, error) {
+	if s.ptr == nil {
+		return Graph{}, fmt.Errorf("nil cuda stream")
+	}
+	var g C.cudaGraph_t
+	if err := cudaErr(C.mantleCudaStreamEndCapture(s.ptr, &g)); err != nil {
+		return Graph{}, err
+	}
+	return Graph{ptr: g}, nil
+}
+
+func (g Graph) Destroy() error {
+	if g.ptr == nil {
+		return nil
+	}
+	return cudaErr(C.mantleCudaGraphDestroy(g.ptr))
+}
+
+func (g Graph) Instantiate() (GraphExec, error) {
+	if g.ptr == nil {
+		return GraphExec{}, fmt.Errorf("nil cuda graph")
+	}
+	var exec C.cudaGraphExec_t
+	if err := cudaErr(C.mantleCudaGraphInstantiate(&exec, g.ptr)); err != nil {
+		return GraphExec{}, err
+	}
+	return GraphExec{ptr: exec}, nil
+}
+
+func (e GraphExec) Launch(stream Stream) error {
+	if e.ptr == nil {
+		return fmt.Errorf("nil cuda graph exec")
+	}
+	if stream.ptr == nil {
+		return fmt.Errorf("nil cuda stream")
+	}
+	return cudaErr(C.mantleCudaGraphLaunch(e.ptr, stream.ptr))
+}
+
+func (e GraphExec) Destroy() error {
+	if e.ptr == nil {
+		return nil
+	}
+	return cudaErr(C.mantleCudaGraphExecDestroy(e.ptr))
 }
 
 func AllocDevice(bytes int64) (DeviceBuffer, error) {
@@ -1219,6 +1372,24 @@ func AddVectorsF32(dst, src DeviceBuffer, n int, stream Stream) error {
 		(*C.float)(dst.ptr),
 		(*C.float)(src.ptr),
 		C.int(n),
+		stream.ptr,
+	))
+}
+
+func ShortConvDepthwise(proj, convW, state, out DeviceBuffer, embd, klen int, stream Stream) error {
+	if proj.ptr == nil || convW.ptr == nil || state.ptr == nil || out.ptr == nil {
+		return fmt.Errorf("shortconv buffer is nil")
+	}
+	if embd <= 0 || klen <= 0 {
+		return fmt.Errorf("shortconv embd/klen must be > 0")
+	}
+	return cudaErr(C.mantleCudaShortConvDepthwiseWrapper(
+		(*C.float)(proj.ptr),
+		(*C.float)(convW.ptr),
+		(*C.float)(state.ptr),
+		(*C.float)(out.ptr),
+		C.int(embd),
+		C.int(klen),
 		stream.ptr,
 	))
 }
