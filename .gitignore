@@ -5,6 +5,8 @@
 bin/*
 work/*
 
+internal/backend/cuda/native/build/
+
 .claude/
 .gemini/
 .task/
