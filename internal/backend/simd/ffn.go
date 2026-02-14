@@ -24,7 +24,15 @@ func FFN(m *Instance, layer *Layer, x []float32) []float32 {
 			ReleaseQuantVec(qx)
 		}
 	}()
+	needSync := true
+	syncOnce := func() {
+		if needSync {
+			syncDeviceSlice(m.Ops(), x)
+			needSync = false
+		}
+	}
 	ensureQX := func(w *Mat) {
+		syncOnce()
 		if qx == nil && CanUseQuantVec(w) {
 			qx = PrepareQuantVec(x)
 		}
@@ -33,6 +41,7 @@ func FFN(m *Instance, layer *Layer, x []float32) []float32 {
 		if dm != nil && dm.DeviceMatVec(dst, w, x) {
 			return
 		}
+		syncOnce()
 		ensureQX(w)
 		m.Ops().MatVecWithQuant(dst, w, x, qx)
 	}

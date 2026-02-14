@@ -14,6 +14,7 @@ func Mamba(m *Instance, layer *Layer, x []float32) []float32 {
 	if ml.InProj == nil || ml.OutProj == nil || ml.Conv == nil {
 		return nil
 	}
+	syncDeviceSlice(m.Ops(), x)
 
 	in := x
 	if scale := m.Config.Config.SSMInMultiplier; scale != 0 && scale != 1 {
