@@ -19,19 +19,16 @@ type gemmPool struct {
 }
 
 func newGemmPool() *gemmPool {
-	size := runtime.GOMAXPROCS(0)
-	if size < 1 {
-		size = 1
-	}
+	size := max(runtime.GOMAXPROCS(0), 1)
 	p := &gemmPool{
 		size:      size,
 		tasks:     make(chan gemmTask, size*2),
 		doneSlots: make(chan chan struct{}, size),
 	}
-	for i := 0; i < size; i++ {
+	for range size {
 		p.doneSlots <- make(chan struct{}, 1)
 	}
-	for w := 0; w < size; w++ {
+	for range size {
 		packB := make([]float32, maxTileK*maxTileN)
 		go func(packB []float32) {
 			for task := range p.tasks {
