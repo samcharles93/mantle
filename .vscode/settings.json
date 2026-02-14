@@ -1,8 +1,4 @@
 {
-    "go.alternateTools": {
-        "go": "go1.26rc3"
-    },
-    "go.toolsManagement.go": "go1.26rc3",
     "go.toolsEnvVars": {
         "GOEXPERIMENT": "simd"
     },
@@ -11,6 +7,5 @@
         "build.env": {
             "GOEXPERIMENT": "simd"
         },
-    },
-    "go.toolsGopath": "/home/sam/go"
+    }
 }
