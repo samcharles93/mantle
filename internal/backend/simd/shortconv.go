@@ -1,9 +1,20 @@
 package simd
 
+type shortConvFastPath interface {
+	ShortConvBlock(layer *Layer, x []float32, out []float32, embd int) bool
+}
+
 // ShortConv implements recurrent attention with a short convolution kernel.
 // This is used in architectures like Gemma3 that use hybrid attention mechanisms.
 func ShortConv(m *Instance, layer *Layer, x []float32) []float32 {
 	embd := m.Config.Config.EmbeddingLength
+
+	// Try CUDA fast path: runs InProj, conv, OutProj entirely on device
+	if fp, ok := m.Ops().(shortConvFastPath); ok && fp.ShortConvBlock(layer, x, m.Scratch.Tmp, embd) {
+		return m.Scratch.Tmp
+	}
+	syncDeviceSlice(m.Ops(), x)
+
 	m.Ops().MatVec(m.Scratch.ScProj, layer.ShortConvInProj, x)
 	b := m.Scratch.ScProj[:embd]
 	c := m.Scratch.ScProj[embd : 2*embd]

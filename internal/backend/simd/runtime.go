@@ -34,6 +34,14 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 		defer ds.EndToken(x)
 	}
 
+	type blockFlusher interface {
+		FlushBlockResult()
+	}
+	var bf blockFlusher
+	if f, ok := m.Ops().(blockFlusher); ok {
+		bf = f
+	}
+
 	for i := range m.Layers {
 		layer := &m.Layers[i]
 
@@ -86,6 +94,9 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 			opOut = Attention(m, layer, m.Scratch.Tmp, m.Pos)
 		}
 		if len(layer.PostAttnNorm) > 0 {
+			if bf != nil {
+				bf.FlushBlockResult()
+			}
 			m.Ops().RMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
 			opOut = m.Scratch.Tmp2
 		}
@@ -102,22 +113,34 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 		}
 		var ffnOut []float32
 		if layer.MoE != nil {
+			syncDeviceSlice(m.Ops(), m.Scratch.Tmp)
 			ffnOut = MoE(m, layer, m.Scratch.Tmp)
 		} else {
 			ffnOut = FFN(m, layer, m.Scratch.Tmp)
 		}
 		if len(layer.PostFfnNorm) > 0 {
+			if bf != nil {
+				bf.FlushBlockResult()
+			}
 			m.Ops().RMSNorm(m.Scratch.Tmp, ffnOut, layer.PostFfnNorm, m.RMSEpsilon)
 			ffnOut = m.Scratch.Tmp
 		}
 		addResidual(ds, x, ffnOut)
 	}
 
-	// Output norm + projection (try fused kernel)
-	if ds != nil {
-		ds.SyncHostState(x)
+	// Output norm + projection:
+	// 1) prefer device-only RMSNorm + MatVec when available
+	// 2) otherwise fallback to fused/host path
+	usedDeviceHead := false
+	if ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp, x, m.OutputNorm, m.RMSEpsilon) {
+		usedDeviceHead = ds.DeviceMatVec(m.Scratch.Logits, m.Output, m.Scratch.Tmp)
 	}
-	FusedRMSNormMatVec(m.Ops(), m.Scratch.Logits, m.Output, x, m.OutputNorm, m.RMSEpsilon, m.Scratch.Tmp)
+	if !usedDeviceHead {
+		if ds != nil {
+			ds.SyncHostState(x)
+		}
+		FusedRMSNormMatVec(m.Ops(), m.Scratch.Logits, m.Output, x, m.OutputNorm, m.RMSEpsilon, m.Scratch.Tmp)
+	}
 	if scale := m.Config.Config.LMHeadMultiplier; scale != 0 && scale != 1 {
 		s := float32(scale)
 		for i := range m.Scratch.Logits {
@@ -168,6 +191,13 @@ func (m *Instance) Reset() {
 				}
 			}
 		}
+	}
+	// Invalidate device-resident conv states so they are re-uploaded from zeroed host buffers.
+	type convResetter interface {
+		ResetConvStates()
+	}
+	if cr, ok := m.Ops().(convResetter); ok {
+		cr.ResetConvStates()
 	}
 }
 

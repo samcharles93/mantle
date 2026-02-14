@@ -26,6 +26,20 @@ func TestSamplerGreedy(t *testing.T) {
 	}
 }
 
+func TestSamplerTempZeroIsGreedy(t *testing.T) {
+	logs := []float32{-1, 5, 3, 7, 2}
+	s := NewSampler(SamplerConfig{
+		Seed:        99,
+		Temperature: 0.0, // should force greedy, regardless of top-k/p defaults
+		TopK:        40,
+		TopP:        0.95,
+	})
+	idx := s.Sample(logs, nil, nil)
+	if idx != 3 {
+		t.Fatalf("expected greedy index 3 with temp=0, got %d", idx)
+	}
+}
+
 // TestSamplerTopP ensures that setting TopP less than 1 restricts sampling to a
 // prefix of candidates.  In this contrived example, the cumulative
 // probability after the first element is >TopP, so only the first index

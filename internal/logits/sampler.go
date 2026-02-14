@@ -19,6 +19,7 @@ type SamplerConfig struct {
 type Sampler struct {
 	rng       *rand.Rand
 	cfg       SamplerConfig
+	greedy    bool
 	topIdx    []int
 	topVal    []float32
 	prob      []float64
@@ -29,6 +30,7 @@ type Sampler struct {
 
 // NewSampler returns a new sampler with the provided configuration.
 func NewSampler(cfg SamplerConfig) *Sampler {
+	greedy := cfg.Temperature <= 0
 	if cfg.Temperature <= 0 {
 		cfg.Temperature = 1
 	}
@@ -45,8 +47,9 @@ func NewSampler(cfg SamplerConfig) *Sampler {
 		cfg.RepeatLastN = 64
 	}
 	return &Sampler{
-		rng: rand.New(rand.NewSource(cfg.Seed)),
-		cfg: cfg,
+		rng:    rand.New(rand.NewSource(cfg.Seed)),
+		cfg:    cfg,
+		greedy: greedy,
 	}
 }
 
@@ -108,7 +111,7 @@ func (s *Sampler) Sample(logits []float32, recent []int, excludePenalty []int) i
 		}
 	}
 
-	if s.cfg.TopK == 1 && s.cfg.TopP >= 1 && s.cfg.Temperature == 1 {
+	if s.greedy || (s.cfg.TopK == 1 && s.cfg.TopP >= 1 && s.cfg.Temperature == 1) {
 		return argmax(logits)
 	}
 
