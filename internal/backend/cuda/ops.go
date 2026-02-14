@@ -21,11 +21,17 @@ type Ops struct {
 	stream native.Stream
 	blas   native.BlasHandle
 
-	mu          sync.Mutex
-	weights     map[*simd.Mat]deviceMat
-	qweights    map[*simd.Mat]deviceQuantMat
-	normWeights map[uintptr]native.DeviceBuffer
-	attnCaches  map[*simd.Layer]deviceAttnCache
+	mu             sync.Mutex
+	weights        map[*simd.Mat]deviceMat
+	qweights       map[*simd.Mat]deviceQuantMat
+	normWeights    map[uintptr]native.DeviceBuffer
+	attnCaches     map[*simd.Layer]deviceAttnCache
+	f16Dequant     map[*simd.Mat]native.DeviceBuffer  // Cached F16 dequantized weights
+	convKernels    map[*simd.Mat]native.DeviceBuffer  // Cached conv kernel weights on device
+	convStates     map[*simd.Layer]convDeviceState    // Per-layer conv state on device
+	convStateReady map[*simd.Layer]bool               // conv state already resident on device
+	quantGraphs    map[quantGraphKey]native.GraphExec // Cached CUDA Graph executables for quant kernels
+	ffnQuantGraphs map[ffnQuantGraphKey]native.GraphExec
 
 	xHost native.HostBuffer
 	yHost native.HostBuffer
@@ -49,6 +55,12 @@ type Ops struct {
 	xHostLen      int
 	xHostDirty    bool // host copy newer than device copy
 	xDevDirty     bool // device copy newer than host copy
+
+	// device-resident block output: avoids D2H + H2D round-trip through host
+	lastResultDev     native.DeviceBuffer // device buffer holding last block output
+	lastResultHostPtr uintptr             // host pointer the result would have been written to
+	lastResultLen     int                 // length in float32 elements
+	lastResultValid   bool                // unconsumed device result available
 
 	// persistent device mirror for the latest pre-norm output host slice
 	// produced by DeviceRMSNorm; used by DeviceMatVec to avoid H2D re-uploads.
@@ -97,6 +109,11 @@ type deviceAttnCache struct {
 	cacheLen  int
 }
 
+type convDeviceState struct {
+	buf  native.DeviceBuffer
+	size int // bytes allocated
+}
+
 type quantMatFormat int
 
 const (
@@ -104,6 +121,42 @@ const (
 	quantMatFormatQ4Raw
 	quantMatFormatK4Raw
 )
+
+type quantGraphKey struct {
+	format       quantMatFormat
+	rows         int
+	cols         int
+	blocksPerRow int
+	qPtr         uintptr
+	scalePtr     uintptr
+	superPtr     uintptr
+	subPtr       uintptr
+	xPtr         uintptr
+	yPtr         uintptr
+}
+
+type ffnQuantGraphKey struct {
+	upFormat     quantMatFormat
+	gateFormat   quantMatFormat
+	downFormat   quantMatFormat
+	interm       int
+	outRows      int
+	upQPtr       uintptr
+	upScalePtr   uintptr
+	upSuperPtr   uintptr
+	upSubPtr     uintptr
+	gateQPtr     uintptr
+	gateScalePtr uintptr
+	gateSuperPtr uintptr
+	gateSubPtr   uintptr
+	downQPtr     uintptr
+	downScalePtr uintptr
+	downSuperPtr uintptr
+	downSubPtr   uintptr
+	xPtr         uintptr
+	yPtr         uintptr
+	zPtr         uintptr
+}
 
 type cudaWeightMode int
 
@@ -115,12 +168,18 @@ const (
 
 func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 	return &Ops{
-		stream:      stream,
-		blas:        blas,
-		weights:     make(map[*simd.Mat]deviceMat),
-		qweights:    make(map[*simd.Mat]deviceQuantMat),
-		normWeights: make(map[uintptr]native.DeviceBuffer),
-		attnCaches:  make(map[*simd.Layer]deviceAttnCache),
+		stream:         stream,
+		blas:           blas,
+		weights:        make(map[*simd.Mat]deviceMat),
+		qweights:       make(map[*simd.Mat]deviceQuantMat),
+		normWeights:    make(map[uintptr]native.DeviceBuffer),
+		attnCaches:     make(map[*simd.Layer]deviceAttnCache),
+		f16Dequant:     make(map[*simd.Mat]native.DeviceBuffer),
+		convKernels:    make(map[*simd.Mat]native.DeviceBuffer),
+		convStates:     make(map[*simd.Layer]convDeviceState),
+		convStateReady: make(map[*simd.Layer]bool),
+		quantGraphs:    make(map[quantGraphKey]native.GraphExec),
+		ffnQuantGraphs: make(map[ffnQuantGraphKey]native.GraphExec),
 	}
 }
 
@@ -130,11 +189,43 @@ func (o *Ops) clearNormDeviceView() {
 	o.normDevValid = false
 }
 
+// FlushBlockResult flushes a pending device-resident block output to host.
+// Exposed for the SIMD runtime to force host visibility before host-only ops.
+func (o *Ops) FlushBlockResult() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.flushLastResult()
+}
+
+// flushLastResult writes a pending device-resident block result back to host.
+// Must be called with o.mu held.
+func (o *Ops) flushLastResult() {
+	if !o.lastResultValid {
+		return
+	}
+	bytes := int64(o.lastResultLen) * 4
+	_ = native.MemcpyD2H(unsafe.Pointer(o.lastResultHostPtr), o.lastResultDev, bytes)
+	o.lastResultValid = false
+}
+
+// ResetConvStates invalidates device-resident conv state so it will be
+// re-uploaded from (zeroed) host buffers on the next call.
+func (o *Ops) ResetConvStates() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for k := range o.convStateReady {
+		delete(o.convStateReady, k)
+	}
+	o.lastResultValid = false
+}
+
 // FusedRMSNormMatVec performs fused RMSNorm + MatVec in a single kernel
 // This eliminates one memory roundtrip compared to calling them separately
 func (o *Ops) FusedRMSNormMatVec(out []float32, w *simd.Mat, x, normWeight []float32, eps float32) bool {
+	// TODO: Fusion causes illegal memory access errors - needs investigation
+	// Enable with MANTLE_CUDA_FUSE=1 for testing
 	if os.Getenv("MANTLE_CUDA_FUSE") == "" {
-		return false // Fusion not enabled
+		return false
 	}
 
 	native.RecordRMSNorm()
@@ -392,6 +483,7 @@ func (o *Ops) BeginToken(x []float32) {
 func (o *Ops) EndToken(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.flushLastResult()
 	if len(x) == 0 || o.xHostLen == 0 || o.xHostPtr != uintptr(unsafe.Pointer(&x[0])) {
 		// Not our buffer, or no persistent buffer
 		return
@@ -432,6 +524,7 @@ func (o *Ops) HostStateDirty(x []float32) {
 func (o *Ops) SyncHostState(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.flushLastResult()
 	if len(x) == 0 || o.xHostLen == 0 || len(x) != o.xHostLen {
 		return
 	}
@@ -449,24 +542,78 @@ func (o *Ops) SyncHostState(x []float32) {
 	o.xHostDirty = false
 }
 
+// SyncDeviceSlice ensures host visibility for known device-backed scratch
+// slices (persistent x, norm output, pending block result).
+func (o *Ops) SyncDeviceSlice(x []float32) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(x) == 0 {
+		return
+	}
+	ptr := uintptr(unsafe.Pointer(&x[0]))
+	n := len(x)
+
+	// Pending block output staged for residual add.
+	if o.lastResultValid && ptr == o.lastResultHostPtr && n == o.lastResultLen {
+		o.flushLastResult()
+		return
+	}
+	// Persistent token state.
+	if o.xHostLen == n && ptr == o.xHostPtr && o.xDevDirty {
+		bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
+		if err := native.MemcpyD2H(unsafe.Pointer(&x[0]), o.xPersistDev, bytes); err != nil {
+			panic(fmt.Errorf("cuda: failed to sync persistent device slice (%d bytes): %w", bytes, err))
+		}
+		o.xDevDirty = false
+		o.xHostDirty = false
+		return
+	}
+	// RMSNorm device view.
+	if o.normDevValid && o.normHostLen == n && ptr == o.normHostPtr {
+		bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
+		if err := native.MemcpyD2H(unsafe.Pointer(&x[0]), o.normDev, bytes); err != nil {
+			panic(fmt.Errorf("cuda: failed to sync norm device slice (%d bytes): %w", bytes, err))
+		}
+		return
+	}
+}
+
 // DeviceAdd implements simd.DeviceStateOps.
 func (o *Ops) DeviceAdd(dst, src []float32) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.xHostLen == 0 || len(dst) != o.xHostLen || len(src) != o.xHostLen {
+		o.flushLastResult()
 		return false
 	}
 	if uintptr(unsafe.Pointer(&dst[0])) != o.xHostPtr {
+		o.flushLastResult()
 		return false
 	}
 	bytes := int64(len(dst)) * int64(unsafe.Sizeof(float32(0)))
 	if o.xHostDirty {
 		if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&dst[0]), bytes); err != nil {
+			o.flushLastResult()
 			return false
 		}
 		o.xHostDirty = false
 		o.xDevDirty = false
 	}
+
+	// Fast path: consume device-resident block output directly (no H2D round-trip)
+	if o.lastResultValid && uintptr(unsafe.Pointer(&src[0])) == o.lastResultHostPtr && len(src) == o.lastResultLen {
+		if err := native.AddVectorsF32(o.xPersistDev, o.lastResultDev, len(dst), o.stream); err != nil {
+			o.flushLastResult()
+			return false
+		}
+		o.lastResultValid = false
+		o.xHostDirty = false
+		o.xDevDirty = true
+		return true
+	}
+
+	// Slow path: H2D src from host
+	o.flushLastResult()
 	if err := o.ensureDeviceVecs(0, int(bytes)); err != nil {
 		return false
 	}
@@ -577,6 +724,41 @@ func (o *Ops) Close() error {
 		}
 	}
 	o.normWeights = make(map[uintptr]native.DeviceBuffer)
+
+	for _, buf := range o.f16Dequant {
+		if e := buf.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.f16Dequant = nil
+
+	for _, exec := range o.quantGraphs {
+		if e := exec.Destroy(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.quantGraphs = nil
+	for _, exec := range o.ffnQuantGraphs {
+		if e := exec.Destroy(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.ffnQuantGraphs = nil
+
+	for _, buf := range o.convKernels {
+		if e := buf.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.convKernels = nil
+
+	for _, cs := range o.convStates {
+		if e := cs.buf.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.convStates = nil
+
 	for _, cache := range o.attnCaches {
 		if e := cache.kF16.Free(); e != nil && err == nil {
 			err = e
@@ -858,9 +1040,8 @@ func (o *Ops) rmsNormWithDeviceX(dst, weight []float32, eps float32) error {
 	if err := native.RMSNormF32(o.normDev, o.xPersistDev, wDev, eps, n, o.stream); err != nil {
 		return err
 	}
-	if err := o.waitForResult(unsafe.Pointer(&dst[0]), o.normDev, bytes); err != nil {
-		return err
-	}
+	// Keep normalized vector on device; host copy is performed lazily
+	// via SyncDeviceSlice when a host fallback path needs it.
 	o.normHostPtr = uintptr(unsafe.Pointer(&dst[0]))
 	o.normHostLen = n
 	o.normDevValid = true
@@ -929,14 +1110,14 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 	if o == nil || layer == nil || layer.FfnUp == nil || layer.FfnGate == nil || layer.FfnDown == nil {
 		return false
 	}
-	// In quant-first modes, FFN fastpath would force dequantized deviceMat uploads for
-	// quantized FFN weights. Keep stable behavior by using the regular quant matvec path.
+	// When weights prefer quant path, use the quantized FFN fast path
+	// which runs all 3 projections + SiLU on device using quant kernels.
 	mode := currentCUDAWeightMode()
 	if mode != cudaWeightModeDequant &&
 		(shouldPreferQuantWeights(layer.FfnUp, mode) ||
 			shouldPreferQuantWeights(layer.FfnGate, mode) ||
 			shouldPreferQuantWeights(layer.FfnDown, mode)) {
-		return false
+		return o.quantFFNBlock(layer, x, out)
 	}
 	if len(x) < layer.FfnUp.C || len(out) < layer.FfnDown.R {
 		return false
@@ -972,7 +1153,22 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 	intermF16Bytes := int64(interm) * 2
 	outBytes := int64(downW.rows) * 4
 
-	if err := o.ensureHostVecs(int(xBytes), int(outBytes)); err != nil {
+	xInput := o.xDev
+	xInputType := upW.dtype
+	devInput, usedDeviceInput, err := o.deviceInputForVector(x[:len(x)], upW.dtype, len(x))
+	if err != nil {
+		return false
+	}
+	if usedDeviceInput {
+		xInput = devInput.buf
+		xInputType = devInput.dtype
+	}
+	hostXBytes := int(xBytes)
+	if usedDeviceInput {
+		hostXBytes = 0
+	}
+
+	if err := o.ensureHostVecs(hostXBytes, int(outBytes)); err != nil {
 		return false
 	}
 	if err := o.ensureDeviceVecs(int(xBytes), int(max64Local(intermF32Bytes, outBytes))); err != nil {
@@ -985,17 +1181,19 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 		return false
 	}
 
-	if err := fillXBuffer(o.xHost, upW.dtype, x[:len(x)]); err != nil {
-		return false
-	}
-	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
-		return false
+	if !usedDeviceInput {
+		if err := fillXBuffer(o.xHost, upW.dtype, x[:len(x)]); err != nil {
+			return false
+		}
+		if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
+			return false
+		}
 	}
 
-	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, upW.rows, 1, upW.cols, 1.0, upW.buf, upW.dtype, upW.cols, o.xDev, upW.dtype, upW.cols, 0.0, o.yDev, native.BlasF32, upW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, upW.rows, 1, upW.cols, 1.0, upW.buf, upW.dtype, upW.cols, xInput, xInputType, upW.cols, 0.0, o.yDev, native.BlasF32, upW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
 		return false
 	}
-	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, gateW.rows, 1, gateW.cols, 1.0, gateW.buf, gateW.dtype, gateW.cols, o.xDev, gateW.dtype, gateW.cols, 0.0, o.zDev, native.BlasF32, gateW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, gateW.rows, 1, gateW.cols, 1.0, gateW.buf, gateW.dtype, gateW.cols, xInput, xInputType, gateW.cols, 0.0, o.zDev, native.BlasF32, gateW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
 		return false
 	}
 
@@ -1022,6 +1220,451 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 	}
 	copy(out[:downW.rows], unsafe.Slice((*float32)(o.yHost.Ptr()), downW.rows))
 	return true
+}
+
+// quantFFNBlock runs the full FFN (Up, Gate, SiLU, Down) on device using quantized matvec kernels.
+// This avoids H2D transfers for intermediate results and keeps the entire FFN computation on-GPU.
+func (o *Ops) quantFFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
+	if len(x) < layer.FfnUp.C || len(out) < layer.FfnDown.R {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// Ensure quantized weight matrices on device
+	qUp, err := o.ensureQuantMat(layer.FfnUp)
+	if err != nil {
+		return false
+	}
+	qGate, err := o.ensureQuantMat(layer.FfnGate)
+	if err != nil {
+		return false
+	}
+	qDown, err := o.ensureQuantMat(layer.FfnDown)
+	if err != nil {
+		return false
+	}
+
+	interm := layer.FfnUp.R
+	cols := layer.FfnUp.C
+	outRows := layer.FfnDown.R
+
+	// Buffer sizes: x input (F32), intermediate (F32), output (F32)
+	xBytes := int64(cols) * 4
+	intermBytes := int64(interm) * 4
+	outBytes := int64(outRows) * 4
+
+	// Try to use device-resident x to avoid H2D copy
+	var xInput native.DeviceBuffer
+	usedDeviceInput := false
+	if o.isNormDeviceX(x) {
+		xInput = o.normDev
+		usedDeviceInput = true
+	} else if o.isDeviceX(x) {
+		if o.xHostDirty {
+			bytes := int64(o.xHostLen) * 4
+			if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&x[0]), bytes); err != nil {
+				return false
+			}
+			o.xHostDirty = false
+			o.xDevDirty = false
+		}
+		xInput = o.xPersistDev
+		usedDeviceInput = true
+	}
+
+	// Ensure device buffers: xDev for input, yDev for Up result, zDev for Gate/Down result
+	if err := o.ensureDeviceVecs(int(xBytes), int(intermBytes)); err != nil {
+		return false
+	}
+	if err := o.ensureNormTmp(int(max64Local(intermBytes, outBytes))); err != nil {
+		return false
+	}
+
+	if !usedDeviceInput {
+		// H2D copy x
+		if err := o.ensureHostVecs(int(xBytes), int(outBytes)); err != nil {
+			return false
+		}
+		copy(unsafe.Slice((*float32)(o.xHost.Ptr()), cols), x[:cols])
+		if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
+			return false
+		}
+		xInput = o.xDev
+	} else {
+		if err := o.ensureHostVecs(0, int(outBytes)); err != nil {
+			return false
+		}
+	}
+
+	if useCUDAGraphs() {
+		if err := o.runQuantFFNGraph(qUp, qGate, qDown, xInput, interm, outRows, o.stream); err != nil {
+			native.RecordGraphFailure()
+			if err := o.runQuantFFNDirect(qUp, qGate, qDown, xInput, interm, o.stream); err != nil {
+				return false
+			}
+		}
+	} else if err := o.runQuantFFNDirect(qUp, qGate, qDown, xInput, interm, o.stream); err != nil {
+		return false
+	}
+
+	// Result stays on device — DeviceAdd will consume it directly.
+	o.lastResultDev = o.zDev
+	o.lastResultHostPtr = uintptr(unsafe.Pointer(&out[0]))
+	o.lastResultLen = outRows
+	o.lastResultValid = true
+	runtime.KeepAlive(x)
+	runtime.KeepAlive(out)
+	return true
+}
+
+// runQuantKernel dispatches the appropriate quantized matvec kernel based on weight format.
+func (o *Ops) runQuantKernel(qw deviceQuantMat, xDev, yDev native.DeviceBuffer, stream native.Stream) error {
+	if useCUDAGraphs() {
+		if err := o.runQuantKernelGraph(qw, xDev, yDev, stream); err == nil {
+			return nil
+		}
+		native.RecordGraphFailure()
+	}
+
+	return runQuantKernelDirect(qw, xDev, yDev, stream)
+}
+
+func (o *Ops) runQuantKernelGraph(qw deviceQuantMat, xDev, yDev native.DeviceBuffer, stream native.Stream) error {
+	key := quantGraphKey{
+		format:       qw.format,
+		rows:         qw.rows,
+		cols:         qw.cols,
+		blocksPerRow: qw.blocksPerRow,
+		qPtr:         uintptr(qw.q.Ptr()),
+		scalePtr:     uintptr(qw.scales.Ptr()),
+		superPtr:     uintptr(qw.superScales.Ptr()),
+		subPtr:       uintptr(qw.subScales.Ptr()),
+		xPtr:         uintptr(xDev.Ptr()),
+		yPtr:         uintptr(yDev.Ptr()),
+	}
+
+	if exec, ok := o.quantGraphs[key]; ok {
+		if err := exec.Launch(stream); err != nil {
+			native.RecordGraphFailure()
+			return err
+		}
+		native.RecordGraphLaunch()
+		return nil
+	}
+
+	if err := stream.BeginCapture(); err != nil {
+		return err
+	}
+	native.RecordGraphCapture()
+
+	kernelErr := runQuantKernelDirect(qw, xDev, yDev, stream)
+	if kernelErr != nil {
+		_, _ = stream.EndCapture()
+		return kernelErr
+	}
+
+	graph, err := stream.EndCapture()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = graph.Destroy()
+	}()
+
+	exec, err := graph.Instantiate()
+	if err != nil {
+		return err
+	}
+	o.quantGraphs[key] = exec
+	if err := exec.Launch(stream); err != nil {
+		native.RecordGraphFailure()
+		return err
+	}
+	native.RecordGraphLaunch()
+	return nil
+}
+
+func runQuantKernelDirect(qw deviceQuantMat, xDev, yDev native.DeviceBuffer, stream native.Stream) error {
+	switch qw.format {
+	case quantMatFormatQ4Raw:
+		return native.QuantMatVecQ4F32(qw.q, qw.scales, xDev, yDev, qw.rows, qw.blocksPerRow, qw.cols, stream)
+	case quantMatFormatK4Raw:
+		return native.QuantMatVecK4F32(qw.q, qw.superScales, qw.subScales, xDev, yDev, qw.rows, qw.blocksPerRow, qw.cols, stream)
+	default:
+		return native.QuantMatVecInt8BlocksF32(qw.q, qw.scales, xDev, yDev, qw.rows, qw.blocksPerRow, qw.cols, stream)
+	}
+}
+
+func (o *Ops) runQuantFFNDirect(qUp, qGate, qDown deviceQuantMat, xInput native.DeviceBuffer, interm int, stream native.Stream) error {
+	if err := runQuantKernelDirect(qUp, xInput, o.yDev, stream); err != nil {
+		return err
+	}
+	if err := runQuantKernelDirect(qGate, xInput, o.zDev, stream); err != nil {
+		return err
+	}
+	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, interm, stream); err != nil {
+		return err
+	}
+	return runQuantKernelDirect(qDown, o.yDev, o.zDev, stream)
+}
+
+func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.DeviceBuffer, interm, outRows int, stream native.Stream) error {
+	key := ffnQuantGraphKey{
+		upFormat:     qUp.format,
+		gateFormat:   qGate.format,
+		downFormat:   qDown.format,
+		interm:       interm,
+		outRows:      outRows,
+		upQPtr:       uintptr(qUp.q.Ptr()),
+		upScalePtr:   uintptr(qUp.scales.Ptr()),
+		upSuperPtr:   uintptr(qUp.superScales.Ptr()),
+		upSubPtr:     uintptr(qUp.subScales.Ptr()),
+		gateQPtr:     uintptr(qGate.q.Ptr()),
+		gateScalePtr: uintptr(qGate.scales.Ptr()),
+		gateSuperPtr: uintptr(qGate.superScales.Ptr()),
+		gateSubPtr:   uintptr(qGate.subScales.Ptr()),
+		downQPtr:     uintptr(qDown.q.Ptr()),
+		downScalePtr: uintptr(qDown.scales.Ptr()),
+		downSuperPtr: uintptr(qDown.superScales.Ptr()),
+		downSubPtr:   uintptr(qDown.subScales.Ptr()),
+		xPtr:         uintptr(xInput.Ptr()),
+		yPtr:         uintptr(o.yDev.Ptr()),
+		zPtr:         uintptr(o.zDev.Ptr()),
+	}
+
+	if exec, ok := o.ffnQuantGraphs[key]; ok {
+		if err := exec.Launch(stream); err != nil {
+			native.RecordGraphFailure()
+			return err
+		}
+		native.RecordGraphLaunch()
+		return nil
+	}
+
+	if err := stream.BeginCapture(); err != nil {
+		return err
+	}
+	native.RecordGraphCapture()
+	if err := runQuantKernelDirect(qUp, xInput, o.yDev, stream); err != nil {
+		_, _ = stream.EndCapture()
+		return err
+	}
+	if err := runQuantKernelDirect(qGate, xInput, o.zDev, stream); err != nil {
+		_, _ = stream.EndCapture()
+		return err
+	}
+	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, interm, stream); err != nil {
+		_, _ = stream.EndCapture()
+		return err
+	}
+	if err := runQuantKernelDirect(qDown, o.yDev, o.zDev, stream); err != nil {
+		_, _ = stream.EndCapture()
+		return err
+	}
+
+	graph, err := stream.EndCapture()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = graph.Destroy()
+	}()
+
+	exec, err := graph.Instantiate()
+	if err != nil {
+		return err
+	}
+	o.ffnQuantGraphs[key] = exec
+	if err := exec.Launch(stream); err != nil {
+		native.RecordGraphFailure()
+		return err
+	}
+	native.RecordGraphLaunch()
+	return nil
+}
+
+// ShortConvBlock runs the full ShortConv block (InProj, depthwise conv, OutProj) on device.
+// This eliminates H2D/D2H transfers for intermediate proj and conv results.
+func (o *Ops) ShortConvBlock(layer *simd.Layer, x []float32, out []float32, embd int) bool {
+	if layer == nil || layer.ShortConvInProj == nil || layer.ShortConvOutProj == nil || layer.ShortConvKernel == nil {
+		return false
+	}
+	if layer.ShortConvState.Buf == nil || embd <= 0 {
+		return false
+	}
+
+	inProj := layer.ShortConvInProj
+	outProj := layer.ShortConvOutProj
+	kernel := layer.ShortConvKernel
+	klen := kernel.C
+	state := layer.ShortConvState.Buf
+
+	if len(x) < inProj.C || len(out) < outProj.R {
+		return false
+	}
+
+	mode := currentCUDAWeightMode()
+	if mode != cudaWeightModeDequant &&
+		!shouldPreferQuantWeights(inProj, mode) &&
+		!shouldPreferQuantWeights(outProj, mode) {
+		return false // Only use this fast path for quantized weights
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// Ensure quantized weights on device
+	qIn, err := o.ensureQuantMat(inProj)
+	if err != nil {
+		return false
+	}
+	qOut, err := o.ensureQuantMat(outProj)
+	if err != nil {
+		return false
+	}
+
+	// Upload conv kernel weights (cached, F32, embd*klen floats)
+	convWDev, err := o.ensureConvKernel(kernel)
+	if err != nil {
+		return false
+	}
+
+	// Ensure conv state device buffer (embd*(klen-1) floats)
+	stateLen := embd * (klen - 1)
+	stateBytes := int64(stateLen) * 4
+	convState, err := o.ensureConvState(layer, int(stateBytes))
+	if err != nil {
+		return false
+	}
+
+	inCols := inProj.C
+	projRows := inProj.R // 3*embd
+	outRows := outProj.R
+
+	xBytes := int64(inCols) * 4
+	projBytes := int64(projRows) * 4
+	outBytes := int64(outRows) * 4
+
+	// Try device-resident x
+	var xInput native.DeviceBuffer
+	usedDeviceInput := false
+	if o.isNormDeviceX(x) {
+		xInput = o.normDev
+		usedDeviceInput = true
+	} else if o.isDeviceX(x) {
+		if o.xHostDirty {
+			bytes := int64(o.xHostLen) * 4
+			if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&x[0]), bytes); err != nil {
+				return false
+			}
+			o.xHostDirty = false
+			o.xDevDirty = false
+		}
+		xInput = o.xPersistDev
+		usedDeviceInput = true
+	}
+
+	// Ensure device buffers
+	// yDev: proj output (3*embd), also reused for OutProj output
+	// zDev: conv output (embd), also reused for OutProj result
+	if err := o.ensureDeviceVecs(int(xBytes), int(max64Local(projBytes, outBytes))); err != nil {
+		return false
+	}
+	if err := o.ensureNormTmp(int(max64Local(int64(embd)*4, outBytes))); err != nil {
+		return false
+	}
+
+	if !usedDeviceInput {
+		if err := o.ensureHostVecs(int(xBytes), int(outBytes)); err != nil {
+			return false
+		}
+		copy(unsafe.Slice((*float32)(o.xHost.Ptr()), inCols), x[:inCols])
+		if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
+			return false
+		}
+		xInput = o.xDev
+	} else {
+		if err := o.ensureHostVecs(0, int(outBytes)); err != nil {
+			return false
+		}
+	}
+
+	// Step 1: InProj(x) → yDev [3*embd floats]
+	if err := o.runQuantKernel(qIn, xInput, o.yDev, o.stream); err != nil {
+		return false
+	}
+
+	// Step 2: H2D conv state (only on first call per layer; state stays on device after that)
+	if stateLen > 0 && !o.convStateReady[layer] {
+		if err := native.MemcpyH2DAsync(convState.buf, unsafe.Pointer(&state[0]), stateBytes, o.stream); err != nil {
+			return false
+		}
+	}
+
+	// Step 3: ShortConv depthwise kernel: proj(yDev) + convW + state → zDev
+	// Conv state is updated in-place on device by the kernel.
+	if err := native.ShortConvDepthwise(o.yDev, convWDev, convState.buf, o.zDev, embd, klen, o.stream); err != nil {
+		return false
+	}
+
+	// Mark conv state as device-resident (skip H2D on subsequent calls)
+	o.convStateReady[layer] = true
+
+	// Step 5: OutProj(convOut) → yDev
+	// zDev has the conv output (embd F32), use it as input for OutProj
+	if err := o.runQuantKernel(qOut, o.zDev, o.yDev, o.stream); err != nil {
+		return false
+	}
+
+	// Result stays on device — DeviceAdd will consume it directly.
+	o.lastResultDev = o.yDev
+	o.lastResultHostPtr = uintptr(unsafe.Pointer(&out[0]))
+	o.lastResultLen = outRows
+	o.lastResultValid = true
+	runtime.KeepAlive(x)
+	runtime.KeepAlive(out)
+	runtime.KeepAlive(state)
+	return true
+}
+
+// ensureConvKernel uploads F32 conv kernel weights to device, cached per Mat.
+func (o *Ops) ensureConvKernel(kernel *simd.Mat) (native.DeviceBuffer, error) {
+	if buf, ok := o.convKernels[kernel]; ok {
+		return buf, nil
+	}
+	n := kernel.R * kernel.C
+	bytes := int64(n) * 4
+	buf, err := native.AllocDevice(bytes)
+	if err != nil {
+		return native.DeviceBuffer{}, err
+	}
+	if err := native.MemcpyH2D(buf, unsafe.Pointer(&kernel.Data[0]), bytes); err != nil {
+		buf.Free()
+		return native.DeviceBuffer{}, err
+	}
+	o.convKernels[kernel] = buf
+	return buf, nil
+}
+
+// ensureConvState ensures a device buffer exists for the layer's conv state.
+func (o *Ops) ensureConvState(layer *simd.Layer, bytes int) (convDeviceState, error) {
+	if cs, ok := o.convStates[layer]; ok && cs.size >= bytes {
+		return cs, nil
+	}
+	// Free old if exists
+	if cs, ok := o.convStates[layer]; ok {
+		cs.buf.Free()
+		delete(o.convStates, layer)
+	}
+	buf, err := native.AllocDevice(int64(bytes))
+	if err != nil {
+		return convDeviceState{}, err
+	}
+	cs := convDeviceState{buf: buf, size: bytes}
+	o.convStates[layer] = cs
+	return cs, nil
 }
 
 func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bool {
@@ -1073,11 +1716,22 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bo
 		return false
 	}
 
-	if err := fillXBuffer(o.xHost, dq.dtype, x[:wq.C]); err != nil {
+	xInput := o.xDev
+	xInputType := dq.dtype
+	devInput, usedDeviceInput, err := o.deviceInputForVector(x[:wq.C], dq.dtype, wq.C)
+	if err != nil {
 		return false
 	}
-	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
-		return false
+	if usedDeviceInput {
+		xInput = devInput.buf
+		xInputType = devInput.dtype
+	} else {
+		if err := fillXBuffer(o.xHost, dq.dtype, x[:wq.C]); err != nil {
+			return false
+		}
+		if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
+			return false
+		}
 	}
 
 	runOne := func(out native.DeviceBuffer, w deviceMat) bool {
@@ -1092,8 +1746,8 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bo
 			w.buf,
 			w.dtype,
 			w.cols,
-			o.xDev,
-			w.dtype,
+			xInput,
+			xInputType,
 			w.cols,
 			0.0,
 			out,
@@ -1107,23 +1761,85 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bo
 	if !runOne(o.yDev, dq) || !runOne(o.zDev, dk) || !runOne(o.aDev, dv) {
 		return false
 	}
-	if err := native.MemcpyD2HAsync(o.yHost.Ptr(), o.yDev, qBytes, o.stream); err != nil {
-		return false
-	}
-	if err := native.MemcpyD2HAsync(unsafe.Add(o.yHost.Ptr(), int(qBytes)), o.zDev, kBytes, o.stream); err != nil {
-		return false
-	}
-	if err := native.MemcpyD2HAsync(unsafe.Add(o.yHost.Ptr(), int(qBytes+kBytes)), o.aDev, vBytes, o.stream); err != nil {
-		return false
-	}
-	if err := o.stream.Synchronize(); err != nil {
-		return false
+
+	qPtr := o.yHost.Ptr()
+	kPtr := unsafe.Add(qPtr, int(qBytes))
+	vPtr := unsafe.Add(qPtr, int(qBytes+kBytes))
+	if useLegacyStreamSync() {
+		if err := native.MemcpyD2HAsync(qPtr, o.yDev, qBytes, o.stream); err != nil {
+			return false
+		}
+		if err := native.MemcpyD2HAsync(kPtr, o.zDev, kBytes, o.stream); err != nil {
+			return false
+		}
+		if err := native.MemcpyD2HAsync(vPtr, o.aDev, vBytes, o.stream); err != nil {
+			return false
+		}
+		if err := o.stream.Synchronize(); err != nil {
+			return false
+		}
+	} else {
+		if err := native.MemcpyD2H(qPtr, o.yDev, qBytes); err != nil {
+			return false
+		}
+		if err := native.MemcpyD2H(kPtr, o.zDev, kBytes); err != nil {
+			return false
+		}
+		if err := native.MemcpyD2H(vPtr, o.aDev, vBytes); err != nil {
+			return false
+		}
 	}
 
-	copy(q[:dq.rows], unsafe.Slice((*float32)(o.yHost.Ptr()), dq.rows))
-	copy(k[:dk.rows], unsafe.Slice((*float32)(unsafe.Add(o.yHost.Ptr(), int(qBytes))), dk.rows))
-	copy(v[:dv.rows], unsafe.Slice((*float32)(unsafe.Add(o.yHost.Ptr(), int(qBytes+kBytes))), dv.rows))
+	copy(q[:dq.rows], unsafe.Slice((*float32)(qPtr), dq.rows))
+	copy(k[:dk.rows], unsafe.Slice((*float32)(kPtr), dk.rows))
+	copy(v[:dv.rows], unsafe.Slice((*float32)(vPtr), dv.rows))
 	return true
+}
+
+type deviceInputRef struct {
+	buf   native.DeviceBuffer
+	dtype native.BlasDataType
+}
+
+// deviceInputForVector returns a device-resident input vector when x already
+// has a tracked device mirror. If dtype is f16 and the tracked mirror is f32,
+// this converts f32->f16 on-device into o.xDev.
+// Requires o.mu locked.
+func (o *Ops) deviceInputForVector(x []float32, dtype native.BlasDataType, length int) (deviceInputRef, bool, error) {
+	var src native.DeviceBuffer
+	switch {
+	case o.isDeviceX(x):
+		if o.xHostDirty {
+			bytes := int64(o.xHostLen) * int64(unsafe.Sizeof(float32(0)))
+			if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&x[0]), bytes); err != nil {
+				return deviceInputRef{}, false, err
+			}
+			o.xHostDirty = false
+			o.xDevDirty = false
+		}
+		src = o.xPersistDev
+	case o.isNormDeviceX(x):
+		src = o.normDev
+	default:
+		return deviceInputRef{}, false, nil
+	}
+
+	switch dtype {
+	case native.BlasF32:
+		return deviceInputRef{buf: src, dtype: native.BlasF32}, true, nil
+	case native.BlasF16:
+		xBytes := int(xBufferBytes(native.BlasF16, length))
+		if err := o.ensureDeviceVecs(xBytes, 0); err != nil {
+			return deviceInputRef{}, false, err
+		}
+		if err := native.ConvertF32ToF16(src, o.xDev, length, o.stream); err != nil {
+			return deviceInputRef{}, false, err
+		}
+		return deviceInputRef{buf: o.xDev, dtype: native.BlasF16}, true, nil
+	default:
+		// BF16 and other encodings currently fall back to host upload.
+		return deviceInputRef{}, false, nil
+	}
 }
 
 func (o *Ops) AttentionInner(attnOut []float32, layer *simd.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
@@ -1474,7 +2190,8 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, 
 		}
 	}
 
-	// Copy projection result to host
+	// Keep projection result on device for residual add fast path.
+	// Runtime can force host visibility via FlushBlockResult when needed.
 	if len(layer.PostAttnNorm) > 0 {
 		// Upload norm weight if not already present
 		wDev, err := o.deviceNormWeight(layer.PostAttnNorm)
@@ -1488,17 +2205,16 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, 
 		if err := o.rmsNormDevice(o.zDev, wDev, o.aDev, projDim, epsilon); err != nil {
 			return false
 		}
-		// Copy normalized result to host
-		if err := o.waitForResult(o.yHost.Ptr(), o.aDev, projBytes); err != nil {
-			return false
-		}
+		o.lastResultDev = o.aDev
 	} else {
-		// Copy projection result directly
-		if err := o.waitForResult(o.yHost.Ptr(), o.zDev, projBytes); err != nil {
-			return false
-		}
+		o.lastResultDev = o.zDev
 	}
-	copy(projOut[:projDim], unsafe.Slice((*float32)(o.yHost.Ptr()), projDim))
+	if projDim > 0 {
+		o.lastResultHostPtr = uintptr(unsafe.Pointer(&projOut[0]))
+		o.lastResultLen = projDim
+		o.lastResultValid = true
+	}
+	runtime.KeepAlive(projOut)
 	return true
 }
 
@@ -1782,6 +2498,12 @@ func (o *Ops) deviceMat(w *simd.Mat) (deviceMat, error) {
 }
 
 func (o *Ops) uploadQuantAsF16Device(w *simd.Mat) (native.DeviceBuffer, error) {
+	// Check cache first (2-3% TPS improvement by avoiding redundant GPU dequantization)
+	if cached, ok := o.f16Dequant[w]; ok {
+		runtime.KeepAlive(w)
+		return cached, nil
+	}
+
 	if w == nil || w.Raw == nil || !mcf.DTypeRequiresAligned64(w.DType) {
 		return native.DeviceBuffer{}, fmt.Errorf("gpu dequant requires quantized raw matrix")
 	}
@@ -1816,7 +2538,7 @@ func (o *Ops) uploadQuantAsF16Device(w *simd.Mat) (native.DeviceBuffer, error) {
 			_ = out.Free()
 			return native.DeviceBuffer{}, err
 		}
-		if cudaTraceEnabled() {
+		if cudaTraceSyncEnabled() {
 			if err := o.stream.Synchronize(); err != nil {
 				_ = out.Free()
 				return native.DeviceBuffer{}, err
@@ -1840,7 +2562,7 @@ func (o *Ops) uploadQuantAsF16Device(w *simd.Mat) (native.DeviceBuffer, error) {
 			_ = out.Free()
 			return native.DeviceBuffer{}, err
 		}
-		if cudaTraceEnabled() {
+		if cudaTraceSyncEnabled() {
 			if err := o.stream.Synchronize(); err != nil {
 				_ = out.Free()
 				return native.DeviceBuffer{}, err
@@ -1851,6 +2573,9 @@ func (o *Ops) uploadQuantAsF16Device(w *simd.Mat) (native.DeviceBuffer, error) {
 		return native.DeviceBuffer{}, fmt.Errorf("gpu dequant unsupported dtype: %s", dtypeString(w.DType))
 	}
 
+	// Cache result before return
+	o.f16Dequant[w] = out
+	runtime.KeepAlive(w)
 	return out, nil
 }
 
@@ -1889,6 +2614,22 @@ func useLegacyStreamSync() bool {
 	return envEnabled("MANTLE_CUDA_LEGACY_SYNC")
 }
 
+func useCUDAGraphs() bool {
+	v, ok := os.LookupEnv("MANTLE_CUDA_GRAPHS")
+	if !ok {
+		return true
+	}
+	if b, err := strconv.ParseBool(v); err == nil {
+		return b
+	}
+	switch v {
+	case "0", "off", "OFF", "no", "NO", "n", "N":
+		return false
+	default:
+		return true
+	}
+}
+
 func useAttnSoftmaxKernel() bool {
 	return envEnabled("MANTLE_CUDA_ATTN_SOFTMAX")
 }
@@ -1923,6 +2664,10 @@ func envEnabled(name string) bool {
 
 func cudaTraceEnabled() bool {
 	return os.Getenv("MANTLE_CUDA_TRACE") != ""
+}
+
+func cudaTraceSyncEnabled() bool {
+	return envEnabled("MANTLE_CUDA_TRACE_SYNC")
 }
 
 func cudaWeightModeString(mode cudaWeightMode) string {
