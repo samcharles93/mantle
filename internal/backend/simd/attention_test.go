@@ -251,3 +251,146 @@ func compareSlices(t *testing.T, got, want []float32, tol float32) {
 		}
 	}
 }
+
+func TestAttentionSkipsStoreKVOnInnerProjectionFastPath(t *testing.T) {
+	ops := &attentionFastPathOps{
+		useQKVFastPath:             true,
+		useInnerProjectionFastPath: true,
+	}
+	m, layer := newAttentionFastPathFixture(ops)
+
+	out := Attention(m, layer, []float32{0.1, 0.2}, 0)
+	if out == nil {
+		t.Fatal("expected output")
+	}
+	if ops.storeKVCalls != 0 {
+		t.Fatalf("StoreKV calls: got %d want 0", ops.storeKVCalls)
+	}
+}
+
+func TestAttentionSkipsStoreKVOnInnerFastPath(t *testing.T) {
+	ops := &attentionFastPathOps{
+		useQKVFastPath:     true,
+		useInnerFastPath:   true,
+		innerFastPathValue: []float32{2, 3},
+	}
+	m, layer := newAttentionFastPathFixture(ops)
+
+	out := Attention(m, layer, []float32{0.1, 0.2}, 0)
+	if out == nil {
+		t.Fatal("expected output")
+	}
+	if ops.storeKVCalls != 0 {
+		t.Fatalf("StoreKV calls: got %d want 0", ops.storeKVCalls)
+	}
+	compareSlices(t, out, []float32{2, 3}, 1e-6)
+}
+
+func TestAttentionStoresKVOnFallbackPath(t *testing.T) {
+	ops := &attentionFastPathOps{
+		useQKVFastPath: true,
+	}
+	m, layer := newAttentionFastPathFixture(ops)
+
+	out := Attention(m, layer, []float32{0.1, 0.2}, 0)
+	if out == nil {
+		t.Fatal("expected output")
+	}
+	if ops.storeKVCalls != 1 {
+		t.Fatalf("StoreKV calls: got %d want 1", ops.storeKVCalls)
+	}
+}
+
+type attentionFastPathOps struct {
+	DefaultOps
+	storeKVCalls                int
+	useQKVFastPath              bool
+	useInnerFastPath            bool
+	useInnerProjectionFastPath  bool
+	innerFastPathValue          []float32
+	innerProjectionFastPathFill float32
+}
+
+func (o *attentionFastPathOps) MatVecQKV(q, k, v []float32, _ *Mat, _ *Mat, _ *Mat, _ []float32) bool {
+	if !o.useQKVFastPath {
+		return false
+	}
+	for i := range q {
+		q[i] = float32(i + 1)
+	}
+	for i := range k {
+		k[i] = float32(i + 2)
+	}
+	for i := range v {
+		v[i] = float32(i + 3)
+	}
+	return true
+}
+
+func (o *attentionFastPathOps) AttentionInner(attnOut []float32, _ *Layer, _ []float32, _ []float32, _ []float32, _ int, _ int, _ int, _ int, _ int, _ int, _ float32) bool {
+	if !o.useInnerFastPath {
+		return false
+	}
+	fill := o.innerFastPathValue
+	if len(fill) == 0 {
+		fill = []float32{1, 1}
+	}
+	copy(attnOut, fill)
+	return true
+}
+
+func (o *attentionFastPathOps) AttentionInnerProjection(projOut []float32, _ *Layer, _ []float32, _ []float32, _ []float32, _ int, _ int, _ int, _ int, _ int, _ int, _ float32, _ float32) bool {
+	if !o.useInnerProjectionFastPath {
+		return false
+	}
+	v := o.innerProjectionFastPathFill
+	if v == 0 {
+		v = 1
+	}
+	for i := range projOut {
+		projOut[i] = v
+	}
+	return true
+}
+
+func (o *attentionFastPathOps) StoreKV(layerIndex, pos, kvStride int, kDst, vDst []float32, kDst16, vDst16 []uint16, kDstQ8, vDstQ8 []int8, kDstQ8S, vDstQ8S []float32, k, v []float32) {
+	o.storeKVCalls++
+	o.DefaultOps.StoreKV(layerIndex, pos, kvStride, kDst, vDst, kDst16, vDst16, kDstQ8, vDstQ8, kDstQ8S, vDstQ8S, k, v)
+}
+
+func newAttentionFastPathFixture(ops Ops) (*Instance, *Layer) {
+	wo := NewMatFromData(2, 2, []float32{
+		1, 0,
+		0, 1,
+	})
+	layer := &Layer{
+		HeadKV: 1,
+		Wo:     &wo,
+		AttnCache: AttnCache{
+			K:        make([]float32, 0, 32),
+			V:        make([]float32, 0, 32),
+			KvStride: 2,
+			CacheLen: 16,
+		},
+	}
+	m := &Instance{
+		HeadCount:          1,
+		HeadDim:            2,
+		RMSEpsilon:         1e-6,
+		RopeInvFreq:        []float64{1.0},
+		RopeAttnScale:      1.0,
+		MaxContext:         16,
+		Scratch:            ScratchBuffers{},
+		RopeLocalOnly:      false,
+		MuPScale:           1,
+		RopeAttnScaleLocal: 1.0,
+	}
+	m.Scratch.Q = make([]float32, 2)
+	m.Scratch.K = make([]float32, 2)
+	m.Scratch.V = make([]float32, 2)
+	m.Scratch.AttnOut = make([]float32, 2)
+	m.Scratch.AttnProj = make([]float32, 2)
+	m.Scratch.Scores = make([]float32, 1)
+	m.SetOps(ops)
+	return m, layer
+}

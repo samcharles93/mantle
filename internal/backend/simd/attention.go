@@ -54,11 +54,19 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	if fp, ok := ops.(attentionQKVFastPath); ok && fp.MatVecQKV(q, k, v, layer.Wq, layer.Wk, layer.Wv, x) {
 		qx = nil
 	} else {
+		needSync := true
+		syncOnce := func() {
+			if needSync {
+				syncDeviceSlice(ops, x)
+				needSync = false
+			}
+		}
 		var dm deviceMatVecFastPath
 		if d, ok := ops.(deviceMatVecFastPath); ok {
 			dm = d
 		}
 		ensureQX := func(w *Mat) {
+			syncOnce()
 			if qx == nil && CanUseQuantVec(w) {
 				qx = PrepareQuantVec(x)
 			}
@@ -67,6 +75,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			if dm != nil && dm.DeviceMatVec(dst, w, x) {
 				return
 			}
+			syncOnce()
 			ensureQX(w)
 			ops.MatVecWithQuant(dst, w, x, qx)
 		}
@@ -121,19 +130,6 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		ops.ApplyRoPE(k, kvHeads, headDim, pos, invFreq, attnScale)
 	}
 
-	cacheLen := layer.AttnCache.CacheLen
-	cachePos := pos
-	if cacheLen > 0 {
-		cachePos = pos % cacheLen
-	}
-	layer.AttnCache.EnsurePos(cachePos)
-	ops.StoreKV(-1, cachePos, kvStride,
-		layer.AttnCache.K, layer.AttnCache.V,
-		layer.AttnCache.K16, layer.AttnCache.V16,
-		layer.AttnCache.KQ8, layer.AttnCache.VQ8,
-		layer.AttnCache.KQ8S, layer.AttnCache.VQ8S,
-		k, v)
-
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 	start := 0
 	if layer.AttnWindow > 0 {
@@ -150,7 +146,25 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		}
 	}
 
-	if fp, ok := ops.(attentionInnerFastPath); !(ok && fp.AttentionInner(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale)) {
+	usedInnerFastPath := false
+	if fp, ok := ops.(attentionInnerFastPath); ok && fp.AttentionInner(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
+		usedInnerFastPath = true
+	}
+
+	if !usedInnerFastPath {
+		cacheLen := layer.AttnCache.CacheLen
+		cachePos := pos
+		if cacheLen > 0 {
+			cachePos = pos % cacheLen
+		}
+		layer.AttnCache.EnsurePos(cachePos)
+		ops.StoreKV(-1, cachePos, kvStride,
+			layer.AttnCache.K, layer.AttnCache.V,
+			layer.AttnCache.K16, layer.AttnCache.V16,
+			layer.AttnCache.KQ8, layer.AttnCache.VQ8,
+			layer.AttnCache.KQ8S, layer.AttnCache.VQ8S,
+			k, v)
+
 		ctx := AttnContext{
 			Q:         q,
 			CacheK:    layer.AttnCache.K,
