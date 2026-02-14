@@ -130,12 +130,9 @@ func runIterate(ctx context.Context, cmd *cli.Command) error {
 
 		// B. Build Prompt
 		basePrompt := buildPrompt(promptCtx, targetRel, cmd.String("bench"))
-		retries := int(cmd.Int("retry-apply"))
-		if retries < 1 {
-			retries = 1
-		}
+		retries := max(int(cmd.Int("retry-apply")), 1)
 		lastReject := ""
-		for attempt := 0; attempt < retries; attempt++ {
+		for attempt := range retries {
 			prompt := basePrompt
 			if attempt > 0 {
 				prompt = buildRetryPrompt(basePrompt, attempt, lastReject)

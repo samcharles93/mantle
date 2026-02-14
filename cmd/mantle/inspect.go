@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -533,7 +534,7 @@ func printTensorSummary(indexBytes, quantBytes []byte) {
 	dtypeCounts := map[mcf.TensorDType]int{}
 	dtypeBytes := map[mcf.TensorDType]uint64{}
 	var total uint64
-	for i := 0; i < count; i++ {
+	for i := range count {
 		entry, err := idx.Entry(i)
 		if err != nil {
 			continue
@@ -548,7 +549,7 @@ func printTensorSummary(indexBytes, quantBytes []byte) {
 	for k := range dtypeCounts {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	slices.Sort(keys)
 	for _, k := range keys {
 		row(fmt.Sprintf("dtype_%s", dtypeName(k)), fmt.Sprintf("%d (%s)", dtypeCounts[k], formatBytes(dtypeBytes[k])))
 	}
@@ -585,7 +586,7 @@ func printTensorIndex(indexBytes, quantBytes []byte, filter string, limit int, s
 
 	count := idx.Count()
 	printed := 0
-	for i := 0; i < count; i++ {
+	for i := range count {
 		name, err := idx.Name(i)
 		if err != nil {
 			continue

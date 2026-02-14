@@ -133,10 +133,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 	start := 0
 	if layer.AttnWindow > 0 {
-		start = pos - layer.AttnWindow + 1
-		if start < 0 {
-			start = 0
-		}
+		start = max(pos-layer.AttnWindow+1, 0)
 	}
 
 	// Combined attention inner + projection fast path (no gate)
@@ -195,12 +192,9 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			chunk := (nHead + workers - 1) / workers
 			done := <-pool.DoneSlots
 			activeWorkers := 0
-			for i := 0; i < workers; i++ {
+			for i := range workers {
 				rs := i * chunk
-				re := rs + chunk
-				if re > nHead {
-					re = nHead
-				}
+				re := min(rs+chunk, nHead)
 				if rs >= re {
 					break
 				}

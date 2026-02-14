@@ -410,14 +410,14 @@ func quantizeQ(src []float32, rows, cols, bits int, minClip, maxClip float32) ([
 	qMax := int32((1 << (bits - 1)) - 1)
 
 	if bits == 8 {
-		for r := 0; r < rows; r++ {
+		for r := range rows {
 			rowBase := r * cols
 			rowLimit := rowBase + cols
-			for b := 0; b < blocksPerRow; b++ {
+			for b := range blocksPerRow {
 				blockIdx := r*blocksPerRow + b
 				base := rowBase + b*blockSize
 				maxAbs := float32(0)
-				for i := 0; i < blockSize; i++ {
+				for i := range blockSize {
 					idx := base + i
 					v := float32(0)
 					if idx < rowLimit {
@@ -437,7 +437,7 @@ func quantizeQ(src []float32, rows, cols, bits int, minClip, maxClip float32) ([
 					inv = float32(1.0) / scale
 				}
 				dataOff := blockIdx * blockBytes
-				for i := 0; i < blockSize; i++ {
+				for i := range blockSize {
 					idx := base + i
 					v := float32(0)
 					if idx < rowLimit {
@@ -457,14 +457,14 @@ func quantizeQ(src []float32, rows, cols, bits int, minClip, maxClip float32) ([
 			}
 		}
 	} else {
-		for r := 0; r < rows; r++ {
+		for r := range rows {
 			rowBase := r * cols
 			rowLimit := rowBase + cols
-			for b := 0; b < blocksPerRow; b++ {
+			for b := range blocksPerRow {
 				blockIdx := r*blocksPerRow + b
 				base := rowBase + b*blockSize
 				maxAbs := float32(0)
-				for i := 0; i < blockSize; i++ {
+				for i := range blockSize {
 					idx := base + i
 					v := float32(0)
 					if idx < rowLimit {
@@ -543,15 +543,15 @@ func quantizeK(src []float32, rows, cols, bits int, minClip, maxClip float32) ([
 	packer := newBitPacker(blockCount * blockSize * bits)
 	qMax := int32((1 << (bits - 1)) - 1)
 
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		rowBase := r * cols
 		rowLimit := rowBase + cols
 
-		for s := 0; s < superBlocksPerRow; s++ {
+		for s := range superBlocksPerRow {
 			var blockScales [8]float32
 			maxScale := float32(0)
 
-			for b := 0; b < superBlocks; b++ {
+			for b := range superBlocks {
 				block := s*superBlocks + b
 				if block >= blocksPerRow {
 					blockScales[b] = 0
@@ -559,7 +559,7 @@ func quantizeK(src []float32, rows, cols, bits int, minClip, maxClip float32) ([
 				}
 				maxAbs := float32(0)
 				base := rowBase + block*blockSize
-				for i := 0; i < blockSize; i++ {
+				for i := range blockSize {
 					idx := base + i
 					v := float32(0)
 					if idx < rowLimit {
@@ -583,7 +583,7 @@ func quantizeK(src []float32, rows, cols, bits int, minClip, maxClip float32) ([
 			superIdx := r*superBlocksPerRow + s
 			superScales[superIdx] = simd.Float32ToFloat16(superScale)
 
-			for b := 0; b < superBlocks; b++ {
+			for b := range superBlocks {
 				block := s*superBlocks + b
 				if block >= blocksPerRow {
 					continue
@@ -612,7 +612,7 @@ func quantizeK(src []float32, rows, cols, bits int, minClip, maxClip float32) ([
 				}
 
 				base := rowBase + block*blockSize
-				for i := 0; i < blockSize; i++ {
+				for i := range blockSize {
 					idx := base + i
 					v := float32(0)
 					if idx < rowLimit {
@@ -657,7 +657,7 @@ func newBitPacker(totalBits int) *bitPacker {
 }
 
 func (p *bitPacker) write(v uint8, bits int) {
-	for i := 0; i < bits; i++ {
+	for i := range bits {
 		if (v>>uint(i))&1 == 1 {
 			byteIdx := p.bitPos / 8
 			bitIdx := uint(p.bitPos % 8)

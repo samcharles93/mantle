@@ -116,7 +116,7 @@ func (f *File) ReadTensorF32(name string) ([]float32, TensorInfo, error) {
 			return nil, TensorInfo{}, fmt.Errorf("tensor %s: invalid f32 data size", name)
 		}
 		out := make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[i*4:]))
 		}
 		return out, info, nil
@@ -125,7 +125,7 @@ func (f *File) ReadTensorF32(name string) ([]float32, TensorInfo, error) {
 			return nil, TensorInfo{}, fmt.Errorf("tensor %s: invalid bf16 data size", name)
 		}
 		out := make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			u := binary.LittleEndian.Uint16(raw[i*2:])
 			out[i] = bf16ToF32(u)
 		}
@@ -135,7 +135,7 @@ func (f *File) ReadTensorF32(name string) ([]float32, TensorInfo, error) {
 			return nil, TensorInfo{}, fmt.Errorf("tensor %s: invalid f16 data size", name)
 		}
 		out := make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			u := binary.LittleEndian.Uint16(raw[i*2:])
 			out[i] = fp16ToFloat32(u)
 		}

@@ -1,6 +1,7 @@
 package inference
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/samcharles93/mantle/internal/tokenizer"
@@ -16,10 +17,8 @@ func BuildStopTokens(tok tokenizer.Tokenizer, cfg tokenizer.TokenizerConfig) []i
 		if id < 0 {
 			return
 		}
-		for _, v := range stopTokens {
-			if v == id {
-				return
-			}
+		if slices.Contains(stopTokens, id) {
+			return
 		}
 		stopTokens = append(stopTokens, id)
 	}

@@ -32,10 +32,7 @@ type AttnPool struct {
 }
 
 func AttnWorkersFor(nHead int) int {
-	workers := runtime.GOMAXPROCS(0)
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(runtime.GOMAXPROCS(0), 1)
 	if nHead > 0 && workers > nHead {
 		workers = nHead
 	}

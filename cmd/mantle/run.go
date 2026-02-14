@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -418,12 +419,7 @@ func runCmd() *cli.Command {
 			// Resolve effective chat template once for show-config and rendering.
 			effectiveTemplate, templateSource := inference.ResolveChatTemplate(chatTemplate, tokConfig, modelCfg.Arch, loadResult.HFConfigJSON)
 			isSet := func(names ...string) bool {
-				for _, n := range names {
-					if c.IsSet(n) {
-						return true
-					}
-				}
-				return false
+				return slices.ContainsFunc(names, c.IsSet)
 			}
 			tempFromGen := !isSet("temp", "temperature", "t") && genDefaults.Temperature != nil && *genDefaults.Temperature > 0
 			topKFromGen := !isSet("top-k", "top_k", "topk") && genDefaults.TopK != nil && *genDefaults.TopK > 0

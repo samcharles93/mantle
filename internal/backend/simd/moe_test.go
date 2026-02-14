@@ -42,7 +42,7 @@ func BenchmarkSelectTopK(b *testing.B) {
 	const n = 128
 	sel := make([]float32, n)
 	raw := make([]float32, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		sel[i] = float32(i%7) / 7.0
 		raw[i] = float32(i%11) / 11.0
 	}

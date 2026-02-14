@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -374,18 +375,21 @@ func joinStrings(parts []string, sep string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	result := parts[0]
+	var result strings.Builder
+	result.WriteString(parts[0])
 	for _, p := range parts[1:] {
-		result += sep + p
+		result.WriteString(sep + p)
 	}
-	return result
+	return result.String()
 }
 
 func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message, defaults inference.GenDefaults) inference.Request {
 	var opts inference.RequestOptions
 	opts.Messages = msgs
-	opts.NoTemplate = boolPtr(false)
-	opts.EchoPrompt = boolPtr(false)
+	opts.NoTemplate = new(bool)
+	*opts.NoTemplate = false
+	opts.EchoPrompt = new(bool)
+	*opts.EchoPrompt = false
 
 	maxToks := req.MaxTokens
 	if req.MaxCompletionTokens != nil {

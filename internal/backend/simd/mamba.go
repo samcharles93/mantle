@@ -107,7 +107,7 @@ func Mamba(m *Instance, layer *Layer, x []float32) []float32 {
 func mambaDepthwiseConv(out, in []float32, kernel *Mat, bias []float32, state []float32) {
 	kernelLen := kernel.C
 	channels := kernel.R
-	for c := 0; c < channels; c++ {
+	for c := range channels {
 		row := kernel.Row(c)
 		sum := float32(0)
 		if len(bias) == channels {
@@ -140,11 +140,11 @@ func mambaScan(out []float32, ml *MambaLayer, x []float32, dt []float32, b []flo
 		dA := float32(math.Exp(float64(a * dtH)))
 		bGroup := b[group*dState : (group+1)*dState]
 		cGroup := c[group*dState : (group+1)*dState]
-		for p := 0; p < headDim; p++ {
+		for p := range headDim {
 			xhp := x[h*headDim+p]
 			stateBase := (h*headDim + p) * dState
 			var sum float32
-			for n := 0; n < dState; n++ {
+			for n := range dState {
 				idx := stateBase + n
 				ml.SSMState[idx] = ml.SSMState[idx]*dA + dtH*bGroup[n]*xhp
 				sum += cGroup[n] * ml.SSMState[idx]

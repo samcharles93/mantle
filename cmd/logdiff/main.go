@@ -219,10 +219,7 @@ func (a *diffAccumulator) add(s diffStats) {
 }
 
 func diffLogits(a, b []float32, topK int) diffStats {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
+	n := min(len(b), len(a))
 	if n == 0 {
 		return diffStats{}
 	}
@@ -238,7 +235,7 @@ func diffLogits(a, b []float32, topK int) diffStats {
 	top1B := 0
 	maxA := a[0]
 	maxB := b[0]
-	for i := 0; i < n; i++ {
+	for i := range n {
 		da := float64(a[i])
 		db := float64(b[i])
 		diff := da - db

@@ -768,7 +768,7 @@ func dotInt8Int16(q []int8, x []int16, n int) int32 {
 
 func dotInt8Float32Scalar(q []int8, x []float32, n int) float32 {
 	var sum float32
-	for i := 0; i < n; i++ {
+	for i := range n {
 		sum += float32(q[i]) * x[i]
 	}
 	return sum

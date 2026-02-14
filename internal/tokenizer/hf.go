@@ -3,6 +3,7 @@ package tokenizer
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
 	"strconv"
 	"strings"
@@ -197,9 +198,7 @@ func parseHFTokenizerJSON(tokJSON []byte) (hfTokenizerJSON, map[string]int, erro
 	}
 
 	encoder := make(map[string]int, len(tj.Model.Vocab)+len(tj.AddedTokens))
-	for tok, id := range tj.Model.Vocab {
-		encoder[tok] = id
-	}
+	maps.Copy(encoder, tj.Model.Vocab)
 	for _, at := range tj.AddedTokens {
 		encoder[at.Content] = at.ID
 	}

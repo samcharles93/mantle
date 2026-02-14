@@ -273,7 +273,7 @@ func ParseModelInfo(data []byte) (*ModelInfo, error) {
 	}
 
 	extras := make(map[string]any, kvCount)
-	for i := uint32(0); i < kvCount; i++ {
+	for i := range kvCount {
 		var kv ModelInfoKV
 		off := fixed.KVOff + uint64(i)*uint64(binary.Size(ModelInfoKV{}))
 		if err := readStructAt(data, off, &kv); err != nil {

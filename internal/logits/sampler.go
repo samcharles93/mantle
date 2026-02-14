@@ -68,10 +68,7 @@ func NewSampler(cfg SamplerConfig) *Sampler {
 //     truncated distribution.
 func (s *Sampler) Sample(logits []float32, recent []int, excludePenalty []int) int {
 	if s.cfg.RepeatPenalty > 1.0 && len(recent) > 0 {
-		start := len(recent) - s.cfg.RepeatLastN
-		if start < 0 {
-			start = 0
-		}
+		start := max(len(recent)-s.cfg.RepeatLastN, 0)
 		window := recent[start:]
 
 		if len(s.seenMark) < len(logits) {

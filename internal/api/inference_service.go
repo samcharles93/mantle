@@ -149,10 +149,12 @@ func toInferenceRequest(req *ResponsesRequest, msgs []tokenizer.Message, default
 	var opts inference.RequestOptions
 	opts.Messages = msgs
 	opts.Tools = toolsToAny(req.Tools)
-	opts.NoTemplate = boolPtr(false)
-	opts.EchoPrompt = boolPtr(false)
-	opts.ReasoningFormat = stringPtr(defaultReasoningFormat)
-	opts.ReasoningBudget = intPtr(defaultReasoningBudget)
+	opts.NoTemplate = new(bool)
+	*opts.NoTemplate = false
+	opts.EchoPrompt = new(bool)
+	*opts.EchoPrompt = false
+	opts.ReasoningFormat = &defaultReasoningFormat
+	opts.ReasoningBudget = &defaultReasoningBudget
 
 	if req.MaxOutputTokens != nil {
 		steps := int(*req.MaxOutputTokens)
@@ -168,7 +170,7 @@ func toInferenceRequest(req *ResponsesRequest, msgs []tokenizer.Message, default
 		_ = req.TopLogprobs
 	}
 	if req.ReasoningFormat != "" {
-		opts.ReasoningFormat = stringPtr(req.ReasoningFormat)
+		opts.ReasoningFormat = &req.ReasoningFormat
 	}
 	if req.ReasoningBudget != nil {
 		opts.ReasoningBudget = req.ReasoningBudget
@@ -201,16 +203,4 @@ func buildOutputMessage(text string) []ResponseItem {
 			Text: text,
 		}},
 	}}
-}
-
-func boolPtr(v bool) *bool {
-	return &v
-}
-
-func intPtr(v int) *int {
-	return &v
-}
-
-func stringPtr(v string) *string {
-	return &v
 }

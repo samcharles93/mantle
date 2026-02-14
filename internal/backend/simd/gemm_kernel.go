@@ -27,7 +27,7 @@ func gemmRangeRows(
 		n := C.C
 		for i := rs; i < re; i++ {
 			base := i * cStride
-			for j := 0; j < n; j++ {
+			for j := range n {
 				C.Data[base+j] *= beta
 			}
 		}
@@ -134,7 +134,7 @@ func packBTile(dst []float32, bData []float32, bStride int, k0, kMax, j0, jMax i
 	if width > maxTileN || kInner > maxTileK {
 		panic("packBTile exceeds max tile size")
 	}
-	for kk := 0; kk < kInner; kk++ {
+	for kk := range kInner {
 		srcOff := (k0+kk)*bStride + j0
 		copy(dst[kk*width:(kk+1)*width], bData[srcOff:srcOff+width])
 	}

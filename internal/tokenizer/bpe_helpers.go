@@ -1,5 +1,7 @@
 package tokenizer
 
+import "slices"
+
 import "strings"
 
 // Pair represents a pair of BPE tokens.
@@ -123,14 +125,8 @@ func bytesToUnicode() (map[byte]string, map[string]byte) {
 	cs := make([]int, len(bs))
 	copy(cs, bs)
 	n := 0
-	for b := 0; b < 256; b++ {
-		found := false
-		for _, v := range bs {
-			if v == b {
-				found = true
-				break
-			}
-		}
+	for b := range 256 {
+		found := slices.Contains(bs, b)
 		if !found {
 			bs = append(bs, b)
 			cs = append(cs, 256+n)

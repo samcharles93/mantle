@@ -201,7 +201,7 @@ func TestRowToQuant(t *testing.T) {
 	w.RowTo(row, 1)
 
 	scaleUsed := Float16ToFloat32(Float32ToFloat16(scale))
-	for i := 0; i < cols; i++ {
+	for i := range cols {
 		want := float32(qvals[cols+i]) * scaleUsed
 		if diff := row[i] - want; diff < -1e-6 || diff > 1e-6 {
 			t.Fatalf("row[%d]=%v want %v", i, row[i], want)
@@ -354,10 +354,10 @@ func matVecExpected(rows, cols int, scale float32, qvals []int8, x []float32) []
 
 func matVecExpectedFloat(rows, cols int, scale float32, qvals []int8, x []float32) []float32 {
 	out := make([]float32, rows)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		var sum float32
 		base := r * cols
-		for c := 0; c < cols; c++ {
+		for c := range cols {
 			sum += float32(qvals[base+c]) * scale * x[c]
 		}
 		out[r] = sum
@@ -369,10 +369,10 @@ func matVecExpectedInt8(rows, cols int, scale float32, qvals []int8, x []float32
 	blocksPerRow := (cols + 31) / 32
 	_, qx16, xScales := quantizeVecBlocks(x, blocksPerRow)
 	out := make([]float32, rows)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		var sum float32
 		rowBase := r * cols
-		for b := 0; b < blocksPerRow; b++ {
+		for b := range blocksPerRow {
 			xScale := xScales[b]
 			if xScale == 0 {
 				continue
@@ -427,7 +427,7 @@ func buildQPayload(rows, cols, bits int, scale float32, qvals []int8) []byte {
 	totalBlocks := rows * blocksPerRow
 	scales := make([]byte, totalBlocks*2)
 	f16 := Float32ToFloat16(scale)
-	for i := 0; i < totalBlocks; i++ {
+	for i := range totalBlocks {
 		scales[i*2] = byte(f16)
 		scales[i*2+1] = byte(f16 >> 8)
 	}
@@ -463,7 +463,7 @@ func buildKPayload(rows, cols, bits int, scale float32, qvals []int8) []byte {
 
 	superScales := make([]byte, totalSuper*2)
 	f16 := Float32ToFloat16(scale)
-	for i := 0; i < totalSuper; i++ {
+	for i := range totalSuper {
 		superScales[i*2] = byte(f16)
 		superScales[i*2+1] = byte(f16 >> 8)
 	}
@@ -481,7 +481,7 @@ func buildKPayload(rows, cols, bits int, scale float32, qvals []int8) []byte {
 	data := make([]byte, totalBlocks*blockBytes)
 	padded := make([]int8, totalBlocks*32)
 	copy(padded, qvals)
-	for block := 0; block < totalBlocks; block++ {
+	for block := range totalBlocks {
 		start := block * 32
 		end := start + 32
 		segment := padded[start:end]
@@ -497,7 +497,7 @@ func packQuantBlock(dst []byte, bits int, values []int8) {
 	var bitBuf uint64
 	var bitCount uint
 	dstIdx := 0
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		val := uint64(uint8(values[i])) & mask
 		bitBuf |= val << bitCount
 		bitCount += uint(bits)

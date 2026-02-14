@@ -2,6 +2,7 @@ package tplparser
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -111,12 +112,7 @@ func renderGemma3(opts RenderOptions) (string, bool, error) {
 }
 
 func isRole(role string, roles ...string) bool {
-	for _, r := range roles {
-		if role == r {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(roles, role)
 }
 
 func writeGemmaSystemContent(b *strings.Builder, content any) error {

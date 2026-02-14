@@ -3,6 +3,7 @@ package safetensors
 import (
 	"encoding/binary"
 	"encoding/json"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -13,9 +14,7 @@ import (
 func writeSafetensors(t *testing.T, path string, tensors map[string]tensorHeader) {
 	t.Helper()
 	header := make(map[string]tensorHeader, len(tensors))
-	for name, th := range tensors {
-		header[name] = th
-	}
+	maps.Copy(header, tensors)
 	headerBytes, err := json.Marshal(header)
 	if err != nil {
 		t.Fatalf("marshal header: %v", err)

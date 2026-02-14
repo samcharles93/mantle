@@ -49,7 +49,7 @@ func TestSamplerTopP(t *testing.T) {
 	logs := []float32{10, 0, 0, 0, 0}
 	s := NewSampler(SamplerConfig{Seed: 7, Temperature: 1.0, TopK: 5, TopP: 0.5})
 	// Repeatedly sample and ensure we always get index 0.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		idx := s.Sample(logs, nil, nil)
 		if idx != 0 {
 			t.Fatalf("top‑p sampling returned unexpected index %d", idx)

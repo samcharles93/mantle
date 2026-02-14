@@ -51,16 +51,7 @@ func computeOptimalBatchSize(blocksPerRow int, totalRows int) int {
 	const maxBatch = 16
 
 	// Ensure we don't exceed total rows
-	batch := maxRowsL1
-	if batch < minBatch {
-		batch = minBatch
-	}
-	if batch > maxBatch {
-		batch = maxBatch
-	}
-	if batch > totalRows {
-		batch = totalRows
-	}
+	batch := min(min(max(maxRowsL1, minBatch), maxBatch), totalRows)
 
 	return batch
 }
@@ -101,17 +92,14 @@ func getMatVecPool() *matVecPool {
 }
 
 func newMatVecPool() *matVecPool {
-	size := runtime.GOMAXPROCS(0)
-	if size < 1 {
-		size = 1
-	}
+	size := max(runtime.GOMAXPROCS(0), 1)
 	p := &matVecPool{
 		size:      size,
 		tasks:     make(chan matVecTask, size*2),
 		doneSlots: make(chan chan struct{}, size),
 		workers:   make([]*matVecWorker, size),
 	}
-	for i := 0; i < size; i++ {
+	for i := range size {
 		p.doneSlots <- make(chan struct{}, 1)
 		worker := &matVecWorker{
 			tasks: make(chan matVecTask, 1),
@@ -175,10 +163,7 @@ func matVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec) {
 	}
 
 	pool := getMatVecPool()
-	workers := pool.size
-	if workers > w.R {
-		workers = w.R
-	}
+	workers := min(pool.size, w.R)
 
 	if workers <= 1 {
 		matVecRange(dst, w, x, 0, w.R, localQx)
@@ -189,12 +174,9 @@ func matVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec) {
 	done := <-pool.doneSlots
 
 	activeWorkers := 0
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		rs := i * chunk
-		re := rs + chunk
-		if re > w.R {
-			re = w.R
-		}
+		re := min(rs+chunk, w.R)
 		if rs >= re {
 			break
 		}

@@ -199,13 +199,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	if routeScale == 0 {
 		routeScale = 1
 	}
-	numDenseLayers := cfg.NumDenseLayers
-	if numDenseLayers < 0 {
-		numDenseLayers = 0
-	}
-	if numDenseLayers > blockCount {
-		numDenseLayers = blockCount
-	}
+	numDenseLayers := min(max(cfg.NumDenseLayers, 0), blockCount)
 	layerTypes := []string(nil)
 	if len(cfg.LayerTypes) == blockCount {
 		layerTypes = make([]string, blockCount)
@@ -221,7 +215,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		}
 	} else if cfg.GlobalAttnEveryN > 0 && cfg.SlidingWindow > 0 {
 		layerTypes = make([]string, blockCount)
-		for i := 0; i < blockCount; i++ {
+		for i := range blockCount {
 			if (i+1)%cfg.GlobalAttnEveryN == 0 {
 				layerTypes[i] = "full_attention"
 			} else {
@@ -604,7 +598,7 @@ func decodeTensorF32(p tensorPayload) ([]float32, error) {
 			return nil, fmt.Errorf("invalid f32 data size")
 		}
 		out := make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out[i] = math.Float32frombits(binary.LittleEndian.Uint32(p.Raw[i*4:]))
 		}
 		return out, nil
@@ -613,7 +607,7 @@ func decodeTensorF32(p tensorPayload) ([]float32, error) {
 			return nil, fmt.Errorf("invalid bf16 data size")
 		}
 		out := make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			u := binary.LittleEndian.Uint16(p.Raw[i*2:])
 			out[i] = bf16ToF32(u)
 		}
@@ -623,7 +617,7 @@ func decodeTensorF32(p tensorPayload) ([]float32, error) {
 			return nil, fmt.Errorf("invalid f16 data size")
 		}
 		out := make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			u := binary.LittleEndian.Uint16(p.Raw[i*2:])
 			out[i] = fp16ToF32(u)
 		}
@@ -874,7 +868,7 @@ func loadMoELayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, 
 	}
 
 	experts := make([]MoEExpert, numExperts)
-	for expert := 0; expert < numExperts; expert++ {
+	for expert := range numExperts {
 		up, err := loadMat(src, names.MoEExpertUp(layer, expert))
 		if err != nil {
 			return nil, err
@@ -1244,7 +1238,7 @@ func updateInstanceRoPE(m *Instance) {
 			base = 10000
 		}
 		ropeInvFreq := make([]float64, headDim/2)
-		for i := 0; i < len(ropeInvFreq); i++ {
+		for i := range ropeInvFreq {
 			power := float64(2*i) / float64(headDim)
 			ropeInvFreq[i] = 1.0 / math.Pow(base, power)
 		}

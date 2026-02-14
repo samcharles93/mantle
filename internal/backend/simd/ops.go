@@ -394,9 +394,9 @@ func ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentio
 		attentionFactor = 1
 	}
 	half := headDim / 2
-	for h := 0; h < nHead; h++ {
+	for h := range nHead {
 		base := h * headDim
-		for i := 0; i < half; i++ {
+		for i := range half {
 			angle := float64(pos) * invFreq[i]
 			c := float32(math.Cos(angle)) * attentionFactor
 			s := float32(math.Sin(angle)) * attentionFactor

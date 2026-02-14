@@ -576,7 +576,7 @@ func convertF32ToBF16(dst io.Writer, src io.Reader, nElem uint64, inBuf, outBuf 
 			proc := b[:m*4]
 			outN := m * 2
 			if outN > 0 {
-				for i := 0; i < m; i++ {
+				for i := range m {
 					u := binary.LittleEndian.Uint32(proc[i*4 : i*4+4])
 					binary.LittleEndian.PutUint16(outBuf[i*2:i*2+2], bf16FromF32Bits(u))
 				}
@@ -648,7 +648,7 @@ func convertF32ToF16(dst io.Writer, src io.Reader, nElem uint64, inBuf, outBuf [
 			proc := b[:m*4]
 			outN := m * 2
 			if outN > 0 {
-				for i := 0; i < m; i++ {
+				for i := range m {
 					u := binary.LittleEndian.Uint32(proc[i*4 : i*4+4])
 					f := math.Float32frombits(u)
 					binary.LittleEndian.PutUint16(outBuf[i*2:i*2+2], float32ToFP16Bits(f))
@@ -736,7 +736,7 @@ func copyConvertU16(dst io.Writer, src io.Reader, wantIn uint64, inBuf, outBuf [
 			proc := b[:m*2]
 			outN := m * 2
 			if outN > 0 {
-				for i := 0; i < m; i++ {
+				for i := range m {
 					u := binary.LittleEndian.Uint16(proc[i*2 : i*2+2])
 					binary.LittleEndian.PutUint16(outBuf[i*2:i*2+2], fn(u))
 				}

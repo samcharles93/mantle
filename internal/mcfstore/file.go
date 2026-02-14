@@ -205,20 +205,20 @@ func (f *File) ReadTensorF32(name string) ([]float32, TensorInfo, error) {
 	switch info.DType {
 	case mcf.DTypeF32:
 		out := make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[i*4:]))
 		}
 		return out, info, nil
 	case mcf.DTypeBF16:
 		out := make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			u := binary.LittleEndian.Uint16(raw[i*2:])
 			out[i] = bf16ToF32(u)
 		}
 		return out, info, nil
 	case mcf.DTypeF16:
 		out := make([]float32, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			u := binary.LittleEndian.Uint16(raw[i*2:])
 			out[i] = fp16ToF32(u)
 		}
