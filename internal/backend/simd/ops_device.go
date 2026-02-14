@@ -40,3 +40,18 @@ type DeviceStateOps interface {
 	// if the caller should fall back to the regular MatVec method.
 	DeviceMatVec(dst []float32, w *Mat, x []float32) bool
 }
+
+// deviceSliceSyncer is an optional extension used by host fallback paths to
+// force a host-visible copy for slices backed by device-resident state.
+type deviceSliceSyncer interface {
+	SyncDeviceSlice(x []float32)
+}
+
+func syncDeviceSlice(ops Ops, x []float32) {
+	if len(x) == 0 {
+		return
+	}
+	if s, ok := ops.(deviceSliceSyncer); ok {
+		s.SyncDeviceSlice(x)
+	}
+}
