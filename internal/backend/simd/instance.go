@@ -95,10 +95,7 @@ func (c *AttnCache) EnsurePos(pos int) {
 	if needed <= c.Cap {
 		return
 	}
-	newCap := ((needed + kvCachePageSize - 1) / kvCachePageSize) * kvCachePageSize
-	if newCap > c.CacheLen {
-		newCap = c.CacheLen
-	}
+	newCap := min(((needed+kvCachePageSize-1)/kvCachePageSize)*kvCachePageSize, c.CacheLen)
 	grow := newCap - c.Cap
 	stride := c.KvStride
 	if c.K != nil {
