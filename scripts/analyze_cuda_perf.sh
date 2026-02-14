@@ -24,7 +24,7 @@ TMP_OUT=$(mktemp)
 
 echo "Running baseline (no optimizations)..."
 CUDA=1 MANTLE_CUDA_TRACE=1 "$MANTLE_BIN" run --backend cuda \
-    -m "$MODEL" --steps "$STEPS" \
+    -m "$MODEL" --steps "$STEPS" --temp 0 --stream-mode quiet \
     --prompt "test" > "$TMP_OUT" 2>&1
 
 # Extract key metrics
@@ -130,7 +130,6 @@ if (( $(awk "BEGIN {print ($TOTAL_TRANSFER_PER_TOK >= 8)}") )); then
 fi
 
 echo "Current TPS: $GEN_TPS"
-echo "Theoretical max (if optimized): ~50-60 TPS"
 echo ""
 
 rm -f "$TMP_OUT"

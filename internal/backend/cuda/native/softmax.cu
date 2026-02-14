@@ -581,18 +581,27 @@ __global__ void attention_inner_mixed_cache_f32_kernel(
     float scale) {
     const int h = blockIdx.x;
     const int tid = threadIdx.x;
+    const int lane = tid & (WARP_SIZE - 1);
+    const int warp = tid / WARP_SIZE;
+    const int warp_count = blockDim.x / WARP_SIZE;
     if (h >= n_head) return;
 
     const int kv_head = (h * kv_heads) / n_head;
     const float* qh = q + h * head_dim;
     float* out_h = out + h * head_dim;
+    const bool use_q8_k_cache = use_q8_k != 0;
+    const bool use_q8_v_cache = use_q8_v != 0;
+    const bool register_out = head_dim <= blockDim.x;
+    float out_acc = 0.0f;
 
-    for (int d = tid; d < head_dim; d += blockDim.x) {
-        out_h[d] = 0.0f;
+    if (!register_out) {
+        for (int d = tid; d < head_dim; d += blockDim.x) {
+            out_h[d] = 0.0f;
+        }
+        __syncthreads();
     }
-    __syncthreads();
 
-    __shared__ float partial[256];
+    __shared__ float partial[WARP_SIZE];
     __shared__ float s_m;
     __shared__ float s_l;
     __shared__ float s_alpha;
@@ -610,7 +619,7 @@ __global__ void attention_inner_mixed_cache_f32_kernel(
         const int k_base = cache_pos * kv_stride + kv_head * head_dim;
 
         float dot_part = 0.0f;
-        if (use_q8_k) {
+        if (use_q8_k_cache) {
             const float k_scale = cache_k_scales[cache_pos];
             const int8_t* k_q8 = cache_k_q8 + k_base;
             for (int d = tid; d < head_dim; d += blockDim.x) {
@@ -623,15 +632,20 @@ __global__ void attention_inner_mixed_cache_f32_kernel(
             }
         }
 
-        partial[tid] = dot_part;
+        dot_part = warp_reduce_sum(dot_part);
+        if (lane == 0) {
+            partial[warp] = dot_part;
+        }
         __syncthreads();
 
-        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-            if (tid < stride) {
-                partial[tid] += partial[tid + stride];
+        if (warp == 0) {
+            float block_dot = (lane < warp_count) ? partial[lane] : 0.0f;
+            block_dot = warp_reduce_sum(block_dot);
+            if (lane == 0) {
+                partial[0] = block_dot;
             }
-            __syncthreads();
         }
+        __syncthreads();
 
         if (tid == 0) {
             const float s = partial[0] * scale;
@@ -644,23 +658,42 @@ __global__ void attention_inner_mixed_cache_f32_kernel(
         __syncthreads();
 
         const int v_base = cache_pos * kv_stride + kv_head * head_dim;
-        if (use_q8_v) {
-            const float v_scale = cache_v_scales[cache_pos];
-            const int8_t* v_q8 = cache_v_q8 + v_base;
-            for (int d = tid; d < head_dim; d += blockDim.x) {
-                out_h[d] = out_h[d] * s_alpha + s_beta * (static_cast<float>(v_q8[d]) * v_scale);
+        if (register_out) {
+            if (tid < head_dim) {
+                if (use_q8_v_cache) {
+                    const float v_scale = cache_v_scales[cache_pos];
+                    const int8_t* v_q8 = cache_v_q8 + v_base;
+                    out_acc = out_acc * s_alpha + s_beta * (static_cast<float>(v_q8[tid]) * v_scale);
+                } else {
+                    const uint16_t* v_f16 = cache_v_f16 + v_base;
+                    out_acc = out_acc * s_alpha + s_beta * f16_to_f32(v_f16[tid]);
+                }
             }
         } else {
-            const uint16_t* v_f16 = cache_v_f16 + v_base;
-            for (int d = tid; d < head_dim; d += blockDim.x) {
-                out_h[d] = out_h[d] * s_alpha + s_beta * f16_to_f32(v_f16[d]);
+            if (use_q8_v_cache) {
+                const float v_scale = cache_v_scales[cache_pos];
+                const int8_t* v_q8 = cache_v_q8 + v_base;
+                for (int d = tid; d < head_dim; d += blockDim.x) {
+                    out_h[d] = out_h[d] * s_alpha + s_beta * (static_cast<float>(v_q8[d]) * v_scale);
+                }
+            } else {
+                const uint16_t* v_f16 = cache_v_f16 + v_base;
+                for (int d = tid; d < head_dim; d += blockDim.x) {
+                    out_h[d] = out_h[d] * s_alpha + s_beta * f16_to_f32(v_f16[d]);
+                }
             }
         }
         __syncthreads();
     }
 
-    for (int d = tid; d < head_dim; d += blockDim.x) {
-        out_h[d] = out_h[d] / (s_l + 1e-12f);
+    if (register_out) {
+        if (tid < head_dim) {
+            out_h[tid] = out_acc / (s_l + 1e-12f);
+        }
+    } else {
+        for (int d = tid; d < head_dim; d += blockDim.x) {
+            out_h[d] = out_h[d] / (s_l + 1e-12f);
+        }
     }
 }
 
