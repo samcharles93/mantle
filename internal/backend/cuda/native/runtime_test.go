@@ -800,7 +800,8 @@ func fp16ToF32(h uint16) float32 {
 	sign := uint32(h>>15) & 0x1
 	exp := int32((h >> 10) & 0x1f)
 	frac := uint32(h & 0x03ff)
-	if exp == 0 {
+	switch exp {
+	case 0:
 		if frac == 0 {
 			return math.Float32frombits(sign << 31)
 		}
@@ -810,7 +811,7 @@ func fp16ToF32(h uint16) float32 {
 		}
 		exp += 1
 		frac &= 0x03ff
-	} else if exp == 0x1f {
+	case 0x1f:
 		return math.Float32frombits((sign << 31) | 0x7f800000 | (frac << 13))
 	}
 	exp = exp + (127 - 15)
