@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -588,16 +587,13 @@ func runCmd() *cli.Command {
 				}
 			}
 
-			scanner := bufio.NewScanner(os.Stdin)
-
 			for {
 				// If we need input
 				if interactive && (len(msgs) == 0 || msgs[len(msgs)-1].Role != "user") {
-					fmt.Print("> ")
-					if !scanner.Scan() {
+					input, err := readInteractiveLine("> ")
+					if err != nil {
 						break
 					}
-					input := scanner.Text()
 					trimmed := strings.TrimSpace(input)
 					if trimmed == "/exit" || trimmed == "/quit" {
 						break
