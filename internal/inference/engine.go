@@ -47,19 +47,39 @@ func Generate(m simd.Model, sampler *logits.Sampler, promptTokens []int, steps i
 	}
 
 	toks := append([]int(nil), promptTokens...)
+	type greedyStepper interface {
+		ForwardTokenGreedy(id int) (next int, err error)
+	}
+	gs, canDeviceGreedy := m.(greedyStepper)
+	canDeviceGreedy = canDeviceGreedy && sampler.CanUseDeviceGreedy()
 
 	// Generation loop
 	genStart := time.Now()
+	if steps <= 0 {
+		stats.Duration = time.Since(genStart)
+		stats.GenerationDuration = stats.Duration
+		return stats, nil
+	}
+	next, sampleErr := safeSample(sampler, logitsVec, toks, nil)
+	if sampleErr != nil {
+		return stats, fmt.Errorf("sample error during generation step %d: %w", 0, sampleErr)
+	}
 	for step := range steps {
-		next, sampleErr := safeSample(sampler, logitsVec, toks, nil)
-		if sampleErr != nil {
-			return stats, fmt.Errorf("sample error during generation step %d: %w", step, sampleErr)
-		}
 		toks = append(toks, next)
-
-		logitsVec, err = safeForwardToken(m, next)
-		if err != nil {
-			return stats, fmt.Errorf("forward error during generation step %d: %w", step, err)
+		if canDeviceGreedy {
+			next, err = safeForwardTokenGreedy(gs, next)
+			if err != nil {
+				return stats, fmt.Errorf("forward error during generation step %d: %w", step, err)
+			}
+		} else {
+			logitsVec, err = safeForwardToken(m, next)
+			if err != nil {
+				return stats, fmt.Errorf("forward error during generation step %d: %w", step, err)
+			}
+			next, sampleErr = safeSample(sampler, logitsVec, toks, nil)
+			if sampleErr != nil {
+				return stats, fmt.Errorf("sample error during generation step %d: %w", step+1, sampleErr)
+			}
 		}
 		stats.TokensGenerated++
 	}
@@ -137,10 +157,19 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 	}
 
 	toks := append([]int(nil), g.ContextTokens...)
+	type greedyStepper interface {
+		ForwardTokenGreedy(id int) (next int, err error)
+	}
+	gs, canDeviceGreedy := g.Model.(greedyStepper)
+	canDeviceGreedy = canDeviceGreedy && g.Sampler.CanUseDeviceGreedy()
 
 	limit := steps
 	if limit < 0 {
 		limit = 1000000
+	}
+	if limit == 0 {
+		stats.Duration = time.Since(start)
+		return g.ContextTokens, stats, nil
 	}
 
 	const (
@@ -171,14 +200,14 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 
 	genStart := time.Now()
 	var streamingOverhead time.Duration
+	next, sampleErr := safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
+	if sampleErr != nil {
+		flush()
+		return g.ContextTokens, stats, sampleErr
+	}
 	for range limit {
 		if err := ctx.Err(); err != nil {
 			return g.ContextTokens, stats, err
-		}
-		next, sampleErr := safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
-		if sampleErr != nil {
-			flush()
-			return g.ContextTokens, stats, sampleErr
 		}
 
 		stop := g.isStopToken(next)
@@ -204,10 +233,23 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 			}
 		}
 
-		logitsVec, err = safeForwardToken(g.Model, next)
-		if err != nil {
-			flush()
-			return g.ContextTokens, stats, err
+		if canDeviceGreedy {
+			next, err = safeForwardTokenGreedy(gs, next)
+			if err != nil {
+				flush()
+				return g.ContextTokens, stats, err
+			}
+		} else {
+			logitsVec, err = safeForwardToken(g.Model, next)
+			if err != nil {
+				flush()
+				return g.ContextTokens, stats, err
+			}
+			next, sampleErr = safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
+			if sampleErr != nil {
+				flush()
+				return g.ContextTokens, stats, sampleErr
+			}
 		}
 		stats.TokensGenerated++
 	}
@@ -242,6 +284,17 @@ func safeSample(sampler *logits.Sampler, logitsVec []float32, toks []int, exclud
 		}
 	}()
 	return sampler.Sample(logitsVec, toks, excludePenalty), nil
+}
+
+func safeForwardTokenGreedy(m interface {
+	ForwardTokenGreedy(id int) (next int, err error)
+}, id int) (next int, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic in ForwardTokenGreedy(%d): %v", id, rec)
+		}
+	}()
+	return m.ForwardTokenGreedy(id)
 }
 
 func (g *Generator) isStopToken(id int) bool {

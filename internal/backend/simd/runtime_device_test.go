@@ -37,6 +37,14 @@ func (m *mockDeviceStateOps) DeviceMatVec(_ []float32, _ *Mat, _ []float32) bool
 	return false
 }
 
+func (m *mockDeviceStateOps) DeviceMatVecNoCopy(_ *Mat, _ []float32) bool {
+	return false
+}
+
+func (m *mockDeviceStateOps) DeviceArgMaxLastResult() (int, bool) {
+	return 0, false
+}
+
 func TestAddResidualDeviceSuccessSkipsHostDirty(t *testing.T) {
 	ds := &mockDeviceStateOps{addOK: true}
 	dst := []float32{1, 2, 3}

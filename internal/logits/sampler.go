@@ -28,6 +28,10 @@ type Sampler struct {
 	seenList  []int
 }
 
+func (s *Sampler) CanUseDeviceGreedy() bool {
+	return s.greedy && s.cfg.RepeatPenalty <= 1.0
+}
+
 // NewSampler returns a new sampler with the provided configuration.
 func NewSampler(cfg SamplerConfig) *Sampler {
 	greedy := cfg.Temperature <= 0

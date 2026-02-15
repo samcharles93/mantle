@@ -478,6 +478,44 @@ __global__ void convert_f32_to_f16_kernel(
     out[idx] = __half_as_ushort(__float2half(in[idx]));
 }
 
+__global__ void argmax_f32_kernel(
+    const float* __restrict__ x,
+    int n,
+    int* __restrict__ out_idx) {
+    extern __shared__ unsigned char smem[];
+    float* s_val = reinterpret_cast<float*>(smem);
+    int* s_idx = reinterpret_cast<int*>(s_val + blockDim.x);
+
+    const int tid = threadIdx.x;
+    float best_val = -FLT_MAX;
+    int best_idx = 0;
+    for (int i = tid; i < n; i += blockDim.x) {
+        const float v = x[i];
+        if (v > best_val) {
+            best_val = v;
+            best_idx = i;
+        }
+    }
+    s_val[tid] = best_val;
+    s_idx[tid] = best_idx;
+    __syncthreads();
+
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            const float v = s_val[tid + stride];
+            const int idx = s_idx[tid + stride];
+            if (v > s_val[tid]) {
+                s_val[tid] = v;
+                s_idx[tid] = idx;
+            }
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        out_idx[0] = s_idx[0];
+    }
+}
+
 __global__ void attention_inner_f16_cache_f32_kernel(
     const float* __restrict__ q,
     const uint16_t* __restrict__ cache_k,
@@ -832,6 +870,18 @@ int mantleCudaConvertF32ToF16(
     const int threads = 256;
     const int blocks = (n + threads - 1) / threads;
     convert_f32_to_f16_kernel<<<blocks, threads, 0, stream>>>(in, out, n);
+    return (int)cudaGetLastError();
+}
+
+int mantleCudaArgMaxF32(
+    const float* x,
+    int n,
+    int* outIdx,
+    cudaStream_t stream) {
+    if (!x || !outIdx || n <= 0) return cudaErrorInvalidValue;
+    const int threads = 256;
+    const size_t shmem = threads * (sizeof(float) + sizeof(int));
+    argmax_f32_kernel<<<1, threads, shmem, stream>>>(x, n, outIdx);
     return (int)cudaGetLastError();
 }
 

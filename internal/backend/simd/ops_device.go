@@ -39,6 +39,14 @@ type DeviceStateOps interface {
 	// Returns true if the operation was performed on device, false
 	// if the caller should fall back to the regular MatVec method.
 	DeviceMatVec(dst []float32, w *Mat, x []float32) bool
+
+	// DeviceMatVecNoCopy performs MatVec on device-resident buffers and keeps
+	// the result on device (no immediate host copy).
+	DeviceMatVecNoCopy(w *Mat, x []float32) bool
+
+	// DeviceArgMaxLastResult returns argmax index from the last device-resident
+	// no-copy result. ok=false when unavailable.
+	DeviceArgMaxLastResult() (idx int, ok bool)
 }
 
 // deviceSliceSyncer is an optional extension used by host fallback paths to

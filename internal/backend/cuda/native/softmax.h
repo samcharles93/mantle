@@ -102,6 +102,12 @@ int mantleCudaAttentionInnerMixedCacheF32(
     float scale,
     cudaStream_t stream);
 
+int mantleCudaArgMaxF32(
+    const float* x,
+    int n,
+    int* outIdx,
+    cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif
