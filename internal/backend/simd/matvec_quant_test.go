@@ -367,7 +367,12 @@ func matVecExpectedFloat(rows, cols int, scale float32, qvals []int8, x []float3
 
 func matVecExpectedInt8(rows, cols int, scale float32, qvals []int8, x []float32) []float32 {
 	blocksPerRow := (cols + 31) / 32
-	_, qx16, xScales := quantizeVecBlocks(x, blocksPerRow)
+	qx8 := make([]int8, blocksPerRow*32)
+	qx16 := make([]int16, blocksPerRow*32)
+	xScales := make([]float32, blocksPerRow)
+	blockSums := make([]int32, blocksPerRow)
+	quantizeVecBlocksInto(x, blocksPerRow, qx8, qx16, xScales, blockSums)
+
 	out := make([]float32, rows)
 	for r := range rows {
 		var sum float32
@@ -378,9 +383,20 @@ func matVecExpectedInt8(rows, cols int, scale float32, qvals []int8, x []float32
 				continue
 			}
 			wBlock := qvals[rowBase+b*32 : rowBase+b*32+32]
-			xBlock := qx16[b*32 : b*32+32]
-			dot := dotInt8Int16Scalar(wBlock, xBlock, 32)
-			sum += float32(dot) * (scale * xScale)
+			if cpu.HasAVXVNNI {
+				// VPDPBUSD path with offset correction
+				var dot int32
+				for i := range 32 {
+					u8w := uint8(wBlock[i]) ^ 0x80
+					dot += int32(u8w) * int32(qx8[b*32+i])
+				}
+				corrected := dot - 128*blockSums[b]
+				sum += float32(corrected) * (scale * xScale)
+			} else {
+				xBlock := qx16[b*32 : b*32+32]
+				dot := dotInt8Int16Scalar(wBlock, xBlock, 32)
+				sum += float32(dot) * (scale * xScale)
+			}
 		}
 		out[r] = sum
 	}
@@ -540,5 +556,253 @@ func verifyPayloadSize(t *testing.T, payload []byte, rows, cols int, dt mcf.Tens
 	}
 	if uint64(len(payload)) != want {
 		t.Fatalf("payload size mismatch: got %d want %d", len(payload), want)
+	}
+}
+
+// TestDotUint8Int8MatchesScalar verifies VPDPBUSD SIMD matches scalar reference
+func TestDotUint8Int8MatchesScalar(t *testing.T) {
+	const n = 128
+
+	weights := make([]uint8, n)
+	activations := make([]int8, n)
+
+	// Fill with deterministic test data
+	for i := 0; i < n; i++ {
+		weights[i] = uint8((i % 200) + 1)  // [1, 200]
+		activations[i] = int8((i % 15) - 7) // [-7, 7]
+	}
+
+	want := dotUint8Int8Scalar(weights, activations, n)
+	got := dotUint8Int8(weights, activations, n)
+
+	if got != want {
+		t.Fatalf("SIMD mismatch: got %d want %d", got, want)
+	}
+}
+
+// TestConvertInt8ToUint8 verifies int8→uint8 conversion correctness
+func TestConvertInt8ToUint8(t *testing.T) {
+	src := []int8{-127, -1, 0, 1, 127}
+	want := []uint8{1, 127, 128, 129, 255}
+
+	qx := getQuantVec(1)
+	defer putQuantVec(qx)
+
+	got := convertInt8ToUint8(qx, src, len(src))
+
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("idx %d: got %d want %d", i, got[i], want[i])
+		}
+	}
+}
+
+// TestOffsetCorrection verifies that the VPDPBUSD offset correction formula
+// produces the same result as direct int8×int8 dot product.
+func TestOffsetCorrection(t *testing.T) {
+	const n = 32
+	// Test with various weight/activation patterns
+	testCases := []struct {
+		name string
+		w    [n]int8
+		a    [n]int8
+	}{
+		{"positive", func() [n]int8 {
+			var v [n]int8
+			for i := range v {
+				v[i] = int8(i%7 + 1)
+			}
+			return v
+		}(), func() [n]int8 {
+			var v [n]int8
+			for i := range v {
+				v[i] = int8(i%5 + 1)
+			}
+			return v
+		}()},
+		{"mixed", func() [n]int8 {
+			var v [n]int8
+			for i := range v {
+				v[i] = int8((i % 15) - 7)
+			}
+			return v
+		}(), func() [n]int8 {
+			var v [n]int8
+			for i := range v {
+				v[i] = int8((i % 11) - 5)
+			}
+			return v
+		}()},
+		{"extremes", func() [n]int8 {
+			var v [n]int8
+			for i := range v {
+				if i%2 == 0 {
+					v[i] = 127
+				} else {
+					v[i] = -127
+				}
+			}
+			return v
+		}(), func() [n]int8 {
+			var v [n]int8
+			for i := range v {
+				if i%3 == 0 {
+					v[i] = 127
+				} else {
+					v[i] = -127
+				}
+			}
+			return v
+		}()},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reference: direct int8×int8 dot product
+			var wantDot int32
+			for i := range n {
+				wantDot += int32(tc.w[i]) * int32(tc.a[i])
+			}
+
+			// VPDPBUSD with offset correction
+			var u8w [n]uint8
+			for i := range n {
+				u8w[i] = uint8(tc.w[i]) ^ 0x80
+			}
+			vpdpbusdResult := dotUint8Int8Scalar(u8w[:], tc.a[:], n)
+
+			var aSum int32
+			for i := range n {
+				aSum += int32(tc.a[i])
+			}
+			gotDot := vpdpbusdResult - 128*aSum
+
+			if gotDot != wantDot {
+				t.Fatalf("offset correction mismatch: got %d want %d (vpdpbusd=%d, aSum=%d)", gotDot, wantDot, vpdpbusdResult, aSum)
+			}
+		})
+	}
+}
+
+// TestMatVecQ4CachedVPDPBUSD verifies that the cached path works correctly
+// with VPDPBUSD offset correction on AVX-VNNI hardware.
+func TestMatVecQ4CachedVPDPBUSD(t *testing.T) {
+	const (
+		rows  = 4
+		cols  = 128
+		scale = 0.05
+	)
+
+	qvals := makeQVals(rows * cols)
+	payload := buildQPayload(rows, cols, 4, scale, qvals)
+
+	x := make([]float32, cols)
+	for i := range x {
+		x[i] = float32((i%11)-5) * 0.2
+	}
+
+	scaleUsed := Float16ToFloat32(Float32ToFloat16(scale))
+	want := matVecExpected(rows, cols, scaleUsed, qvals, x)
+
+	// Build cache and run with cached quantized data
+	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeQ4, Raw: payload}
+	cache, err := BuildQuantCache(&w)
+	if err != nil {
+		t.Fatalf("BuildQuantCache: %v", err)
+	}
+	w.Quant = cache
+
+	got := make([]float32, rows)
+	MatVec(got, &w, x)
+
+	// Verify results match expected values within tolerance
+	assertCloseSlice(t, got, want, 1e-4)
+}
+
+// TestMatVecK4CachedVPDPBUSD verifies K4 cached path works correctly
+// with VPDPBUSD offset correction on AVX-VNNI hardware.
+func TestMatVecK4CachedVPDPBUSD(t *testing.T) {
+	const (
+		rows  = 2
+		cols  = 128
+		scale = 0.075
+	)
+
+	qvals := makeQVals(rows * cols)
+	payload := buildK4Payload(rows, cols, scale, qvals)
+
+	x := make([]float32, cols)
+	for i := range x {
+		x[i] = float32((i%7)-3) * 0.3
+	}
+
+	scaleUsed := Float16ToFloat32(Float32ToFloat16(scale))
+	want := matVecExpected(rows, cols, scaleUsed, qvals, x)
+
+	// Build cache and run
+	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: payload}
+	cache, err := BuildQuantCache(&w)
+	if err != nil {
+		t.Fatalf("BuildQuantCache: %v", err)
+	}
+	w.Quant = cache
+
+	got := make([]float32, rows)
+	MatVec(got, &w, x)
+
+	assertCloseSlice(t, got, want, 1e-4)
+}
+
+// BenchmarkDotUint8Int8SIMD benchmarks the VPDPBUSD dot product
+func BenchmarkDotUint8Int8SIMD(b *testing.B) {
+	const n = 512
+
+	weights := make([]uint8, n)
+	activations := make([]int8, n)
+
+	for i := 0; i < n; i++ {
+		weights[i] = uint8(i % 255)
+		activations[i] = int8((i % 15) - 7)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = dotUint8Int8SIMD(weights, activations, n)
+	}
+}
+
+// BenchmarkDotInt8Int16SIMD benchmarks the existing VPMADDWD path
+func BenchmarkDotInt8Int16SIMD(b *testing.B) {
+	const n = 512
+
+	weights := make([]int8, n)
+	weightsI16 := make([]int16, n)
+
+	for i := 0; i < n; i++ {
+		weights[i] = int8((i % 15) - 7)
+		weightsI16[i] = int16(weights[i])
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = dotInt8Int16SIMD(weights, weightsI16, n)
+	}
+}
+
+// BenchmarkConvertInt8ToUint8 benchmarks the int8→uint8 conversion
+func BenchmarkConvertInt8ToUint8(b *testing.B) {
+	const n = 512
+
+	weights := make([]int8, n)
+	for i := 0; i < n; i++ {
+		weights[i] = int8((i % 15) - 7)
+	}
+
+	qx := getQuantVec(1)
+	defer putQuantVec(qx)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = convertInt8ToUint8(qx, weights, n)
 	}
 }

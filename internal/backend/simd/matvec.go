@@ -157,7 +157,7 @@ func matVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec) {
 			localQx = qx
 		} else {
 			localQx = getQuantVec(blocks)
-			quantizeVecBlocksInto(x, blocks, localQx.q, localQx.q16, localQx.scales)
+			quantizeVecBlocksInto(x, blocks, localQx.q, localQx.q16, localQx.scales, localQx.blockSums)
 			defer putQuantVec(localQx)
 		}
 	}

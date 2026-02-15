@@ -40,6 +40,7 @@ type QuantCache struct {
 	Q            []int8
 	Scales       []float32
 	BlocksPerRow int
+	qXored       bool // true if Q values have been XOR'd with 0x80 for VPDPBUSD
 }
 
 func (qc *QuantCache) validFor(m *Mat) bool {
@@ -115,11 +116,13 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 			off := blockIdx * 32
 			decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.blockDataBytes], layout.bits)
 		}
-		return &QuantCache{
+		qc := &QuantCache{
 			Q:            q,
 			Scales:       scales,
 			BlocksPerRow: layout.blocksPerRow,
-		}, nil
+		}
+		xorQuantCacheForVPDPBUSD(qc)
+		return qc, nil
 	}
 
 	superRaw := m.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
@@ -145,9 +148,24 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 		}
 	}
 
-	return &QuantCache{
+	qc := &QuantCache{
 		Q:            q,
 		Scales:       scales,
 		BlocksPerRow: layout.blocksPerRow,
-	}, nil
+	}
+	xorQuantCacheForVPDPBUSD(qc)
+	return qc, nil
+}
+
+// xorQuantCacheForVPDPBUSD XORs all Q values with 0x80 in-place on AVXVNNI hardware.
+// This pre-converts int8 weights to uint8 encoding so the hot path can use
+// unsafe.Slice to reinterpret without any per-block conversion.
+func xorQuantCacheForVPDPBUSD(qc *QuantCache) {
+	if !cpu.HasAVXVNNI {
+		return
+	}
+	for i := range qc.Q {
+		qc.Q[i] ^= -128 // XOR with 0x80
+	}
+	qc.qXored = true
 }

@@ -10,7 +10,7 @@ func PrepareQuantVec(x []float32) *QuantVec {
 	}
 	blocks := (len(x) + 31) / 32
 	qx := getQuantVec(blocks)
-	quantizeVecBlocksInto(x, blocks, qx.q, qx.q16, qx.scales)
+	quantizeVecBlocksInto(x, blocks, qx.q, qx.q16, qx.scales, qx.blockSums)
 	return qx
 }
 

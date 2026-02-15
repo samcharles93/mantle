@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"unsafe"
 
 	"simd/archsimd"
 
@@ -28,10 +29,12 @@ type quantLayout struct {
 }
 
 type QuantVec struct {
-	q      []int8
-	q16    []int16
-	scales []float32
-	Blocks int
+	q         []int8
+	q16       []int16
+	u8buf     []uint8  // Buffer for uint8 conversion (for VPDPBUSD)
+	blockSums []int32  // Per-block sum of int8 activations (for offset correction)
+	scales    []float32
+	Blocks    int
 }
 
 type quantDecodeScratch struct {
@@ -56,6 +59,7 @@ func getQuantVec(blocks int) *QuantVec {
 	qx.Blocks = blocks
 	qx.q = ensureInt8Slice(qx.q, blocks*32)
 	qx.q16 = ensureInt16Slice(qx.q16, blocks*32)
+	qx.blockSums = ensureInt32Slice(qx.blockSums, blocks)
 	qx.scales = ensureFloat32Slice(qx.scales, blocks)
 	return qx
 }
@@ -97,6 +101,16 @@ func ensureInt16Slice(dst []int16, n int) []int16 {
 	}
 	if cap(dst) < n {
 		return make([]int16, n)
+	}
+	return dst[:n]
+}
+
+func ensureInt32Slice(dst []int32, n int) []int32 {
+	if n <= 0 {
+		return dst[:0]
+	}
+	if cap(dst) < n {
+		return make([]int32, n)
 	}
 	return dst[:n]
 }
@@ -290,9 +304,18 @@ func matVecRangeQuantCached(dst []float32, w *Mat, x []float32, rs, re int, qx *
 				if xScale == 0 {
 					continue
 				}
-				xBlock := qx.q16[off : off+32]
-				dot := dotInt8Int16(qBlock, xBlock, 32)
-				sum += float32(dot) * (scale * xScale)
+				if qc.qXored {
+					// VPDPBUSD path: Q is pre-XOR'd, reinterpret as uint8
+					u8Block := unsafe.Slice((*uint8)(unsafe.Pointer(&qBlock[0])), 32)
+					xBlock := qx.q[off : off+32]
+					dot := dotUint8Int8(u8Block, xBlock, 32)
+					corrected := dot - 128*qx.blockSums[b]
+					sum += float32(corrected) * (scale * xScale)
+				} else {
+					xBlock := qx.q16[off : off+32]
+					dot := dotInt8Int16(qBlock, xBlock, 32)
+					sum += float32(dot) * (scale * xScale)
+				}
 			} else {
 				sum += scale * dotInt8Float32(qBlock, x[col:], n)
 			}
@@ -385,9 +408,21 @@ func matVecRangeQWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 					if xScale == 0 {
 						continue
 					}
-					xBlock := qx.q16[b*32 : b*32+32]
-					dot := dotInt8Int16(qbuf[off:off+32], xBlock, 32)
-					sum += float32(dot) * (scale * xScale)
+					if cpu.HasAVXVNNI {
+						// VPDPBUSD path: XOR into stack-local buffer (qx.u8buf is shared across goroutines)
+						var u8tmp [32]uint8
+						for i, v := range qbuf[off : off+32] {
+							u8tmp[i] = uint8(v) ^ 0x80
+						}
+						xBlock := qx.q[b*32 : b*32+32]
+						dot := dotUint8Int8(u8tmp[:], xBlock, 32)
+						corrected := dot - 128*qx.blockSums[b]
+						sum += float32(corrected) * (scale * xScale)
+					} else {
+						xBlock := qx.q16[b*32 : b*32+32]
+						dot := dotInt8Int16(qbuf[off:off+32], xBlock, 32)
+						sum += float32(dot) * (scale * xScale)
+					}
 				} else {
 					sum += scale * dotInt8Float32(qbuf[off:off+32], x[col:], n)
 				}
@@ -493,9 +528,20 @@ func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 					if xScale == 0 {
 						continue
 					}
-					xBlock := qx.q16[b*32 : b*32+32]
-					dot := dotInt8Int16(qbuf[off:off+32], xBlock, 32)
-					sum += float32(dot) * (scale * xScale)
+					if cpu.HasAVXVNNI {
+						var u8tmp [32]uint8
+						for i, v := range qbuf[off : off+32] {
+							u8tmp[i] = uint8(v) ^ 0x80
+						}
+						xBlock := qx.q[b*32 : b*32+32]
+						dot := dotUint8Int8(u8tmp[:], xBlock, 32)
+						corrected := dot - 128*qx.blockSums[b]
+						sum += float32(corrected) * (scale * xScale)
+					} else {
+						xBlock := qx.q16[b*32 : b*32+32]
+						dot := dotInt8Int16(qbuf[off:off+32], xBlock, 32)
+						sum += float32(dot) * (scale * xScale)
+					}
 				} else {
 					sum += scale * dotInt8Float32(qbuf[off:off+32], x[col:], n)
 				}
@@ -828,6 +874,68 @@ func dotInt8Int16SIMD(q []int8, x []int16, n int) int32 {
 	return sum
 }
 
+func dotUint8Int8(qWeights []uint8, qActivations []int8, n int) int32 {
+	if cpu.HasAVXVNNI && n >= 32 {
+		return dotUint8Int8SIMD(qWeights, qActivations, n)
+	}
+	return dotUint8Int8Scalar(qWeights, qActivations, n)
+}
+
+// dotUint8Int8Scalar is the reference scalar implementation
+func dotUint8Int8Scalar(qWeights []uint8, qActivations []int8, n int) int32 {
+	var sum int32
+	for i := 0; i < n; i++ {
+		sum += int32(qWeights[i]) * int32(qActivations[i])
+	}
+	return sum
+}
+
+// dotUint8Int8SIMD uses AVX-VNNI AddDotProductQuads (VPDPBUSD)
+// Processes 32 elements at a time (256-bit SIMD vectors)
+func dotUint8Int8SIMD(qWeights []uint8, qActivations []int8, n int) int32 {
+	var acc archsimd.Int32x8
+	i := 0
+
+	// Process 32 elements at a time (each element is 1 byte)
+	// Using 256-bit vectors (Int32x8) for the accumulator
+	for ; i+32 <= n; i += 32 {
+		vWeights := archsimd.LoadUint8x32Slice(qWeights[i:])
+		vActivations := archsimd.LoadInt8x32Slice(qActivations[i:])
+		acc = acc.AddDotProductQuads(vWeights, vActivations)
+	}
+
+	// Horizontal sum of accumulator
+	var tmp [8]int32
+	acc.Store(&tmp)
+	sum := tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
+
+	// Scalar tail for remaining elements
+	for ; i < n; i++ {
+		sum += int32(qWeights[i]) * int32(qActivations[i])
+	}
+	return sum
+}
+
+// convertInt8ToUint8 converts signed int8 weights to unsigned uint8
+// by adding 128 offset. This shifts range from [-127,127] to [1,255].
+// The conversion is done in-place in the qx.u8buf buffer.
+func convertInt8ToUint8(qx *QuantVec, weights []int8, n int) []uint8 {
+	// Ensure buffer is large enough
+	if cap(qx.u8buf) < n {
+		qx.u8buf = make([]uint8, n)
+	} else {
+		qx.u8buf = qx.u8buf[:n]
+	}
+
+	// Convert using scalar implementation
+	// (SIMD conversion of int8→uint8 with offset is complex in archsimd)
+	for i := 0; i < n; i++ {
+		qx.u8buf[i] = uint8(int16(weights[i]) + 128)
+	}
+
+	return qx.u8buf
+}
+
 func quantizeVecBlocks(x []float32, blocks int) ([]int8, []int16, []float32) {
 	if blocks <= 0 {
 		return nil, nil, nil
@@ -835,11 +943,11 @@ func quantizeVecBlocks(x []float32, blocks int) ([]int8, []int16, []float32) {
 	qx := make([]int8, blocks*32)
 	qx16 := make([]int16, blocks*32)
 	scales := make([]float32, blocks)
-	quantizeVecBlocksInto(x, blocks, qx, qx16, scales)
+	quantizeVecBlocksInto(x, blocks, qx, qx16, scales) // no blockSums needed
 	return qx, qx16, scales
 }
 
-func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, scales []float32) {
+func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, scales []float32, blockSums ...[]int32) {
 	if blocks <= 0 {
 		return
 	}
@@ -851,6 +959,13 @@ func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, sca
 	}
 	for i := range scales {
 		scales[i] = 0
+	}
+	var bsums []int32
+	if len(blockSums) > 0 {
+		bsums = blockSums[0]
+		for i := range bsums {
+			bsums[i] = 0
+		}
 	}
 	for b := range blocks {
 		base := b * 32
@@ -874,6 +989,7 @@ func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, sca
 		scale := maxAbs / 127.0
 		scales[b] = scale
 		inv := float32(1.0) / scale
+		var bsum int32
 		for i := range 32 {
 			idx := base + i
 			if idx >= len(x) {
@@ -888,6 +1004,10 @@ func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, sca
 			}
 			qx[base+i] = int8(q)
 			qx16[base+i] = int16(int8(q))
+			bsum += q
+		}
+		if bsums != nil {
+			bsums[b] = bsum
 		}
 	}
 }
