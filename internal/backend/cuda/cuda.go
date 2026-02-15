@@ -159,6 +159,27 @@ func (r *cudaRuntime) ForwardToken(id int) (logits []float32, err error) {
 	return logits, nil
 }
 
+func (r *cudaRuntime) ForwardTokenGreedy(id int) (next int, err error) {
+	if r.model == nil {
+		return 0, fmt.Errorf("cuda runtime is closed")
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = cudaExecutionError(rec)
+		}
+	}()
+	next, err = r.model.ForwardTokenGreedy(id)
+	if err != nil {
+		return 0, err
+	}
+	if !r.managedFallbackLog && native.ManagedFallbackUsed() {
+		fmt.Fprintln(os.Stderr, "CUDA Unified Memory fallback active (device memory pressure detected)")
+		r.managedFallbackLog = true
+	}
+	r.tokenCount.Add(1)
+	return next, nil
+}
+
 func (r *cudaRuntime) Reset() {
 	if r.model == nil {
 		return

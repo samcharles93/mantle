@@ -62,6 +62,13 @@ type Ops struct {
 	lastResultLen     int                 // length in float32 elements
 	lastResultValid   bool                // unconsumed device result available
 
+	// device-resident logits result for greedy decode (no host copy)
+	greedyResultDev   native.DeviceBuffer
+	greedyResultLen   int
+	greedyResultValid bool
+	argmaxIdxDev      native.DeviceBuffer
+	argmaxIdxBytes    int
+
 	// persistent device mirror for the latest pre-norm output host slice
 	// produced by DeviceRMSNorm; used by DeviceMatVec to avoid H2D re-uploads.
 	normDev      native.DeviceBuffer
@@ -217,6 +224,7 @@ func (o *Ops) ResetConvStates() {
 		delete(o.convStateReady, k)
 	}
 	o.lastResultValid = false
+	o.greedyResultValid = false
 }
 
 // FusedRMSNormMatVec performs fused RMSNorm + MatVec in a single kernel
@@ -459,6 +467,7 @@ func (o *Ops) BeginToken(x []float32) {
 	o.xHostPtr = uintptr(unsafe.Pointer(&x[0]))
 	o.xHostDirty = false
 	o.xDevDirty = false
+	o.greedyResultValid = false
 	o.clearNormDeviceView()
 	// Ensure persistent device buffer
 	bytes := int64(len(x)) * int64(unsafe.Sizeof(float32(0)))
@@ -691,6 +700,91 @@ func (o *Ops) DeviceMatVec(dst []float32, w *simd.Mat, x []float32) bool {
 	return true
 }
 
+// DeviceMatVecNoCopy implements simd.DeviceStateOps.
+// It computes matvec on device and keeps the result device-resident.
+func (o *Ops) DeviceMatVecNoCopy(w *simd.Mat, x []float32) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if w == nil || w.R == 0 || w.C == 0 {
+		return false
+	}
+
+	var (
+		xDev native.DeviceBuffer
+		xLen int
+	)
+	switch {
+	case o.isDeviceX(x):
+		if o.xHostDirty {
+			bytes := int64(o.xHostLen) * int64(unsafe.Sizeof(float32(0)))
+			if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&x[0]), bytes); err != nil {
+				return false
+			}
+			o.xHostDirty = false
+			o.xDevDirty = false
+		}
+		xDev = o.xPersistDev
+		xLen = o.xHostLen
+	case o.isNormDeviceX(x):
+		xDev = o.normDev
+		xLen = o.normHostLen
+	default:
+		return false
+	}
+
+	if err := o.matVecWithDeviceInputNoCopy(w, xDev, xLen); err != nil {
+		return false
+	}
+	o.greedyResultDev = o.yDev
+	o.greedyResultLen = w.R
+	o.greedyResultValid = true
+	return true
+}
+
+// DeviceArgMaxLastResult implements simd.DeviceStateOps.
+func (o *Ops) DeviceArgMaxLastResult() (idx int, ok bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.greedyResultValid || o.greedyResultLen <= 0 || o.greedyResultDev.Ptr() == nil {
+		return 0, false
+	}
+	if err := o.ensureArgMaxIndexBuffer(); err != nil {
+		return 0, false
+	}
+	if err := native.ArgMaxF32To(o.greedyResultDev, o.greedyResultLen, o.argmaxIdxDev, o.stream); err != nil {
+		return 0, false
+	}
+	var i32 int32
+	if err := native.MemcpyD2H(unsafe.Pointer(&i32), o.argmaxIdxDev, int64(unsafe.Sizeof(i32))); err != nil {
+		return 0, false
+	}
+	i := int(i32)
+	if i < 0 || i >= o.greedyResultLen {
+		return 0, false
+	}
+	return i, true
+}
+
+func (o *Ops) ensureArgMaxIndexBuffer() error {
+	const bytes = int(unsafe.Sizeof(int32(0)))
+	if o.argmaxIdxDev.Ptr() != nil && o.argmaxIdxBytes >= bytes {
+		return nil
+	}
+	if o.argmaxIdxDev.Ptr() != nil {
+		_ = o.argmaxIdxDev.Free()
+		o.argmaxIdxDev = native.DeviceBuffer{}
+		o.argmaxIdxBytes = 0
+	}
+	buf, err := native.AllocDevice(int64(bytes))
+	if err != nil {
+		return err
+	}
+	o.argmaxIdxDev = buf
+	o.argmaxIdxBytes = bytes
+	return nil
+}
+
 func (o *Ops) Close() error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -799,6 +893,9 @@ func (o *Ops) Close() error {
 	if e := o.normDev.Free(); e != nil && err == nil {
 		err = e
 	}
+	if e := o.argmaxIdxDev.Free(); e != nil && err == nil {
+		err = e
+	}
 	if e := o.xHost.Free(); e != nil && err == nil {
 		err = e
 	}
@@ -812,6 +909,7 @@ func (o *Ops) Close() error {
 	o.aDev = native.DeviceBuffer{}
 	o.xPersistDev = native.DeviceBuffer{}
 	o.normDev = native.DeviceBuffer{}
+	o.argmaxIdxDev = native.DeviceBuffer{}
 	o.xHost = native.HostBuffer{}
 	o.yHost = native.HostBuffer{}
 	o.xCapBytes = 0
@@ -822,11 +920,13 @@ func (o *Ops) Close() error {
 	o.aDevBytes = 0
 	o.xPersistBytes = 0
 	o.normDevBytes = 0
+	o.argmaxIdxBytes = 0
 	o.xHostRef = nil
 	o.xHostPtr = 0
 	o.xHostLen = 0
 	o.xHostDirty = false
 	o.xDevDirty = false
+	o.greedyResultValid = false
 	o.clearNormDeviceView()
 
 	return err
@@ -985,6 +1085,58 @@ func (o *Ops) matVecWithDeviceInput(dst []float32, w *simd.Mat, xDev native.Devi
 		return err
 	}
 	return nil
+}
+
+// matVecWithDeviceInputNoCopy performs MatVec using an already resident
+// device input and leaves the output in o.yDev without host copy.
+// Requires o.mu locked.
+func (o *Ops) matVecWithDeviceInputNoCopy(w *simd.Mat, xDev native.DeviceBuffer, xLen int) error {
+	if w == nil || w.R == 0 || w.C == 0 {
+		return fmt.Errorf("invalid weight matrix")
+	}
+	if xLen != w.C {
+		return fmt.Errorf("x length mismatch")
+	}
+	if useQuantKernel() && (shouldPreferQuantWeights(w, currentCUDAWeightMode()) || (w.Quant != nil && w.Quant.ValidFor(w))) {
+		qw, err := o.ensureQuantMat(w)
+		if err != nil {
+			return err
+		}
+		yBytes := int64(w.R) * int64(unsafe.Sizeof(float32(0)))
+		if err := o.ensureDeviceVecs(0, int(yBytes)); err != nil {
+			return err
+		}
+		return o.runQuantKernel(qw, xDev, o.yDev, o.stream)
+	}
+	devW, err := o.deviceMat(w)
+	if err != nil {
+		return err
+	}
+	yBytes := int64(w.R) * int64(unsafe.Sizeof(float32(0)))
+	if err := o.ensureDeviceVecs(0, int(yBytes)); err != nil {
+		return err
+	}
+	return native.GemmEx(
+		o.blas,
+		native.BlasOpT,
+		native.BlasOpN,
+		w.R,
+		1,
+		w.C,
+		1.0,
+		devW.buf,
+		devW.dtype,
+		w.C,
+		xDev,
+		native.BlasF32,
+		w.C,
+		0.0,
+		o.yDev,
+		native.BlasF32,
+		w.R,
+		native.BlasComputeF32,
+		native.BlasGemmDefault,
+	)
 }
 
 // matVecQuantWithDeviceX performs quantized MatVec using x already on device.
