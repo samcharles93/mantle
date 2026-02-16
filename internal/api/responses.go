@@ -204,16 +204,46 @@ func (s *Server) handleInputItems(c *echo.Context) error {
 	if !ok || !rec.Visible {
 		return writeNotFound(c, "response not found")
 	}
+	
+	// Parse pagination parameters
+	limit := parseIntQueryParam(c.QueryParam("limit"), 20, 1, 100)
+	order := c.QueryParam("order")
+	if order == "" {
+		order = "desc"
+	}
+	if order != "asc" && order != "desc" {
+		return writeBadRequest(c, "order must be 'asc' or 'desc'")
+	}
+	after := c.QueryParam("after")
+	// include parameter is parsed but not currently used (reserved for future)
+	_ = c.QueryParam("include")
+	
+	items := rec.InputItems
+	if order == "desc" {
+		items = reverseItems(items)
+	}
+	
+	// Apply 'after' cursor
+	if after != "" {
+		items = filterItemsAfter(items, after)
+	}
+	
+	// Apply limit and determine if there are more items
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	
 	out := ResponseInputItemList{
 		Object:  "list",
-		Data:    rec.InputItems,
+		Data:    items,
 		FirstID: "",
 		LastID:  "",
-		HasMore: false,
+		HasMore: hasMore,
 	}
-	if len(rec.InputItems) > 0 {
-		out.FirstID = rec.InputItems[0].ID
-		out.LastID = rec.InputItems[len(rec.InputItems)-1].ID
+	if len(items) > 0 {
+		out.FirstID = items[0].ID
+		out.LastID = items[len(items)-1].ID
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -405,4 +435,47 @@ func decodeJSON[T any](r io.Reader) (T, error) {
 		return out, err
 	}
 	return out, nil
+}
+
+func parseIntQueryParam(s string, defaultVal, min, max int) int {
+	if s == "" {
+		return defaultVal
+	}
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return defaultVal
+		}
+		n = n*10 + int(r-'0')
+		if n > max {
+			return max
+		}
+	}
+	if n < min {
+		return min
+	}
+	return n
+}
+
+func reverseItems(items []ResponseItem) []ResponseItem {
+	if len(items) == 0 {
+		return items
+	}
+	reversed := make([]ResponseItem, len(items))
+	for i, item := range items {
+		reversed[len(items)-1-i] = item
+	}
+	return reversed
+}
+
+func filterItemsAfter(items []ResponseItem, afterID string) []ResponseItem {
+	for i, item := range items {
+		if item.ID == afterID {
+			if i+1 < len(items) {
+				return items[i+1:]
+			}
+			return nil
+		}
+	}
+	return items
 }
