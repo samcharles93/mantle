@@ -155,6 +155,14 @@ func (s *Server) handleGetResponse(c *echo.Context) error {
 	if !ok || !rec.Visible {
 		return writeNotFound(c, "response not found")
 	}
+	
+	// Parse query parameters
+	// include - for additional fields (reserved for future use)
+	_ = c.QueryParam("include")
+	// include_obfuscation - for obfuscated data (reserved for future use)
+	includeObfuscation := c.QueryParam("include_obfuscation")
+	_ = includeObfuscation // Currently not implemented, but parsed for spec compliance
+	
 	if streamParam(c) {
 		return s.writeSSE(c, rec.Response, rec.Response.Background != nil && *rec.Response.Background)
 	}
@@ -290,12 +298,15 @@ func (s *Server) handleCompactResponse(c *echo.Context) error {
 }
 
 func (s *Server) handleInputTokens(c *echo.Context) error {
-	req, err := decodeJSON[CompactResponseReq](c.Request().Body)
+	req, err := decodeJSON[TokenCountsBody](c.Request().Body)
 	if err != nil {
 		return writeBadRequest(c, err.Error())
 	}
 	if req.Input == nil {
 		return writeBadRequest(c, "input is required")
+	}
+	if req.Model == "" {
+		return writeBadRequest(c, "model is required")
 	}
 	var (
 		inputItems []ResponseItem

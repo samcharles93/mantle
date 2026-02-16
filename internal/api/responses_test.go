@@ -172,7 +172,7 @@ func TestCompactAndInputTokensEndpoints(t *testing.T) {
 		t.Fatalf("expected compact output")
 	}
 
-	tokRec := doJSON(t, e, http.MethodPost, "/v1/responses/input_tokens", `{"input":"hello world"}`)
+	tokRec := doJSON(t, e, http.MethodPost, "/v1/responses/input_tokens", `{"model":"test","input":"hello world"}`)
 	if tokRec.Code != http.StatusOK {
 		t.Fatalf("input_tokens status: got %d body=%s", tokRec.Code, tokRec.Body.String())
 	}
