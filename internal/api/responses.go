@@ -457,13 +457,17 @@ func parseIntQueryParam(s string, defaultVal, min, max int) int {
 		if r < '0' || r > '9' {
 			return defaultVal
 		}
-		n = n*10 + int(r-'0')
-		if n > max {
+		// Check for overflow before multiplication
+		if n > (max-int(r-'0'))/10 {
 			return max
 		}
+		n = n*10 + int(r-'0')
 	}
 	if n < min {
 		return min
+	}
+	if n > max {
+		return max
 	}
 	return n
 }
@@ -480,6 +484,9 @@ func reverseItems(items []ResponseItem) []ResponseItem {
 }
 
 func filterItemsAfter(items []ResponseItem, afterID string) []ResponseItem {
+	// Find the item with the given ID and return all items after it.
+	// If the ID is not found, returns the original slice (treating it as if
+	// pagination should start from the beginning).
 	for i, item := range items {
 		if item.ID == afterID {
 			if i+1 < len(items) {
