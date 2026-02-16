@@ -388,6 +388,12 @@ func sendStreamEvent(w io.Writer, event streamEvent, startingAfter int) error {
 	if err != nil {
 		return err
 	}
+	// Emit SSE event: line followed by data: line (OpenAI API spec)
+	if event.Type != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\n", event.Type); err != nil {
+			return err
+		}
+	}
 	_, err = fmt.Fprintf(w, "data: %s\n\n", string(b))
 	return err
 }
