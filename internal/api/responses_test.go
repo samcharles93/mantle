@@ -224,3 +224,135 @@ func TestPreviousResponseIDCarriesHistoryButStoresOnlyCurrentInput(t *testing.T)
 		t.Fatalf("expected only current turn input item, got %d", len(list.Data))
 	}
 }
+
+func TestInputItemsPagination(t *testing.T) {
+	t.Parallel()
+
+	e := newTestEcho()
+
+	// Create a response with multiple input items by chaining
+	first := doJSON(t, e, http.MethodPost, "/v1/responses", `{"input":"first message"}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first create status: got %d body=%s", first.Code, first.Body.String())
+	}
+	var firstResp ResponsesResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &firstResp); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+
+	second := doJSON(t, e, http.MethodPost, "/v1/responses", `{"previous_response_id":"`+firstResp.ID+`","input":"second message"}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second create status: got %d body=%s", second.Code, second.Body.String())
+	}
+	var secondResp ResponsesResponse
+	if err := json.Unmarshal(second.Body.Bytes(), &secondResp); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+
+	// Test default pagination (limit=20, order=desc)
+	items := doJSON(t, e, http.MethodGet, "/v1/responses/"+secondResp.ID+"/input_items", "")
+	if items.Code != http.StatusOK {
+		t.Fatalf("input_items status: got %d body=%s", items.Code, items.Body.String())
+	}
+	var list ResponseInputItemList
+	if err := json.Unmarshal(items.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode input_items: %v", err)
+	}
+	if list.Object != "list" {
+		t.Fatalf("expected list object, got %q", list.Object)
+	}
+	if list.HasMore {
+		t.Fatalf("expected no more items")
+	}
+
+	// Test limit parameter
+	items = doJSON(t, e, http.MethodGet, "/v1/responses/"+secondResp.ID+"/input_items?limit=1", "")
+	if items.Code != http.StatusOK {
+		t.Fatalf("input_items with limit status: got %d body=%s", items.Code, items.Body.String())
+	}
+	if err := json.Unmarshal(items.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode input_items: %v", err)
+	}
+	if len(list.Data) > 1 {
+		t.Fatalf("expected at most 1 item with limit=1, got %d", len(list.Data))
+	}
+
+	// Test invalid order parameter
+	items = doJSON(t, e, http.MethodGet, "/v1/responses/"+secondResp.ID+"/input_items?order=invalid", "")
+	if items.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid order, got %d body=%s", items.Code, items.Body.String())
+	}
+}
+
+func TestInputTokensValidation(t *testing.T) {
+	t.Parallel()
+
+	e := newTestEcho()
+
+	// Test missing model
+	tokRec := doJSON(t, e, http.MethodPost, "/v1/responses/input_tokens", `{"input":"hello"}`)
+	if tokRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing model, got %d body=%s", tokRec.Code, tokRec.Body.String())
+	}
+	if !strings.Contains(tokRec.Body.String(), "model is required") {
+		t.Fatalf("unexpected error message: %s", tokRec.Body.String())
+	}
+
+	// Test missing input
+	tokRec = doJSON(t, e, http.MethodPost, "/v1/responses/input_tokens", `{"model":"test"}`)
+	if tokRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing input, got %d body=%s", tokRec.Code, tokRec.Body.String())
+	}
+	if !strings.Contains(tokRec.Body.String(), "input is required") {
+		t.Fatalf("unexpected error message: %s", tokRec.Body.String())
+	}
+
+	// Test valid request
+	tokRec = doJSON(t, e, http.MethodPost, "/v1/responses/input_tokens", `{"model":"test","input":"hello"}`)
+	if tokRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid request, got %d body=%s", tokRec.Code, tokRec.Body.String())
+	}
+}
+
+func TestSSEEventFraming(t *testing.T) {
+	t.Parallel()
+
+	provider := testProvider{
+		engine: testEngine{text: "test output"},
+	}
+	service := NewInferenceService(provider)
+	server := NewServer(NewResponseStore(), service)
+	e := echo.New()
+	server.Register(e)
+
+	// Test streaming response
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hello","stream":true}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	// Check for SSE event: lines
+	if !strings.Contains(body, "event: response.created") {
+		t.Errorf("expected 'event: response.created' in SSE output")
+	}
+	if !strings.Contains(body, "event: response.in_progress") {
+		t.Errorf("expected 'event: response.in_progress' in SSE output")
+	}
+	if !strings.Contains(body, "event: response.completed") {
+		t.Errorf("expected 'event: response.completed' in SSE output")
+	}
+	// Verify data: lines follow event: lines
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "event: ") {
+			if i+1 < len(lines) && !strings.HasPrefix(lines[i+1], "data: ") {
+				t.Errorf("expected 'data:' line after 'event:' line at position %d", i)
+			}
+		}
+	}
+}
