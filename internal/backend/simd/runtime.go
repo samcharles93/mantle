@@ -1,6 +1,9 @@
 package simd
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // ForwardToken runs one autoregressive step for the provided token id.
 // It returns a logits slice owned by the model (overwritten on next call).
@@ -201,9 +204,35 @@ func (m *Instance) Reset() {
 	}
 }
 
+// PrecomputeRoPETables precomputes RoPE tables for the maximum context length.
+func (m *Instance) PrecomputeRoPETables() {
+	if len(m.RopeInvFreq) == 0 {
+		return // Nothing to precompute
+	}
+
+	half := m.HeadDim / 2
+	totalEntries := m.MaxContext * half
+
+	m.RopeCosTable = make([]float32, totalEntries)
+	m.RopeSinTable = make([]float32, totalEntries)
+
+	// Precompute sin/cos values for all positions and frequencies
+	for pos := 0; pos < m.MaxContext; pos++ {
+		for i := range half {
+			angle := float64(pos) * m.RopeInvFreq[i]
+			cosVal := float32(math.Cos(angle)) * m.RopeAttnScale
+			sinVal := float32(math.Sin(angle)) * m.RopeAttnScale
+
+			idx := pos*half + i
+			m.RopeCosTable[idx] = cosVal
+			m.RopeSinTable[idx] = sinVal
+		}
+	}
+}
+
 // UpdateRoPE recomputes RoPE frequency scaling.
 // Implements model.Runtime interface.
 func (m *Instance) UpdateRoPE() {
-	// Implementation will be moved from model/loader.go
-	// For now, this is a placeholder
+	// Recompute RoPE tables when RoPE parameters change
+	m.PrecomputeRoPETables()
 }

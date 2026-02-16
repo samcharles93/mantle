@@ -259,7 +259,9 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 	if stats.GenerationDuration.Seconds() > 0 {
 		stats.GenerationTPS = float64(stats.TokensGenerated) / stats.GenerationDuration.Seconds()
 	}
-	stats.Duration = time.Since(start)
+
+	stats.Duration = stats.GenerationDuration
+
 	if stats.Duration.Seconds() > 0 {
 		stats.TPS = float64(stats.TokensGenerated) / stats.Duration.Seconds()
 	}
