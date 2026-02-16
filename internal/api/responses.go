@@ -485,7 +485,7 @@ func filterItemsAfter(items []ResponseItem, afterID string) []ResponseItem {
 			if i+1 < len(items) {
 				return items[i+1:]
 			}
-			return nil
+			return []ResponseItem{}
 		}
 	}
 	return items

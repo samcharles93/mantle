@@ -240,7 +240,12 @@ func TestInputItemsPagination(t *testing.T) {
 		t.Fatalf("decode first response: %v", err)
 	}
 
-	second := doJSON(t, e, http.MethodPost, "/v1/responses", `{"previous_response_id":"`+firstResp.ID+`","input":"second message"}`)
+	secondReq := map[string]any{
+		"previous_response_id": firstResp.ID,
+		"input":                "second message",
+	}
+	secondBody, _ := json.Marshal(secondReq)
+	second := doJSON(t, e, http.MethodPost, "/v1/responses", string(secondBody))
 	if second.Code != http.StatusOK {
 		t.Fatalf("second create status: got %d body=%s", second.Code, second.Body.String())
 	}
@@ -326,7 +331,12 @@ func TestSSEEventFraming(t *testing.T) {
 	server.Register(e)
 
 	// Test streaming response
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hello","stream":true}`))
+	reqBody := map[string]any{
+		"input":  "hello",
+		"stream": true,
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(bodyBytes))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
