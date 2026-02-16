@@ -1,3 +1,5 @@
+//go:build goexperiment.simd
+
 package simd
 
 import "simd/archsimd"
