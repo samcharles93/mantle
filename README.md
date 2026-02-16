@@ -1,5 +1,13 @@
 # Mantle
 
+<!-- 
+  !!! DO NOT USE THIS BRANCH !!!
+
+  This branch is for testing and experimentation on the changes submitted in go src: [https://go-review.googlesource.com/c/arch/+/745760](#745760) & [https://go-review.googlesource.com/c/go/+/745780](#745780)
+  and will not work without compiling those exact changes.
+ -->
+
+
 Mantle is a model execution experiment in Pure Go.
 
 This is just an experiment which will probably have heaps of changes and optimisations along the way. it's in no way a replacement for cpp-based apps. 
