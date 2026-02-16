@@ -100,7 +100,7 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	case backend.Auto:
 		runtime, err = backend.New(backend.CUDA)
 		if err != nil {
-			log.Warn("CUDA backend unavailable, using CPU", "error", err)
+			log.Debug("CUDA backend not found, trying CPU", "debug", err) // not necessarily an error here, could be intentional
 			runtime, err = backend.New(backend.CPU)
 			if err != nil {
 				return cleanup(err)
