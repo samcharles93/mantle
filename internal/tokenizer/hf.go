@@ -1,12 +1,13 @@
 package tokenizer
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/goccy/go-json"
 )
 
 type HFTokenizer struct {
