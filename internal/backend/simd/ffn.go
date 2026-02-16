@@ -1,3 +1,5 @@
+//go:build goexperiment.simd
+
 package simd
 
 import "simd/archsimd"
@@ -52,6 +54,7 @@ func FFN(m *Instance, layer *Layer, x []float32) []float32 {
 	// Vectorized SiLU activation
 	n := len(m.Scratch.FfnAct)
 	i := 0
+
 	if cpu.HasAVX2 {
 		for ; i+8 <= n; i += 8 {
 			vgate := archsimd.LoadFloat32x8Slice(m.Scratch.FfnGate[i:])
