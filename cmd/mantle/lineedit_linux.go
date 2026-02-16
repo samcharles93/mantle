@@ -179,24 +179,25 @@ func readInteractiveLine(prompt string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		for i := 0; i < n; i++ {
+		for i := range n {
 			b := buf[i]
 			if escState != 0 {
 				switch escState {
 				case 1:
-					if b == '[' {
+					switch b {
+					case '[':
 						escState = 2
 						escBuf.Reset()
-					} else if b == 'b' || b == 'B' {
+					case 'b', 'B':
 						moveWordLeft() // Alt+b
 						escState = 0
-					} else if b == 'f' || b == 'F' {
+					case 'f', 'F':
 						moveWordRight() // Alt+f
 						escState = 0
-					} else if b == 127 {
+					case 127:
 						deleteWordBack() // Alt+Backspace
 						escState = 0
-					} else {
+					default:
 						escState = 0
 					}
 				case 2:
