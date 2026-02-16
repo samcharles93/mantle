@@ -46,12 +46,22 @@ func computeOptimalBatchSize(blocksPerRow int, totalRows int) int {
 		maxRowsL1 = 1
 	}
 
-	// Limit batch size to reasonable values
-	const minBatch = 1
-	const maxBatch = 16
+	// For larger matrices, consider L2 cache (assume 9MB for this system)
+	const l2CacheSize = 9 * 1024 * 1024
+	const l2Reserved = 64 * 1024
+	availableL2 := l2CacheSize - l2Reserved
+	maxRowsL2 := availableL2 / bytesPerRow
+	if maxRowsL2 <= 0 {
+		maxRowsL2 = 16
+	}
 
-	// Ensure we don't exceed total rows
-	batch := min(min(max(maxRowsL1, minBatch), maxBatch), totalRows)
+	// Use the larger of L1 or L2 calculated, but cap at reasonable values
+	maxRows := max(maxRowsL1, maxRowsL2)
+
+	const minBatch = 1
+	const maxBatch = 64 // Increased from 16
+
+	batch := min(min(max(maxRows, minBatch), maxBatch), totalRows)
 
 	return batch
 }
@@ -619,6 +629,7 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 }
 
 func matVecRangeF16(dst []float32, w *Mat, x []float32, rs, re int) {
+	// TODO: Implement SIMD version for F16 conversion and multiply, e.g., using F16C or AVX-512 FP16 if available.
 	raw := w.Raw
 	if u16raw, ok := rawUint16LE(raw); ok {
 		for i := rs; i < re; i++ {

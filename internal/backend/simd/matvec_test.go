@@ -1,9 +1,8 @@
 package simd
 
 import (
+	"fmt"
 	"math"
-	"runtime"
-	"sync"
 	"testing"
 
 	"github.com/samcharles93/mantle/pkg/mcf"
@@ -17,34 +16,6 @@ func matVecNaive(dst []float32, w *Mat, x []float32) {
 			sum += row[j] * x[j]
 		}
 		dst[i] = sum
-	}
-}
-
-func matVecParWaitGroup(dst []float32, w *Mat, x []float32) {
-	workers := min(runtime.GOMAXPROCS(0), w.R)
-	var wg sync.WaitGroup
-	chunk := (w.R + workers - 1) / workers
-	for i := range workers {
-		rs := i * chunk
-		re := min(rs+chunk, w.R)
-		if rs >= re {
-			break
-		}
-		wg.Add(1)
-		go matVecParWorker(&wg, dst, w, x, rs, re)
-	}
-	wg.Wait()
-}
-
-func matVecParWorker(wg *sync.WaitGroup, dst []float32, w *Mat, x []float32, rs, re int) {
-	defer wg.Done()
-	for r := rs; r < re; r++ {
-		row := w.Data[r*w.Stride : r*w.Stride+w.C]
-		var sum float32
-		for j := 0; j < w.C; j++ {
-			sum += row[j] * x[j]
-		}
-		dst[r] = sum
 	}
 }
 
@@ -68,7 +39,7 @@ func BenchmarkMatVecParWG(b *testing.B) {
 	FillRand(&w, 1)
 
 	for b.Loop() {
-		matVecParWaitGroup(dst, &w, x)
+		MatVec(dst, &w, x)
 	}
 }
 
@@ -256,7 +227,51 @@ func BenchmarkMatVecPoolBF16SIMD(b *testing.B) {
 }
 
 func BenchmarkMatVecPoolBF16Scalar(b *testing.B) {
+	benchMatVecPoolBF16Scalar(b, 2048, 2048)
+}
+
+func BenchmarkMatVecScalable(b *testing.B) {
+	sizes := []struct{ r, c int }{
+		{128, 128},
+		{512, 512},
+		{2048, 2048},
+		{4096, 1024},
+	}
+	for _, size := range sizes {
+		b.Run(fmt.Sprintf("%dx%d", size.r, size.c), func(b *testing.B) {
+			w := NewMat(size.r, size.c)
+			x := make([]float32, size.c)
+			dst := make([]float32, size.r)
+			FillRand(&w, 1)
+
+			b.ResetTimer()
+			for b.Loop() {
+				MatVec(dst, &w, x)
+			}
+		})
+	}
+}
+
+func BenchmarkMatVecMixedPrecision(b *testing.B) {
 	r, c := 2048, 2048
+	// FP32 matvec
+	wF32 := NewMat(r, c)
+	xF32 := make([]float32, c)
+	dstF32 := make([]float32, r)
+	FillRand(&wF32, 1)
+	// BF16 matvec
+	raw := encodeBF16Raw(wF32.Data)
+	wBF16, _ := NewMatFromRaw(r, c, mcf.DTypeBF16, raw)
+	dstBF16 := make([]float32, r)
+
+	b.ResetTimer()
+	for b.Loop() {
+		MatVec(dstF32, &wF32, xF32)
+		MatVec(dstBF16, &wBF16, xF32)
+	}
+}
+
+func benchMatVecPoolBF16Scalar(b *testing.B, r, c int) {
 	data := make([]float32, r*c)
 	w := Mat{
 		R:      r,
@@ -278,6 +293,27 @@ func BenchmarkMatVecPoolBF16Scalar(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		matVecRangeBF16Scalar(dst, &wRaw, x, 0, r)
+	}
+}
+
+func TestEnsureWorkerBuffers(t *testing.T) {
+	w := &matVecWorker{}
+	qbuf, scales := w.ensureWorkerBuffers(64, 16)
+	if len(qbuf) != 64 || len(scales) != 16 {
+		t.Errorf("expected buffers of size 64 and 16, got %d %d", len(qbuf), len(scales))
+	}
+	// Reuse
+	qbuf2, scales2 := w.ensureWorkerBuffers(32, 8)
+	if len(qbuf2) != 32 || len(scales2) != 8 {
+		t.Errorf("expected buffers of size 32 and 8, got %d %d", len(qbuf2), len(scales2))
+	}
+	if cap(qbuf2) < 64 || cap(scales2) < 16 {
+		t.Errorf("expected reuse, but cap too small: %d %d", cap(qbuf2), cap(scales2))
+	}
+	// Expand
+	qbuf3, scales3 := w.ensureWorkerBuffers(128, 32)
+	if len(qbuf3) != 128 || len(scales3) != 32 {
+		t.Errorf("expected buffers of size 128 and 32, got %d %d", len(qbuf3), len(scales3))
 	}
 }
 

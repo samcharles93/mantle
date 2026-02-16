@@ -345,6 +345,30 @@ func BenchmarkMatVecK6(b *testing.B) {
 	}
 }
 
+func BenchmarkMatVecQuantReuse(b *testing.B) {
+	const (
+		rows  = 512
+		cols  = 512
+		scale = 0.05
+	)
+	qvals := makeQVals(rows * cols)
+	payload := buildK4Payload(rows, cols, scale, qvals)
+	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: payload}
+	x := make([]float32, cols)
+	for i := range x {
+		x[i] = float32((i%13)-6) * 0.11
+	}
+	dst := make([]float32, rows)
+
+	qx := PrepareQuantVec(x)
+	defer ReleaseQuantVec(qx)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatVecWithQuant(dst, &w, x, qx)
+	}
+}
+
 func matVecExpected(rows, cols int, scale float32, qvals []int8, x []float32) []float32 {
 	if cpu.HasAVX2 {
 		return matVecExpectedInt8(rows, cols, scale, qvals, x)
