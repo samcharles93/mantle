@@ -2,9 +2,8 @@ package simd
 
 import (
 	"runtime"
-	"sync"
-
 	"simd/archsimd"
+	"sync"
 
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
@@ -159,8 +158,8 @@ func matVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec) {
 		panic("matvec shape mismatch")
 	}
 
-	useQuant := w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType) && cpu.HasAVX2
 	var localQx *QuantVec
+	useQuant := w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType) && cpu.HasAVX2
 	if useQuant {
 		blocks := (w.C + 31) / 32
 		if qx != nil && qx.Blocks == blocks && len(qx.q) >= blocks*32 && len(qx.q16) >= blocks*32 && len(qx.scales) >= blocks {
@@ -253,10 +252,104 @@ func matVecRangeF32Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 }
 
 // matVecRangeF32SIMD computes matvec for F32 using AVX2 SIMD.
-// Uses a single accumulator to minimize register pressure.
+// Processes 4 rows at a time for better ILP and cache utilization.
 func matVecRangeF32SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 	c := w.C
 	i := rs
+
+	// AVX2 version
+
+	// Process 4 rows at once for better ILP and latency hiding
+	for ; i+3 < re; i += 4 {
+		row0 := w.Data[i*w.Stride : i*w.Stride+w.C]
+		row1 := w.Data[(i+1)*w.Stride : (i+1)*w.Stride+w.C]
+		row2 := w.Data[(i+2)*w.Stride : (i+2)*w.Stride+w.C]
+		row3 := w.Data[(i+3)*w.Stride : (i+3)*w.Stride+w.C]
+
+		var acc0 archsimd.Float32x8
+		var acc1 archsimd.Float32x8
+		var acc2 archsimd.Float32x8
+		var acc3 archsimd.Float32x8
+		j := 0
+
+		// Process 16 values per iteration for better pipelining
+		for ; j+16 <= c; j += 16 {
+			// Load input vectors once
+			vx0 := archsimd.LoadFloat32x8Slice(x[j:])
+			vx1 := archsimd.LoadFloat32x8Slice(x[j+8:])
+
+			// Load row vectors (memory latency hiding)
+			vrow0a := archsimd.LoadFloat32x8Slice(row0[j:])
+			vrow1a := archsimd.LoadFloat32x8Slice(row1[j:])
+			vrow2a := archsimd.LoadFloat32x8Slice(row2[j:])
+			vrow3a := archsimd.LoadFloat32x8Slice(row3[j:])
+
+			// FMA operations (parallel execution)
+			acc0 = vrow0a.MulAdd(vx0, acc0)
+			acc1 = vrow1a.MulAdd(vx0, acc1)
+			acc2 = vrow2a.MulAdd(vx0, acc2)
+			acc3 = vrow3a.MulAdd(vx0, acc3)
+
+			// Second half
+			vrow0b := archsimd.LoadFloat32x8Slice(row0[j+8:])
+			vrow1b := archsimd.LoadFloat32x8Slice(row1[j+8:])
+			vrow2b := archsimd.LoadFloat32x8Slice(row2[j+8:])
+			vrow3b := archsimd.LoadFloat32x8Slice(row3[j+8:])
+
+			acc0 = vrow0b.MulAdd(vx1, acc0)
+			acc1 = vrow1b.MulAdd(vx1, acc1)
+			acc2 = vrow2b.MulAdd(vx1, acc2)
+			acc3 = vrow3b.MulAdd(vx1, acc3)
+		}
+
+		// Handle remaining 8-value chunks
+		for ; j+8 <= c; j += 8 {
+			vx := archsimd.LoadFloat32x8Slice(x[j:])
+
+			vrow0 := archsimd.LoadFloat32x8Slice(row0[j:])
+			acc0 = vrow0.MulAdd(vx, acc0)
+
+			vrow1 := archsimd.LoadFloat32x8Slice(row1[j:])
+			acc1 = vrow1.MulAdd(vx, acc1)
+
+			vrow2 := archsimd.LoadFloat32x8Slice(row2[j:])
+			acc2 = vrow2.MulAdd(vx, acc2)
+
+			vrow3 := archsimd.LoadFloat32x8Slice(row3[j:])
+			acc3 = vrow3.MulAdd(vx, acc3)
+		}
+
+		var tmp0 [8]float32
+		var tmp1 [8]float32
+		var tmp2 [8]float32
+		var tmp3 [8]float32
+		acc0.Store(&tmp0)
+		acc1.Store(&tmp1)
+		acc2.Store(&tmp2)
+		acc3.Store(&tmp3)
+		var sum0 float32
+		var sum1 float32
+		var sum2 float32
+		var sum3 float32
+		sum0 += tmp0[0] + tmp0[1] + tmp0[2] + tmp0[3] + tmp0[4] + tmp0[5] + tmp0[6] + tmp0[7]
+		sum1 += tmp1[0] + tmp1[1] + tmp1[2] + tmp1[3] + tmp1[4] + tmp1[5] + tmp1[6] + tmp1[7]
+		sum2 += tmp2[0] + tmp2[1] + tmp2[2] + tmp2[3] + tmp2[4] + tmp2[5] + tmp2[6] + tmp2[7]
+		sum3 += tmp3[0] + tmp3[1] + tmp3[2] + tmp3[3] + tmp3[4] + tmp3[5] + tmp3[6] + tmp3[7]
+
+		for ; j < c; j++ {
+			xv := x[j]
+			sum0 += row0[j] * xv
+			sum1 += row1[j] * xv
+			sum2 += row2[j] * xv
+			sum3 += row3[j] * xv
+		}
+		dst[i] = sum0
+		dst[i+1] = sum1
+		dst[i+2] = sum2
+		dst[i+3] = sum3
+	}
+
+	// Fall back to 2-row processing
 	for ; i+1 < re; i += 2 {
 		row0 := w.Data[i*w.Stride : i*w.Stride+w.C]
 		row1 := w.Data[(i+1)*w.Stride : (i+1)*w.Stride+w.C]
@@ -628,8 +721,8 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 	}
 }
 
-func matVecRangeF16(dst []float32, w *Mat, x []float32, rs, re int) {
-	// TODO: Implement SIMD version for F16 conversion and multiply, e.g., using F16C or AVX-512 FP16 if available.
+// matVecRangeF16Scalar computes matvec for F16 using scalar operations.
+func matVecRangeF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 	raw := w.Raw
 	if u16raw, ok := rawUint16LE(raw); ok {
 		for i := rs; i < re; i++ {
@@ -693,4 +786,8 @@ func matVecRangeF16(dst []float32, w *Mat, x []float32, rs, re int) {
 		}
 		dst[i] = sum
 	}
+}
+
+func matVecRangeF16(dst []float32, w *Mat, x []float32, rs, re int) {
+	matVecRangeF16Scalar(dst, w, x, rs, re)
 }
