@@ -2,17 +2,17 @@ package simd
 
 import (
 	"math"
-
-	"simd/archsimd"
 )
 
 // Add adds src to dst element-wise.
 func Add(dst, src []float32) {
-	if cpu.HasAVX2 {
+	if cpu.HasAVX512 {
+		addAVX512(dst, src)
+	} else if cpu.HasAVX2 {
 		addSIMD(dst, src)
-		return
+	} else {
+		addScalar(dst, src)
 	}
-	addScalar(dst, src)
 }
 
 // addScalar adds src to dst element-wise using scalar operations.
@@ -22,26 +22,11 @@ func addScalar(dst, src []float32) {
 	}
 }
 
-// addSIMD adds src to dst element-wise using AVX2 SIMD.
-func addSIMD(dst, src []float32) {
-	n := len(dst)
-	i := 0
-	// Process 8 elements at a time
-	for ; i+8 <= n; i += 8 {
-		vd := archsimd.LoadFloat32x8Slice(dst[i:])
-		vs := archsimd.LoadFloat32x8Slice(src[i:])
-		vd = vd.Add(vs)
-		vd.StoreSlice(dst[i:])
-	}
-	// Handle remaining elements
-	for ; i < n; i++ {
-		dst[i] += src[i]
-	}
-}
-
 // Dot computes the dot product of a and b.
 func Dot(a, b []float32) float32 {
-	if cpu.HasAVX2 {
+	if cpu.HasAVX512 {
+		return dotAVX512(a, b)
+	} else if cpu.HasAVX2 {
 		return dotSIMD(a, b)
 	}
 	return dotScalar(a, b)
@@ -69,40 +54,12 @@ func dotScalar(a, b []float32) float32 {
 	return sum
 }
 
-// dotSIMD computes the dot product using AVX2 SIMD.
-// Uses a single accumulator to minimize register pressure.
-func dotSIMD(a, b []float32) float32 {
-	n := len(a)
-	if n == 0 {
-		return 0
-	}
-
-	// Single accumulator - reduces register pressure
-	var acc archsimd.Float32x8
-
-	i := 0
-	// Process 8 elements at a time
-	for ; i+8 <= n; i += 8 {
-		va := archsimd.LoadFloat32x8Slice(a[i:])
-		vb := archsimd.LoadFloat32x8Slice(b[i:])
-		acc = va.MulAdd(vb, acc)
-	}
-
-	// Horizontal reduction: store to array and sum scalarly
-	var tmp [8]float32
-	acc.Store(&tmp)
-	sum := tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
-
-	// Handle remaining elements with scalar
-	for ; i < n; i++ {
-		sum += a[i] * b[i]
-	}
-	return sum
-}
-
 // RMSNorm performs Root Mean Square Normalization.
 func RMSNorm(dst, src, weight []float32, eps float32) {
-	if cpu.HasAVX2 {
+	if cpu.HasAVX512 {
+		rmsNormAVX512(dst, src, weight, eps)
+		return
+	} else if cpu.HasAVX2 {
 		rmsNormSIMD(dst, src, weight, eps)
 		return
 	}
@@ -118,50 +75,6 @@ func rmsNormScalar(dst, src, weight []float32, eps float32) {
 	mean := sum / float32(len(src))
 	scale := float32(1.0) / float32(math.Sqrt(float64(mean+eps)))
 	for i := range src {
-		dst[i] = src[i] * scale * weight[i]
-	}
-}
-
-// rmsNormSIMD performs Root Mean Square Normalization using AVX2 SIMD.
-func rmsNormSIMD(dst, src, weight []float32, eps float32) {
-	n := len(src)
-	if n == 0 {
-		return
-	}
-
-	// Single accumulator for sum of squares
-	var acc archsimd.Float32x8
-	i := 0
-	for ; i+8 <= n; i += 8 {
-		v := archsimd.LoadFloat32x8Slice(src[i:])
-		acc = v.MulAdd(v, acc)
-	}
-
-	// Horizontal reduction: store to array and sum scalarly
-	// This is faster than calling GetElem 4 times
-	var tmp [8]float32
-	acc.Store(&tmp)
-	sum := tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
-
-	// Handle remaining elements
-	for ; i < n; i++ {
-		sum += src[i] * src[i]
-	}
-
-	mean := sum / float32(n)
-	scale := float32(1.0) / float32(math.Sqrt(float64(mean+eps)))
-
-	// Apply scale to dst using SIMD
-	vscale := archsimd.BroadcastFloat32x8(scale)
-	i = 0
-	for ; i+8 <= n; i += 8 {
-		vsrc := archsimd.LoadFloat32x8Slice(src[i:])
-		vw := archsimd.LoadFloat32x8Slice(weight[i:])
-		v := vsrc.Mul(vscale)
-		v = v.Mul(vw)
-		v.StoreSlice(dst[i:])
-	}
-	for ; i < n; i++ {
 		dst[i] = src[i] * scale * weight[i]
 	}
 }
@@ -189,6 +102,40 @@ func Softmax(x []float32) {
 	inv := float32(1.0 / sum)
 	for i := range x {
 		x[i] *= inv
+	}
+}
+
+// OnlineSoftmax applies online softmax to x using provided m and l statistics.
+// This is used for FlashAttention where m is the maximum value and l is the sum of exponentials.
+func OnlineSoftmax(x []float32, m, l float32) {
+	if len(x) == 0 {
+		return
+	}
+
+	// Find max in x
+	maxv := x[0]
+	for i := 1; i < len(x); i++ {
+		if x[i] > maxv {
+			maxv = x[i]
+		}
+	}
+
+	// Compute exp and update sum
+	rowSum := float32(0.0)
+	expVals := make([]float32, len(x))
+	for i := range x {
+		expVals[i] = float32(math.Exp(float64(x[i] - maxv)))
+		rowSum += expVals[i]
+	}
+
+	// Update statistics with online softmax formula
+	alpha := float32(math.Exp(float64(m - maxv)))
+	newL := alpha*l + rowSum
+
+	// Normalize
+	invNewL := float32(1.0) / newL
+	for i := range x {
+		x[i] = expVals[i] * invNewL
 	}
 }
 
@@ -252,60 +199,6 @@ func fastSilu(x float32) float32 {
 	return x * fastSigmoid(x)
 }
 
-// fastExpVec computes exp(x) for a Float32x8 vector using polynomial approximation.
-func fastExpVec(x archsimd.Float32x8) archsimd.Float32x8 {
-	// Constants
-	ln2 := archsimd.BroadcastFloat32x8(0.693147180559945309417)
-	ln2Inv := archsimd.BroadcastFloat32x8(1.44269504088896340736)
-	maxVal := archsimd.BroadcastFloat32x8(88.0)
-	minVal := archsimd.BroadcastFloat32x8(-88.0)
-	one := archsimd.BroadcastFloat32x8(1.0)
-	c2 := archsimd.BroadcastFloat32x8(0.5)
-	c3 := archsimd.BroadcastFloat32x8(0.16666667)
-	c4 := archsimd.BroadcastFloat32x8(0.041666667)
-	c5 := archsimd.BroadcastFloat32x8(0.008333333)
-
-	// Clamp x to safe range
-	x = x.Max(minVal).Min(maxVal)
-
-	// Range reduction: k = round(x / ln(2))
-	k := x.Mul(ln2Inv).RoundToEven().ConvertToInt32()
-
-	// r = x - k*ln(2)
-	kf := k.ConvertToFloat32()
-	r := x.Sub(kf.Mul(ln2))
-
-	// Polynomial: 1 + r + r²/2 + r³/6 + r⁴/24 + r⁵/120
-	r2 := r.Mul(r)
-	r3 := r2.Mul(r)
-	r4 := r2.Mul(r2)
-	r5 := r4.Mul(r)
-
-	poly := one.Add(r).Add(r2.Mul(c2)).Add(r3.Mul(c3)).Add(r4.Mul(c4)).Add(r5.Mul(c5))
-
-	// Compute 2^k by adding k to the exponent field
-	// float32: sign(1) | exp(8) | mantissa(23)
-	// 2^k: exp = k + 127
-	bias := archsimd.BroadcastInt32x8(127)
-	exp := k.Add(bias).ShiftAllLeft(23)
-	scale := exp.AsFloat32x8()
-
-	return poly.Mul(scale)
-}
-
-// fastSigmoidVec computes sigmoid for a Float32x8 vector.
-func fastSigmoidVec(x archsimd.Float32x8) archsimd.Float32x8 {
-	one := archsimd.BroadcastFloat32x8(1.0)
-	negX := x.Sub(x.Add(x)) // -x
-	expNegX := fastExpVec(negX)
-	return one.Div(one.Add(expNegX))
-}
-
-// fastSiluVec computes silu for a Float32x8 vector.
-func fastSiluVec(x archsimd.Float32x8) archsimd.Float32x8 {
-	return x.Mul(fastSigmoidVec(x))
-}
-
 // Sigmoid computes the logistic sigmoid activation.
 func Sigmoid(x float32) float32 {
 	// Use fast approximation for speed
@@ -362,7 +255,10 @@ func SiluAndMul(dst, x []float32) {
 	if len(dst) < d {
 		panic("SiluAndMul dst too small")
 	}
-	if cpu.HasAVX2 && d >= 8 {
+	if cpu.HasAVX512 && d >= 16 {
+		siluAndMulAVX512(dst, x)
+		return
+	} else if cpu.HasAVX2 && d >= 8 {
 		siluAndMulSIMD(dst, x)
 		return
 	}
@@ -372,28 +268,6 @@ func SiluAndMul(dst, x []float32) {
 func siluAndMulScalar(dst, x []float32) {
 	d := len(x) / 2
 	for i := range d {
-		dst[i] = Silu(x[i]) * x[d+i]
-	}
-}
-
-func siluAndMulSIMD(dst, x []float32) {
-	d := len(x) / 2
-	i := 0
-	for ; i+8 <= d; i += 8 {
-		// Load gate values (first half)
-		vgate := archsimd.LoadFloat32x8Slice(x[i:])
-		// Load up values (second half)
-		vup := archsimd.LoadFloat32x8Slice(x[d+i:])
-		// Compute silu(gate) * up
-		vsilu := fastSiluVec(vgate)
-		vresult := vsilu.Mul(vup)
-		// Store result to temporary array then copy
-		var tmp [8]float32
-		vresult.Store(&tmp)
-		copy(dst[i:], tmp[:])
-	}
-	// Handle remaining elements with scalar
-	for ; i < d; i++ {
 		dst[i] = Silu(x[i]) * x[d+i]
 	}
 }
@@ -418,6 +292,51 @@ func ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentio
 		attentionFactor = 1
 	}
 	half := headDim / 2
+	if cpu.HasAVX512 && half >= 16 {
+		applyRoPEAVX512(x, nHead, headDim, pos, invFreq, attentionFactor, half)
+		return
+	} else if cpu.HasAVX2 && half >= 8 {
+		applyRoPESIMD(x, nHead, headDim, pos, invFreq, attentionFactor, half)
+		return
+	}
+	applyRoPEScalar(x, nHead, headDim, pos, invFreq, attentionFactor, half)
+}
+
+// ApplyRoPEWithTables applies Rotary Positional Embeddings using precomputed cosine and sine tables.
+func ApplyRoPEWithTables(x []float32, nHead, headDim, pos int, cosTable, sinTable []float32) {
+	if headDim%2 != 0 {
+		panic("headDim must be even for RoPE")
+	}
+	half := headDim / 2
+	if cpu.HasAVX512 && half >= 16 {
+		applyRoPEWithTablesAVX512(x, nHead, headDim, pos, cosTable, sinTable, half)
+		return
+	} else if cpu.HasAVX2 && half >= 8 {
+		applyRoPESIMDWithTables(x, nHead, headDim, pos, cosTable, sinTable, half)
+		return
+	}
+	applyRoPEScalarWithTables(x, nHead, headDim, pos, cosTable, sinTable, half)
+}
+
+// applyRoPEScalarWithTables applies Rotary Positional Embeddings using precomputed cosine and sine values.
+func applyRoPEScalarWithTables(x []float32, nHead, headDim, pos int, cosTable, sinTable []float32, half int) {
+	for h := range nHead {
+		base := h * headDim
+		tableOffset := pos * half
+		for i := range half {
+			cosVal := cosTable[tableOffset+i]
+			sinVal := sinTable[tableOffset+i]
+			i0 := base + i
+			i1 := base + i + half
+			x0 := x[i0]
+			x1 := x[i1]
+			x[i0] = x0*cosVal - x1*sinVal
+			x[i1] = x0*sinVal + x1*cosVal
+		}
+	}
+}
+
+func applyRoPEScalar(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32, half int) {
 	for h := range nHead {
 		base := h * headDim
 		for i := range half {
