@@ -405,7 +405,10 @@ func matVecRangeF32SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 }
 
 func matVecRangeBF16(dst []float32, w *Mat, x []float32, rs, re int) {
-	if cpu.HasAVX2 {
+	if archsimd.X86.AVX512() {
+		matVecRangeBF16AVX512(dst, w, x, rs, re)
+		return
+	} else if cpu.HasAVX2 {
 		matVecRangeBF16SIMD(dst, w, x, rs, re)
 		return
 	}
@@ -690,6 +693,259 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 			acc.Store(&tmp)
 			var sum float32
 			sum += tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
+
+			for ; j < c; j++ {
+				sum += bf16ToF32Table(row[j]) * x[j]
+			}
+			dst[i] = sum
+		}
+		return
+	}
+
+	// AVX-512 version for better performance on supported CPUs
+	if archsimd.X86.AVX512() {
+		matVecRangeBF16AVX512(dst, w, x, rs, re)
+		return
+	}
+}
+
+// matVecRangeBF16AVX512 computes matvec for BF16 using AVX-512 SIMD.
+// Uses multiple accumulators to better utilize FMA units.
+func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
+	raw := w.Raw
+	if u16raw, ok := rawUint16LE(raw); ok {
+		c := w.C
+		i := rs
+
+		// Process 4 rows at once for better ILP and latency hiding
+		for ; i+3 < re; i += 4 {
+			row0Base := i * w.Stride
+			row1Base := (i + 1) * w.Stride
+			row2Base := (i + 2) * w.Stride
+			row3Base := (i + 3) * w.Stride
+			row0 := u16raw[row0Base : row0Base+w.Stride]
+			row1 := u16raw[row1Base : row1Base+w.Stride]
+			row2 := u16raw[row2Base : row2Base+w.Stride]
+			row3 := u16raw[row3Base : row3Base+w.Stride]
+			if c > 0 {
+				_ = row0[c-1]
+				_ = row1[c-1]
+				_ = row2[c-1]
+				_ = row3[c-1]
+			}
+
+			var acc0, acc0_2 archsimd.Float32x16 // Two accumulators per row for better FMA utilization
+			var acc1, acc1_2 archsimd.Float32x16
+			var acc2, acc2_2 archsimd.Float32x16
+			var acc3, acc3_2 archsimd.Float32x16
+			j := 0
+
+			// Process 32 values per iteration (2x16-element vectors) for better pipelining
+			for ; j+32 <= c; j += 32 {
+				// Load input vectors once
+				vx0 := archsimd.LoadFloat32x16Slice(x[j:])
+				vx1 := archsimd.LoadFloat32x16Slice(x[j+16:])
+
+				// Batch load all uint16 vectors (hides memory latency)
+				vu0a := archsimd.LoadUint16x16Slice(row0[j:])
+				vu1a := archsimd.LoadUint16x16Slice(row1[j:])
+				vu2a := archsimd.LoadUint16x16Slice(row2[j:])
+				vu3a := archsimd.LoadUint16x16Slice(row3[j:])
+
+				// Batch convert (allows parallel execution)
+				vf0a := vu0a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vf1a := vu1a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vf2a := vu2a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vf3a := vu3a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+
+				// Batch FMA (parallel execution) - first accumulator
+				acc0 = vf0a.MulAdd(vx0, acc0)
+				acc1 = vf1a.MulAdd(vx0, acc1)
+				acc2 = vf2a.MulAdd(vx0, acc2)
+				acc3 = vf3a.MulAdd(vx0, acc3)
+
+				// Second batch for second accumulator
+				vu0b := archsimd.LoadUint16x16Slice(row0[j+16:])
+				vu1b := archsimd.LoadUint16x16Slice(row1[j+16:])
+				vu2b := archsimd.LoadUint16x16Slice(row2[j+16:])
+				vu3b := archsimd.LoadUint16x16Slice(row3[j+16:])
+
+				vf0b := vu0b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vf1b := vu1b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vf2b := vu2b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vf3b := vu3b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+
+				acc0_2 = vf0b.MulAdd(vx1, acc0_2)
+				acc1_2 = vf1b.MulAdd(vx1, acc1_2)
+				acc2_2 = vf2b.MulAdd(vx1, acc2_2)
+				acc3_2 = vf3b.MulAdd(vx1, acc3_2)
+			}
+
+			// Handle remaining 16-value chunks
+			for ; j+16 <= c; j += 16 {
+				vx := archsimd.LoadFloat32x16Slice(x[j:])
+
+				vu0 := archsimd.LoadUint16x16Slice(row0[j:])
+				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc0 = vf0.MulAdd(vx, acc0)
+
+				vu1 := archsimd.LoadUint16x16Slice(row1[j:])
+				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc1 = vf1.MulAdd(vx, acc1)
+
+				vu2 := archsimd.LoadUint16x16Slice(row2[j:])
+				vf2 := vu2.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc2 = vf2.MulAdd(vx, acc2)
+
+				vu3 := archsimd.LoadUint16x16Slice(row3[j:])
+				vf3 := vu3.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc3 = vf3.MulAdd(vx, acc3)
+			}
+
+			// Combine accumulators
+			acc0 = acc0.Add(acc0_2)
+			acc1 = acc1.Add(acc1_2)
+			acc2 = acc2.Add(acc2_2)
+			acc3 = acc3.Add(acc3_2)
+
+			var tmp0, tmp1, tmp2, tmp3 [16]float32
+			acc0.Store(&tmp0)
+			acc1.Store(&tmp1)
+			acc2.Store(&tmp2)
+			acc3.Store(&tmp3)
+
+			var sum0, sum1, sum2, sum3 float32
+			for k := range 16 {
+				sum0 += tmp0[k]
+				sum1 += tmp1[k]
+				sum2 += tmp2[k]
+				sum3 += tmp3[k]
+			}
+
+			for ; j < c; j++ {
+				xv := x[j]
+				sum0 += bf16ToF32Table(row0[j]) * xv
+				sum1 += bf16ToF32Table(row1[j]) * xv
+				sum2 += bf16ToF32Table(row2[j]) * xv
+				sum3 += bf16ToF32Table(row3[j]) * xv
+			}
+			dst[i] = sum0
+			dst[i+1] = sum1
+			dst[i+2] = sum2
+			dst[i+3] = sum3
+		}
+
+		// Fall back to 2-row processing
+		for ; i+1 < re; i += 2 {
+			row0Base := i * w.Stride
+			row1Base := (i + 1) * w.Stride
+			row0 := u16raw[row0Base : row0Base+w.Stride]
+			row1 := u16raw[row1Base : row1Base+w.Stride]
+			if c > 0 {
+				_ = row0[c-1]
+				_ = row1[c-1]
+			}
+
+			var acc0, acc0_2 archsimd.Float32x16
+			var acc1, acc1_2 archsimd.Float32x16
+			j := 0
+
+			// Process 32 values per iteration
+			for ; j+32 <= c; j += 32 {
+				vx0 := archsimd.LoadFloat32x16Slice(x[j:])
+				vx1 := archsimd.LoadFloat32x16Slice(x[j+16:])
+
+				vu0a := archsimd.LoadUint16x16Slice(row0[j:])
+				vu1a := archsimd.LoadUint16x16Slice(row1[j:])
+				vf0a := vu0a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vf1a := vu1a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc0 = vf0a.MulAdd(vx0, acc0)
+				acc1 = vf1a.MulAdd(vx0, acc1)
+
+				vu0b := archsimd.LoadUint16x16Slice(row0[j+16:])
+				vu1b := archsimd.LoadUint16x16Slice(row1[j+16:])
+				vf0b := vu0b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vf1b := vu1b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc0_2 = vf0b.MulAdd(vx1, acc0_2)
+				acc1_2 = vf1b.MulAdd(vx1, acc1_2)
+			}
+
+			// Handle remaining 16-value chunks
+			for ; j+16 <= c; j += 16 {
+				vx := archsimd.LoadFloat32x16Slice(x[j:])
+
+				vu0 := archsimd.LoadUint16x16Slice(row0[j:])
+				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc0 = vf0.MulAdd(vx, acc0)
+
+				vu1 := archsimd.LoadUint16x16Slice(row1[j:])
+				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc1 = vf1.MulAdd(vx, acc1)
+			}
+
+			// Combine accumulators
+			acc0 = acc0.Add(acc0_2)
+			acc1 = acc1.Add(acc1_2)
+
+			var tmp0, tmp1 [16]float32
+			acc0.Store(&tmp0)
+			acc1.Store(&tmp1)
+
+			var sum0, sum1 float32
+			for k := range 16 {
+				sum0 += tmp0[k]
+				sum1 += tmp1[k]
+			}
+
+			for ; j < c; j++ {
+				xv := x[j]
+				sum0 += bf16ToF32Table(row0[j]) * xv
+				sum1 += bf16ToF32Table(row1[j]) * xv
+			}
+			dst[i] = sum0
+			dst[i+1] = sum1
+		}
+
+		// Handle remaining single rows
+		for ; i < re; i++ {
+			rowBase := i * w.Stride
+			row := u16raw[rowBase : rowBase+w.Stride]
+			if c > 0 {
+				_ = row[c-1]
+			}
+
+			var acc, acc2 archsimd.Float32x16
+			j := 0
+			for ; j+32 <= c; j += 32 {
+				vx0 := archsimd.LoadFloat32x16Slice(x[j:])
+				vx1 := archsimd.LoadFloat32x16Slice(x[j+16:])
+
+				vu0 := archsimd.LoadUint16x16Slice(row[j:])
+				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc = vf0.MulAdd(vx0, acc)
+
+				vu1 := archsimd.LoadUint16x16Slice(row[j+16:])
+				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc2 = vf1.MulAdd(vx1, acc2)
+			}
+
+			for ; j+16 <= c; j += 16 {
+				vx := archsimd.LoadFloat32x16Slice(x[j:])
+
+				vu := archsimd.LoadUint16x16Slice(row[j:])
+				vf := vu.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				acc = vf.MulAdd(vx, acc)
+			}
+
+			// Combine accumulators
+			acc = acc.Add(acc2)
+
+			var tmp [16]float32
+			acc.Store(&tmp)
+			var sum float32
+			for k := range 16 {
+				sum += tmp[k]
+			}
 
 			for ; j < c; j++ {
 				sum += bf16ToF32Table(row[j]) * x[j]

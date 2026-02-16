@@ -18,8 +18,20 @@ type attentionInnerProjectionFastPath interface {
 	AttentionInnerProjection(projOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon float32) bool
 }
 
+type flashAttentionFastPath interface {
+	FlashAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool
+}
+
+type flashAttentionMultiHeadFastPath interface {
+	FlashAttentionMultiHead(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool
+}
+
 type deviceMatVecFastPath interface {
 	DeviceMatVec(dst []float32, w *Mat, x []float32) bool
+}
+
+type incrementalAttentionFastPath interface {
+	IncrementalAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool
 }
 
 type batchedNormOps interface {
@@ -134,6 +146,83 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	start := 0
 	if layer.AttnWindow > 0 {
 		start = max(pos-layer.AttnWindow+1, 0)
+	}
+
+	// FlashAttention fast path (multi-head version) - only if enabled in config
+	if m.Config.Config.FlashAttention {
+		// For incremental processing with KV caching, we need to adapt FlashAttention
+		// FlashAttention is most effective when processing full sequences, but we can still
+		// leverage parts of it for improved performance
+
+		// First, check if we have a full sequence FlashAttention implementation available
+		if fp, ok := ops.(flashAttentionMultiHeadFastPath); ok && fp.FlashAttentionMultiHead(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
+			return m.Scratch.AttnProj
+		}
+
+		// FlashAttention fast path (single-head version)
+		if fp, ok := ops.(flashAttentionFastPath); ok && fp.FlashAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
+			// If FlashAttention handles the computation, skip the traditional path
+			if layer.AttnGate != nil {
+				gate := m.Scratch.AttnGate[:nHead*headDim]
+				if dm, ok := ops.(deviceMatVecFastPath); !(ok && dm.DeviceMatVec(gate, layer.AttnGate, x)) {
+					if qx == nil && CanUseQuantVec(layer.AttnGate) {
+						qx = PrepareQuantVec(x)
+					}
+					ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
+				}
+
+				// Vectorized Sigmoid with multiplication
+				n := len(gate)
+				i := 0
+				if cpu.HasAVX2 {
+					for ; i+8 <= n; i += 8 {
+						vout := archsimd.LoadFloat32x8Slice(attnOut[i:])
+						vgate := archsimd.LoadFloat32x8Slice(gate[i:])
+						vout = vout.Mul(fastSigmoidVec(vgate))
+						vout.StoreSlice(attnOut[i:])
+					}
+				}
+				for ; i < n; i++ {
+					attnOut[i] *= Sigmoid(gate[i])
+				}
+			}
+			ops.MatVec(m.Scratch.AttnProj, layer.Wo, attnOut[:nHead*headDim])
+			return m.Scratch.AttnProj
+		}
+	}
+
+	// Alternative: Enhanced attention with optimized kernels for current processing pattern
+	// This is where we can add custom optimized implementations for the incremental attention
+
+	// Check for incremental attention fast path
+	if fp, ok := ops.(incrementalAttentionFastPath); ok && fp.IncrementalAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
+		// If incremental attention handles the computation, skip the traditional path
+		if layer.AttnGate != nil {
+			gate := m.Scratch.AttnGate[:nHead*headDim]
+			if dm, ok := ops.(deviceMatVecFastPath); !(ok && dm.DeviceMatVec(gate, layer.AttnGate, x)) {
+				if qx == nil && CanUseQuantVec(layer.AttnGate) {
+					qx = PrepareQuantVec(x)
+				}
+				ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
+			}
+
+			// Vectorized Sigmoid with multiplication
+			n := len(gate)
+			i := 0
+			if cpu.HasAVX2 {
+				for ; i+8 <= n; i += 8 {
+					vout := archsimd.LoadFloat32x8Slice(attnOut[i:])
+					vgate := archsimd.LoadFloat32x8Slice(gate[i:])
+					vout = vout.Mul(fastSigmoidVec(vgate))
+					vout.StoreSlice(attnOut[i:])
+				}
+			}
+			for ; i < n; i++ {
+				attnOut[i] *= Sigmoid(gate[i])
+			}
+		}
+		ops.MatVec(m.Scratch.AttnProj, layer.Wo, attnOut[:nHead*headDim])
+		return m.Scratch.AttnProj
 	}
 
 	// Combined attention inner + projection fast path (no gate)
