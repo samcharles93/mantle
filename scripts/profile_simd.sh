@@ -36,7 +36,7 @@ echo "Count: ${COUNT}"
 echo "Profile ID: ${PROFILE_ID}"
 echo ""
 
-GOEXPERIMENT=simd go1.26rc3 test ./internal/backend/simd \
+GOEXPERIMENT=simd go test ./internal/backend/simd \
 	-run '^$' \
 	-bench "${BENCH_REGEX}" \
 	-benchmem \
