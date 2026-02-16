@@ -155,6 +155,14 @@ func (s *Server) handleGetResponse(c *echo.Context) error {
 	if !ok || !rec.Visible {
 		return writeNotFound(c, "response not found")
 	}
+
+	// Parse query parameters
+	// include - for additional fields (reserved for future use)
+	_ = c.QueryParam("include")
+	// include_obfuscation - for obfuscated data (reserved for future use)
+	includeObfuscation := c.QueryParam("include_obfuscation")
+	_ = includeObfuscation // Currently not implemented, but parsed for spec compliance
+
 	if streamParam(c) {
 		return s.writeSSE(c, rec.Response, rec.Response.Background != nil && *rec.Response.Background)
 	}
@@ -204,16 +212,46 @@ func (s *Server) handleInputItems(c *echo.Context) error {
 	if !ok || !rec.Visible {
 		return writeNotFound(c, "response not found")
 	}
+
+	// Parse pagination parameters
+	limit := parseIntQueryParam(c.QueryParam("limit"), 20, 1, 100)
+	order := c.QueryParam("order")
+	if order == "" {
+		order = "desc"
+	}
+	if order != "asc" && order != "desc" {
+		return writeBadRequest(c, "order must be 'asc' or 'desc'")
+	}
+	after := c.QueryParam("after")
+	// include parameter is parsed but not currently used (reserved for future)
+	_ = c.QueryParam("include")
+
+	items := rec.InputItems
+	if order == "desc" {
+		items = reverseItems(items)
+	}
+
+	// Apply 'after' cursor
+	if after != "" {
+		items = filterItemsAfter(items, after)
+	}
+
+	// Apply limit and determine if there are more items
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+
 	out := ResponseInputItemList{
 		Object:  "list",
-		Data:    rec.InputItems,
+		Data:    items,
 		FirstID: "",
 		LastID:  "",
-		HasMore: false,
+		HasMore: hasMore,
 	}
-	if len(rec.InputItems) > 0 {
-		out.FirstID = rec.InputItems[0].ID
-		out.LastID = rec.InputItems[len(rec.InputItems)-1].ID
+	if len(items) > 0 {
+		out.FirstID = items[0].ID
+		out.LastID = items[len(items)-1].ID
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -260,12 +298,15 @@ func (s *Server) handleCompactResponse(c *echo.Context) error {
 }
 
 func (s *Server) handleInputTokens(c *echo.Context) error {
-	req, err := decodeJSON[CompactResponseReq](c.Request().Body)
+	req, err := decodeJSON[TokenCountsBody](c.Request().Body)
 	if err != nil {
 		return writeBadRequest(c, err.Error())
 	}
 	if req.Input == nil {
 		return writeBadRequest(c, "input is required")
+	}
+	if req.Model == "" {
+		return writeBadRequest(c, "model is required")
 	}
 	var (
 		inputItems []ResponseItem
@@ -388,6 +429,12 @@ func sendStreamEvent(w io.Writer, event streamEvent, startingAfter int) error {
 	if err != nil {
 		return err
 	}
+	// Emit SSE event: line followed by data: line (OpenAI API spec)
+	if event.Type != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\n", event.Type); err != nil {
+			return err
+		}
+	}
 	_, err = fmt.Fprintf(w, "data: %s\n\n", string(b))
 	return err
 }
@@ -399,4 +446,54 @@ func decodeJSON[T any](r io.Reader) (T, error) {
 		return out, err
 	}
 	return out, nil
+}
+
+func parseIntQueryParam(s string, defaultVal, min, max int) int {
+	if s == "" {
+		return defaultVal
+	}
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return defaultVal
+		}
+		// Check for overflow before multiplication
+		if n > (max-int(r-'0'))/10 {
+			return max
+		}
+		n = n*10 + int(r-'0')
+	}
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
+}
+
+func reverseItems(items []ResponseItem) []ResponseItem {
+	if len(items) == 0 {
+		return items
+	}
+	reversed := make([]ResponseItem, len(items))
+	for i, item := range items {
+		reversed[len(items)-1-i] = item
+	}
+	return reversed
+}
+
+func filterItemsAfter(items []ResponseItem, afterID string) []ResponseItem {
+	// Find the item with the given ID and return all items after it.
+	// If the ID is not found, returns the original slice (treating it as if
+	// pagination should start from the beginning).
+	for i, item := range items {
+		if item.ID == afterID {
+			if i+1 < len(items) {
+				return items[i+1:]
+			}
+			return []ResponseItem{}
+		}
+	}
+	return items
 }

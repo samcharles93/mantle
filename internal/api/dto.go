@@ -23,6 +23,11 @@ type CompactResponseReq struct {
 	Input *InputValue `json:"input,omitempty"`
 }
 
+type TokenCountsBody struct {
+	Model string      `json:"model"`
+	Input *InputValue `json:"input"`
+}
+
 type InputValue struct {
 	String *string
 	Items  []any
