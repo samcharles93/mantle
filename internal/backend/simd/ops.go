@@ -362,14 +362,38 @@ func SiluAndMul(dst, x []float32) {
 	if len(dst) < d {
 		panic("SiluAndMul dst too small")
 	}
-	// Note: SIMD version disabled pending accurate fast exp implementation
-	// The scalar version is accurate and still quite fast
+	if cpu.HasAVX2 && d >= 8 {
+		siluAndMulSIMD(dst, x)
+		return
+	}
 	siluAndMulScalar(dst, x)
 }
 
 func siluAndMulScalar(dst, x []float32) {
 	d := len(x) / 2
 	for i := range d {
+		dst[i] = Silu(x[i]) * x[d+i]
+	}
+}
+
+func siluAndMulSIMD(dst, x []float32) {
+	d := len(x) / 2
+	i := 0
+	for ; i+8 <= d; i += 8 {
+		// Load gate values (first half)
+		vgate := archsimd.LoadFloat32x8Slice(x[i:])
+		// Load up values (second half)
+		vup := archsimd.LoadFloat32x8Slice(x[d+i:])
+		// Compute silu(gate) * up
+		vsilu := fastSiluVec(vgate)
+		vresult := vsilu.Mul(vup)
+		// Store result to temporary array then copy
+		var tmp [8]float32
+		vresult.Store(&tmp)
+		copy(dst[i:], tmp[:])
+	}
+	// Handle remaining elements with scalar
+	for ; i < d; i++ {
 		dst[i] = Silu(x[i]) * x[d+i]
 	}
 }
