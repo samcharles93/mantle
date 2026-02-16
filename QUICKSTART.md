@@ -3,6 +3,7 @@
 ## mantle run - Run inference for LLM models
 
 Basic usage:
+
 ```bash
 bin/mantle run -m <model.mcf> -p "prompt"
 ```
@@ -10,7 +11,7 @@ bin/mantle run -m <model.mcf> -p "prompt"
 Options:
 
 | Flag | Alias | Default | Description |
-|------|-------|---------|-------------|
+| ------ | ------- | --------- | ------------- |
 | `--model` | `-m` | required | Path to .mcf file |
 | `--prompt` | `-p` | "" | Prompt text to generate |
 | `--system` | `-sys` | "" | System prompt |
@@ -31,8 +32,9 @@ Options:
 | `--memprofile` | | "" | Write memory profile to file |
 
 RoPE scaling options (for extended context):
+
 | Flag | Description |
-|------|-------------|
+| ------ | ------------- |
 | `--rope-scaling` | Type: `linear`, `yarn`, `none` |
 | `--rope-scale` | Scaling factor |
 | `--rope-freq-base` | Base frequency override |
@@ -49,7 +51,7 @@ bin/mantle pack --input <model_dir> --output <model.mcf>
 Options:
 
 | Flag | Default | Description |
-|------|---------|-------------|
+| ------ | --------- | ------------- |
 | `--input`, `--in` | required | Model directory containing config/tokenizer |
 | `--output`, `--out` | auto | Output .mcf path |
 | `--dedup` | true | Deduplicate identical tensors |
@@ -60,8 +62,9 @@ Options:
 | `--progress-every` | 50 | Log progress every N tensors |
 
 Resource overrides:
+
 | Flag | Description |
-|------|-------------|
+| ------ | ------------- |
 | `--config-json` | Override config.json path |
 | `--generation-config-json` | Override generation_config.json path |
 | `--tokenizer-json` | Override tokenizer.json path |
@@ -78,12 +81,13 @@ bin/mantle quantize --input <model.mcf> --output <model.q4.mcf> --method k4
 Options:
 
 | Flag | Alias | Default | Description |
-|------|-------|---------|-------------|
+| ------ | ------- | --------- | ------------- |
 | `--input` | `-in` | required | Input .mcf path |
 | `--output` | `-out` | auto | Output .mcf path |
 | `--method` | | `k4` | Quantization method |
 
 **Quantization methods:**
+
 - `k6` - 6-bit K-quants (block size 32, superblock 256)
 - `k4` - 4-bit K-quants (default)
 - `k3` - 3-bit K-quants
@@ -92,7 +96,8 @@ Options:
 - `q4` - 4-bit Q-quants
 
 Optional overrides:
+
 | Flag | Description |
-|------|-------------|
+| ------ | ------------- |
 | `--min-clip` | Min clipping value (must set with `--max-clip`) |
 | `--max-clip` | Max clipping value (must set with `--min-clip`) |

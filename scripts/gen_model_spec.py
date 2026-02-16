@@ -198,7 +198,7 @@ def main():
 
     root = Path(args.dir)
     cfg_path = root / "config.json"
-    
+
     if not cfg_path.exists():
         raise SystemExit("config.json missing")
 
@@ -210,23 +210,23 @@ def main():
     model_type = cfg.get("model_type", "unknown")
     archs = cfg.get("architectures", [])
     layer_types = cfg.get("layer_types")
-    
+
     names = collect_tensor_names(root)
-    
+
     print("// === Generated model spec ===")
     print(f"// Source: {root}")
     print(f"// Model Type: {model_type}")
     print(f"// Architectures: {archs}")
-    
+
     # 1. Identify Layer Pattern
     prefixes = find_all_layer_prefixes(names)
     prefix, num_layers = choose_primary_prefix(prefixes, names)
     if prefix is None:
         prefix, num_layers = find_layer_pattern(names)
-    
+
     found_layer_map = {} # GoField -> Suffix
     found_global_map = {} # GoField -> FullName
-    
+
     # 2. Analyze Layer Tensors
     if prefix:
         layer_index = pick_layer_index(prefix, names, layer_types)
@@ -237,7 +237,7 @@ def main():
             m = regex.match(n)
             if m:
                 layer_0_suffixes.append(m.group(1))
-        
+
         # Match suffixes to fields
         for field, keywords in LAYER_MAPPINGS.items():
             for s in layer_0_suffixes:
