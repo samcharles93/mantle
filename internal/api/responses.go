@@ -155,14 +155,14 @@ func (s *Server) handleGetResponse(c *echo.Context) error {
 	if !ok || !rec.Visible {
 		return writeNotFound(c, "response not found")
 	}
-	
+
 	// Parse query parameters
 	// include - for additional fields (reserved for future use)
 	_ = c.QueryParam("include")
 	// include_obfuscation - for obfuscated data (reserved for future use)
 	includeObfuscation := c.QueryParam("include_obfuscation")
 	_ = includeObfuscation // Currently not implemented, but parsed for spec compliance
-	
+
 	if streamParam(c) {
 		return s.writeSSE(c, rec.Response, rec.Response.Background != nil && *rec.Response.Background)
 	}
@@ -212,7 +212,7 @@ func (s *Server) handleInputItems(c *echo.Context) error {
 	if !ok || !rec.Visible {
 		return writeNotFound(c, "response not found")
 	}
-	
+
 	// Parse pagination parameters
 	limit := parseIntQueryParam(c.QueryParam("limit"), 20, 1, 100)
 	order := c.QueryParam("order")
@@ -225,23 +225,23 @@ func (s *Server) handleInputItems(c *echo.Context) error {
 	after := c.QueryParam("after")
 	// include parameter is parsed but not currently used (reserved for future)
 	_ = c.QueryParam("include")
-	
+
 	items := rec.InputItems
 	if order == "desc" {
 		items = reverseItems(items)
 	}
-	
+
 	// Apply 'after' cursor
 	if after != "" {
 		items = filterItemsAfter(items, after)
 	}
-	
+
 	// Apply limit and determine if there are more items
 	hasMore := len(items) > limit
 	if hasMore {
 		items = items[:limit]
 	}
-	
+
 	out := ResponseInputItemList{
 		Object:  "list",
 		Data:    items,

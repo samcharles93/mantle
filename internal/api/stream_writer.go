@@ -298,7 +298,7 @@ func (s *SSEStreamWriter) send(payload any) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// Extract event type from payload
 	var eventType string
 	if m, ok := payload.(map[string]any); ok {
@@ -308,7 +308,7 @@ func (s *SSEStreamWriter) send(payload any) error {
 	} else if ev, ok := payload.(streamEvent); ok {
 		eventType = ev.Type
 	}
-	
+
 	// Emit SSE event: line followed by data: line (OpenAI API spec)
 	if eventType != "" {
 		if _, err := fmt.Fprintf(s.w, "event: %s\n", eventType); err != nil {
