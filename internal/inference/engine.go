@@ -24,6 +24,10 @@ type Stats struct {
 	GenerationTPS      float64
 }
 
+type prefillForwarder interface {
+	PrefillTokens(tokens []int) ([]float32, error)
+}
+
 // Generate runs the inference loop for a fixed number of steps.
 // It handles sampling and updates the simd state.
 func Generate(m simd.Model, sampler *logits.Sampler, promptTokens []int, steps int, callback func(string)) (Stats, error) {
@@ -35,10 +39,26 @@ func Generate(m simd.Model, sampler *logits.Sampler, promptTokens []int, steps i
 
 	// Process prompt tokens
 	promptStart := time.Now()
-	for _, id := range promptTokens {
-		logitsVec, err = safeForwardToken(m, id)
-		if err != nil {
-			return stats, fmt.Errorf("forward error during prefill: %w", err)
+	if len(promptTokens) > 1 {
+		if pf, ok := m.(prefillForwarder); ok {
+			logitsVec, err = safePrefillTokens(pf, promptTokens)
+			if err != nil {
+				return stats, fmt.Errorf("forward error during prefill: %w", err)
+			}
+		} else {
+			for _, id := range promptTokens {
+				logitsVec, err = safeForwardToken(m, id)
+				if err != nil {
+					return stats, fmt.Errorf("forward error during prefill: %w", err)
+				}
+			}
+		}
+	} else {
+		for _, id := range promptTokens {
+			logitsVec, err = safeForwardToken(m, id)
+			if err != nil {
+				return stats, fmt.Errorf("forward error during prefill: %w", err)
+			}
 		}
 	}
 	stats.PromptTokens = len(promptTokens)
@@ -144,14 +164,31 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 	var logitsVec []float32
 	var err error
 	promptStart := time.Now()
-	
+
 	// Use batched ForwardTokens for prompt prefill (uses GEMM with tiling)
 	// This is much faster than token-by-token for longer prompts
 	type batchForwarder interface {
 		ForwardTokens(tokens []int) ([][]float32, error)
 	}
-	
+
 	if len(newInTokens) > 1 {
+		if pf, ok := g.Model.(prefillForwarder); ok {
+			prefillLogits, prefillErr := safePrefillTokens(pf, newInTokens)
+			if prefillErr == nil && len(prefillLogits) > 0 {
+				logitsVec = prefillLogits
+				g.ContextTokens = append(g.ContextTokens, newInTokens...)
+				stats.PromptTokens = len(newInTokens)
+				stats.PromptDuration = time.Since(promptStart)
+				if stats.PromptDuration.Seconds() > 0 && stats.PromptTokens > 0 {
+					stats.PromptTPS = float64(stats.PromptTokens) / stats.PromptDuration.Seconds()
+				}
+				goto afterPrompt
+			}
+			if prefillErr != nil {
+				log := logger.FromContext(ctx)
+				log.Debug("prefill fast path unavailable, falling back to token-by-token", "error", prefillErr)
+			}
+		}
 		if bf, ok := g.Model.(batchForwarder); ok {
 			allLogits, batchErr := bf.ForwardTokens(newInTokens)
 			if batchErr == nil && len(allLogits) > 0 {
@@ -172,7 +209,7 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 			}
 		}
 	}
-	
+
 	// Process tokens one at a time (fallback or single token)
 	for _, id := range newInTokens {
 		logitsVec, err = safeForwardToken(g.Model, id)
@@ -309,6 +346,15 @@ func safeForwardToken(m simd.Model, id int) (logits []float32, err error) {
 		}
 	}()
 	return m.ForwardToken(id)
+}
+
+func safePrefillTokens(m prefillForwarder, tokens []int) (logits []float32, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			err = fmt.Errorf("panic in PrefillTokens(%d): %v", len(tokens), rec)
+		}
+	}()
+	return m.PrefillTokens(tokens)
 }
 
 func safeSample(sampler *logits.Sampler, logitsVec []float32, toks []int, excludePenalty []int) (next int, err error) {

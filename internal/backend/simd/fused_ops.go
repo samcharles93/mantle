@@ -274,7 +274,9 @@ func fusedSiluActScalar(dst, gate, up []float32) {
 // fusedSiluActAVX2 applies SiLU activation using AVX2 SIMD.
 // Uses a piecewise rational approximation for sigmoid to avoid exp().
 // SiLU(x) = x * sigmoid(x), approximated as:
-//   sigmoid(x) ≈ 0.5 + 0.5 * x / (1 + |x|)
+//
+//	sigmoid(x) ≈ 0.5 + 0.5 * x / (1 + |x|)
+//
 // This provides reasonable accuracy for inference while being fast.
 func fusedSiluActAVX2(dst, gate, up []float32) {
 	i := 0

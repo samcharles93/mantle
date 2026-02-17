@@ -18,6 +18,7 @@ type LoadModelOptions struct {
 	CacheTypeV   string
 	HostCaps     *hostcaps.Snapshot
 	TilingConfig TilingConfig
+	GpuLayers    int // -1 auto, 0 all layers on CPU, N first N layers on GPU
 }
 
 type tensorPayload struct {

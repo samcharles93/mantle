@@ -10,19 +10,20 @@ import (
 
 // PerfCounters holds CUDA backend performance statistics.
 type PerfCounters struct {
-	MatVecCalls   int64
-	RMSNormCalls  int64
-	StoreKVCalls  int64
-	StreamSyncs   int64
-	GraphCaptures int64
-	GraphLaunches int64
-	GraphFailures int64
-	H2DBytes      int64
-	D2HBytes      int64
-	ManagedAllocs int64
-	ManagedBytes  int64
-	DeviceAllocs  int64
-	DeviceBytes   int64
+	MatVecCalls            int64
+	MatVecCPUFallbackCalls int64
+	RMSNormCalls           int64
+	StoreKVCalls           int64
+	StreamSyncs            int64
+	GraphCaptures          int64
+	GraphLaunches          int64
+	GraphFailures          int64
+	H2DBytes               int64
+	D2HBytes               int64
+	ManagedAllocs          int64
+	ManagedBytes           int64
+	DeviceAllocs           int64
+	DeviceBytes            int64
 }
 
 var globalPerfCounters PerfCounters
@@ -32,19 +33,20 @@ var perfEnabledCached bool
 // GetPerfCounters returns a copy of current counters.
 func GetPerfCounters() PerfCounters {
 	return PerfCounters{
-		MatVecCalls:   globalPerfCounters.MatVecCalls,
-		RMSNormCalls:  globalPerfCounters.RMSNormCalls,
-		StoreKVCalls:  globalPerfCounters.StoreKVCalls,
-		StreamSyncs:   globalPerfCounters.StreamSyncs,
-		GraphCaptures: globalPerfCounters.GraphCaptures,
-		GraphLaunches: globalPerfCounters.GraphLaunches,
-		GraphFailures: globalPerfCounters.GraphFailures,
-		H2DBytes:      globalPerfCounters.H2DBytes,
-		D2HBytes:      globalPerfCounters.D2HBytes,
-		ManagedAllocs: globalPerfCounters.ManagedAllocs,
-		ManagedBytes:  globalPerfCounters.ManagedBytes,
-		DeviceAllocs:  globalPerfCounters.DeviceAllocs,
-		DeviceBytes:   globalPerfCounters.DeviceBytes,
+		MatVecCalls:            globalPerfCounters.MatVecCalls,
+		MatVecCPUFallbackCalls: globalPerfCounters.MatVecCPUFallbackCalls,
+		RMSNormCalls:           globalPerfCounters.RMSNormCalls,
+		StoreKVCalls:           globalPerfCounters.StoreKVCalls,
+		StreamSyncs:            globalPerfCounters.StreamSyncs,
+		GraphCaptures:          globalPerfCounters.GraphCaptures,
+		GraphLaunches:          globalPerfCounters.GraphLaunches,
+		GraphFailures:          globalPerfCounters.GraphFailures,
+		H2DBytes:               globalPerfCounters.H2DBytes,
+		D2HBytes:               globalPerfCounters.D2HBytes,
+		ManagedAllocs:          globalPerfCounters.ManagedAllocs,
+		ManagedBytes:           globalPerfCounters.ManagedBytes,
+		DeviceAllocs:           globalPerfCounters.DeviceAllocs,
+		DeviceBytes:            globalPerfCounters.DeviceBytes,
 	}
 }
 
@@ -64,6 +66,12 @@ func perfEnabled() bool {
 func recordMatVec() {
 	if perfEnabled() {
 		atomic.AddInt64(&globalPerfCounters.MatVecCalls, 1)
+	}
+}
+
+func recordMatVecCPUFallback() {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.MatVecCPUFallbackCalls, 1)
 	}
 }
 
@@ -130,6 +138,9 @@ func recordDeviceAlloc(bytes int64, managed bool) {
 
 // RecordMatVec records a MatVec operation.
 func RecordMatVec() { recordMatVec() }
+
+// RecordMatVecCPUFallback records a MatVec operation that fell back to CPU.
+func RecordMatVecCPUFallback() { recordMatVecCPUFallback() }
 
 // RecordRMSNorm records an RMSNorm operation.
 func RecordRMSNorm() { recordRMSNorm() }

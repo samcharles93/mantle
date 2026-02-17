@@ -167,6 +167,9 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			if layer.AttnGate != nil {
 				gate := m.Scratch.AttnGate[:nHead*headDim]
 				if dm, ok := ops.(deviceMatVecFastPath); !(ok && dm.DeviceMatVec(gate, layer.AttnGate, x)) {
+					// x may still be device-backed from fast-path norm/projections.
+					// Ensure host visibility before CPU gate matvec fallback.
+					syncDeviceSlice(ops, x)
 					if qx == nil && CanUseQuantVec(layer.AttnGate) {
 						qx = PrepareQuantVec(x)
 					}
@@ -202,6 +205,9 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		if layer.AttnGate != nil {
 			gate := m.Scratch.AttnGate[:nHead*headDim]
 			if dm, ok := ops.(deviceMatVecFastPath); !(ok && dm.DeviceMatVec(gate, layer.AttnGate, x)) {
+				// x may still be device-backed from fast-path norm/projections.
+				// Ensure host visibility before CPU gate matvec fallback.
+				syncDeviceSlice(ops, x)
 				if qx == nil && CanUseQuantVec(layer.AttnGate) {
 					qx = PrepareQuantVec(x)
 				}
@@ -307,6 +313,9 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	if layer.AttnGate != nil {
 		gate := m.Scratch.AttnGate[:nHead*headDim]
 		if dm, ok := ops.(deviceMatVecFastPath); !(ok && dm.DeviceMatVec(gate, layer.AttnGate, x)) {
+			// x may still be device-backed from fast-path norm/projections.
+			// Ensure host visibility before CPU gate matvec fallback.
+			syncDeviceSlice(ops, x)
 			if qx == nil && CanUseQuantVec(layer.AttnGate) {
 				qx = PrepareQuantVec(x)
 			}
