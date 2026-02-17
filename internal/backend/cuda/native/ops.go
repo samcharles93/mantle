@@ -78,78 +78,117 @@ static int mantleCudaShortConvDepthwiseWrapper(
 import "C"
 import (
 	"fmt"
+	"math"
 )
+
+func checkedPositiveCInt(name string, v int) (C.int, error) {
+	if v <= 0 {
+		return 0, fmt.Errorf("%s must be > 0", name)
+	}
+	if v > math.MaxInt32 {
+		return 0, fmt.Errorf("%s exceeds int32 max: %d", name, v)
+	}
+	return C.int(v), nil
+}
 
 func SoftmaxRowsF32(buf DeviceBuffer, rows, cols int, stream Stream) error {
 	if buf.ptr == nil {
-		return fmt.Errorf("softmax buffer is nil")
+		return fmt.Errorf("native.SoftmaxRowsF32: buffer is nil")
 	}
-	if rows <= 0 || cols <= 0 {
-		return fmt.Errorf("softmax rows/cols must be > 0")
+	rowsC, err := checkedPositiveCInt("rows", rows)
+	if err != nil {
+		return fmt.Errorf("native.SoftmaxRowsF32: %w", err)
 	}
-	return cudaErr(C.mantleCudaSoftmaxRowsF32Wrapper((*C.float)(buf.ptr), C.int(rows), C.int(cols), stream.ptr))
+	colsC, err := checkedPositiveCInt("cols", cols)
+	if err != nil {
+		return fmt.Errorf("native.SoftmaxRowsF32: %w", err)
+	}
+	if err := cudaErr(C.mantleCudaSoftmaxRowsF32Wrapper((*C.float)(buf.ptr), rowsC, colsC, stream.ptr)); err != nil {
+		return fmt.Errorf("native.SoftmaxRowsF32(rows=%d, cols=%d): %w", rows, cols, err)
+	}
+	return nil
 }
 
 func SiluMulF32(gate, up, out DeviceBuffer, n int, stream Stream) error {
 	if gate.ptr == nil || up.ptr == nil || out.ptr == nil {
-		return fmt.Errorf("silu mul buffer is nil")
+		return fmt.Errorf("native.SiluMulF32: buffer is nil")
 	}
-	if n <= 0 {
-		return fmt.Errorf("silu mul n must be > 0")
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.SiluMulF32: %w", err)
 	}
-	return cudaErr(C.mantleCudaSiluMulF32Wrapper(
+	if err := cudaErr(C.mantleCudaSiluMulF32Wrapper(
 		(*C.float)(gate.ptr),
 		(*C.float)(up.ptr),
 		(*C.float)(out.ptr),
-		C.int(n),
+		nC,
 		stream.ptr,
-	))
+	)); err != nil {
+		return fmt.Errorf("native.SiluMulF32(n=%d): %w", n, err)
+	}
+	return nil
 }
 
 func AddVectorsF32(dst, src DeviceBuffer, n int, stream Stream) error {
 	if dst.ptr == nil || src.ptr == nil {
-		return fmt.Errorf("add vectors buffer is nil")
+		return fmt.Errorf("native.AddVectorsF32: buffer is nil")
 	}
-	if n <= 0 {
-		return fmt.Errorf("add vectors n must be > 0")
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.AddVectorsF32: %w", err)
 	}
-	return cudaErr(C.mantleCudaAddVectorsF32Wrapper(
+	if err := cudaErr(C.mantleCudaAddVectorsF32Wrapper(
 		(*C.float)(dst.ptr),
 		(*C.float)(src.ptr),
-		C.int(n),
+		nC,
 		stream.ptr,
-	))
+	)); err != nil {
+		return fmt.Errorf("native.AddVectorsF32(n=%d): %w", n, err)
+	}
+	return nil
 }
 
 func ShortConvDepthwise(proj, convW, state, out DeviceBuffer, embd, klen int, stream Stream) error {
 	if proj.ptr == nil || convW.ptr == nil || state.ptr == nil || out.ptr == nil {
-		return fmt.Errorf("shortconv buffer is nil")
+		return fmt.Errorf("native.ShortConvDepthwise: buffer is nil")
 	}
-	if embd <= 0 || klen <= 0 {
-		return fmt.Errorf("shortconv embd/klen must be > 0")
+	embdC, err := checkedPositiveCInt("embd", embd)
+	if err != nil {
+		return fmt.Errorf("native.ShortConvDepthwise: %w", err)
 	}
-	return cudaErr(C.mantleCudaShortConvDepthwiseWrapper(
+	klenC, err := checkedPositiveCInt("klen", klen)
+	if err != nil {
+		return fmt.Errorf("native.ShortConvDepthwise: %w", err)
+	}
+	if err := cudaErr(C.mantleCudaShortConvDepthwiseWrapper(
 		(*C.float)(proj.ptr),
 		(*C.float)(convW.ptr),
 		(*C.float)(state.ptr),
 		(*C.float)(out.ptr),
-		C.int(embd),
-		C.int(klen),
+		embdC,
+		klenC,
 		stream.ptr,
-	))
+	)); err != nil {
+		return fmt.Errorf("native.ShortConvDepthwise(embd=%d, klen=%d): %w", embd, klen, err)
+	}
+	return nil
 }
 
 func ConvertF32ToF16(in, out DeviceBuffer, n int, stream Stream) error {
 	if in.ptr == nil || out.ptr == nil {
-		return fmt.Errorf("f32->f16 convert buffer is nil")
+		return fmt.Errorf("native.ConvertF32ToF16: buffer is nil")
 	}
-	if n <= 0 {
-		return fmt.Errorf("f32->f16 convert n must be > 0")
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.ConvertF32ToF16: %w", err)
 	}
-	return cudaErr(C.mantleCudaConvertF32ToF16Wrapper(
+	if err := cudaErr(C.mantleCudaConvertF32ToF16Wrapper(
 		(*C.float)(in.ptr),
 		(*C.ushort)(out.ptr),
-		C.int(n),
+		nC,
 		stream.ptr,
-	))
+	)); err != nil {
+		return fmt.Errorf("native.ConvertF32ToF16(n=%d): %w", n, err)
+	}
+	return nil
 }

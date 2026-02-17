@@ -28,6 +28,7 @@ type Instance struct {
 	RopeLocalOnly      bool
 	RopeCosTable       []float32 // Precomputed cosine values for RoPE
 	RopeSinTable       []float32 // Precomputed sine values for RoPE
+	TilingConfig       TilingConfig
 
 	attnPoolOnce sync.Once
 	attnPool     *AttnPool

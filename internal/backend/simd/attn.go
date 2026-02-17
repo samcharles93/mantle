@@ -148,8 +148,10 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		start = max(pos-layer.AttnWindow+1, 0)
 	}
 
+	flashAttentionEnabled := m.Config != nil && m.Config.Config.FlashAttention
+
 	// FlashAttention fast path (multi-head version) - only if enabled in config
-	if m.Config.Config.FlashAttention {
+	if flashAttentionEnabled {
 		// For incremental processing with KV caching, we need to adapt FlashAttention
 		// FlashAttention is most effective when processing full sequences, but we can still
 		// leverage parts of it for improved performance

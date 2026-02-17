@@ -56,6 +56,7 @@ func gemmRangeRowsAlpha1Beta0(cfg GemmConfig, C, A, B *Mat, rs, re int, packB []
 	tn := cfg.TileN
 	tk := cfg.TileK
 
+	// Need packB to be at least tk*tn for packed GEMM
 	if cpu.HasAVX2 && len(packB) >= tk*tn {
 		gemmRangeRowsAlpha1Beta0Packed(cfg, C, A, B, rs, re, packB)
 		return
@@ -114,6 +115,16 @@ func gemmRangeRowsAlpha1Beta0Packed(cfg GemmConfig, C, A, B *Mat, rs, re int, pa
 		for j0 := 0; j0 < n; j0 += tn {
 			jMax := min(j0+tn, n)
 			width := jMax - j0
+
+			// Ensure packB is large enough for this tile
+			if len(packB) < kInner*width {
+				// Fallback to unpacked version
+				for i0 := rs; i0 < re; i0 += tm {
+					iMax := min(i0+tm, re)
+					blockUpdateAlpha1(cData, aData, bData, cStride, aStride, bStride, i0, iMax, j0, jMax, k0, kMax)
+				}
+				continue
+			}
 
 			packBTile(packB, bData, bStride, k0, kMax, j0, jMax)
 

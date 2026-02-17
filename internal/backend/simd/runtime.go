@@ -5,6 +5,170 @@ import (
 	"math"
 )
 
+// ForwardTokens processes multiple tokens in batch using GEMM for the projections.
+// This is more efficient than token-by-token for prompt prefill.
+// Returns the output logits for each token position.
+func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("no tokens to process")
+	}
+	if m.Pos+len(tokens) > m.MaxContext {
+		return nil, fmt.Errorf("context length exceeded: %d + %d > %d", m.Pos, len(tokens), m.MaxContext)
+	}
+
+	// GEMM path requires f32 weight data; bail for BF16/quantized models
+	// where Mat.Data is nil (data lives in Mat.Raw or Mat.Quant).
+	if len(m.Layers) > 0 {
+		l := &m.Layers[0]
+		if l.Wq != nil && l.Wq.Data == nil {
+			return nil, fmt.Errorf("ForwardTokens requires f32 weights, got %v", l.Wq.DType)
+		}
+	}
+	// Bail if model has Mamba/MoE/recurrent layers (unsupported in batch path)
+	for i := range m.Layers {
+		if m.Layers[i].Mamba != nil || m.Layers[i].MoE != nil || m.Layers[i].IsRecurrent {
+			return nil, fmt.Errorf("ForwardTokens does not support Mamba/MoE/recurrent layers")
+		}
+	}
+
+	// Get tiling configuration
+	tiling := m.TilingConfig
+	if tiling.TileM == 0 {
+		tiling = DefaultTilingConfig()
+	}
+
+	seqLen := len(tokens)
+	embd := m.Config.Config.EmbeddingLength
+	headDim := m.HeadDim
+	nHead := m.HeadCount
+	kvHeads := m.Layers[0].HeadKV
+
+	// Build input matrix X: [seqLen x embd]
+	X := NewMat(seqLen, embd)
+	for i, tok := range tokens {
+		if tok < 0 || tok >= m.Config.Config.VocabSize {
+			return nil, fmt.Errorf("token id out of range: %d", tok)
+		}
+		m.Embeddings.RowTo(X.Data[i*X.Stride:], tok)
+	}
+	if scale := m.Config.Config.EmbeddingMultiplier; scale != 0 && scale != 1 {
+		s := float32(scale)
+		for i := range X.Data {
+			X.Data[i] *= s
+		}
+	}
+	if m.Config.Config.MuPEnabled && m.MuPScale != 1 {
+		for i := range X.Data {
+			X.Data[i] *= m.MuPScale
+		}
+	}
+
+	// Temporary matrices for GEMM
+	Q := NewMat(seqLen, nHead*headDim)
+	K := NewMat(seqLen, kvHeads*headDim)
+	V := NewMat(seqLen, kvHeads*headDim)
+	attnOut := NewMat(seqLen, embd)
+	ffnUp := NewMat(seqLen, m.Config.Config.FFNLength)
+	ffnGate := NewMat(seqLen, m.Config.Config.FFNLength)
+	ffnAct := NewMat(seqLen, m.Config.Config.FFNLength)
+
+	// Process through layers
+	for layerIdx := range m.Layers {
+		layer := &m.Layers[layerIdx]
+
+		// RMSNorm each row
+		for i := range seqLen {
+			rowOff := i * X.Stride
+			RMSNorm(m.Scratch.Tmp, X.Data[rowOff:rowOff+embd], layer.AttnNorm, m.RMSEpsilon)
+			copy(X.Data[rowOff:rowOff+embd], m.Scratch.Tmp)
+		}
+
+		// QKV projections using GEMM: X @ W^T
+		cfg := SelectGemmConfigWithTiling(seqLen, embd, nHead*headDim, tiling)
+		GemmPar(cfg, &Q, &X, layer.Wq, 1.0, 0.0, 0)
+		GemmPar(cfg, &K, &X, layer.Wk, 1.0, 0.0, 0)
+		GemmPar(cfg, &V, &X, layer.Wv, 1.0, 0.0, 0)
+
+		// Attention for each position
+		for i := range seqLen {
+			pos := m.Pos + i
+			qRow := Q.Data[i*Q.Stride : i*Q.Stride+nHead*headDim]
+			kRow := K.Data[i*K.Stride : i*K.Stride+kvHeads*headDim]
+			vRow := V.Data[i*V.Stride : i*V.Stride+kvHeads*headDim]
+			outRow := attnOut.Data[i*attnOut.Stride : i*attnOut.Stride+embd]
+
+			// Apply RoPE and attention
+			copy(m.Scratch.Q, qRow)
+			copy(m.Scratch.K, kRow)
+			copy(m.Scratch.V, vRow)
+
+			attnResult := Attention(m, layer, m.Scratch.Q[:embd], pos)
+			copy(outRow, attnResult)
+		}
+
+		// Residual: X = X + attnOut
+		for i := range seqLen {
+			xRow := X.Data[i*X.Stride : i*X.Stride+embd]
+			aRow := attnOut.Data[i*attnOut.Stride : i*attnOut.Stride+embd]
+			Add(xRow, aRow)
+		}
+
+		// FFN block
+		// RMSNorm each row
+		for i := range seqLen {
+			rowOff := i * X.Stride
+			RMSNorm(m.Scratch.Tmp, X.Data[rowOff:rowOff+embd], layer.FfnNorm, m.RMSEpsilon)
+			copy(X.Data[rowOff:rowOff+embd], m.Scratch.Tmp)
+		}
+
+		// FFN projections using GEMM
+		cfg = SelectGemmConfigWithTiling(seqLen, embd, m.Config.Config.FFNLength, tiling)
+		GemmPar(cfg, &ffnUp, &X, layer.FfnUp, 1.0, 0.0, 0)
+		GemmPar(cfg, &ffnGate, &X, layer.FfnGate, 1.0, 0.0, 0)
+
+		// SiLU activation: ffnAct = silu(ffnGate) * ffnUp
+		for i := range seqLen {
+			upRow := ffnUp.Data[i*ffnUp.Stride : i*ffnUp.Stride+m.Config.Config.FFNLength]
+			gateRow := ffnGate.Data[i*ffnGate.Stride : i*ffnGate.Stride+m.Config.Config.FFNLength]
+			actRow := ffnAct.Data[i*ffnAct.Stride : i*ffnAct.Stride+m.Config.Config.FFNLength]
+			FusedSiluAct(actRow, gateRow, upRow)
+		}
+
+		// Down projection: ffnOut = ffnAct @ FfnDown
+		ffnOut := NewMat(seqLen, embd)
+		cfg = SelectGemmConfigWithTiling(seqLen, m.Config.Config.FFNLength, embd, tiling)
+		GemmPar(cfg, &ffnOut, &ffnAct, layer.FfnDown, 1.0, 0.0, 0)
+
+		// Residual: X = X + ffnOut
+		for i := range seqLen {
+			xRow := X.Data[i*X.Stride : i*X.Stride+embd]
+			fRow := ffnOut.Data[i*ffnOut.Stride : i*ffnOut.Stride+embd]
+			Add(xRow, fRow)
+		}
+	}
+
+	// Output norm and projection to logits
+	logits := NewMat(seqLen, m.Config.Config.VocabSize)
+	for i := range seqLen {
+		rowOff := i * X.Stride
+		RMSNorm(m.Scratch.Tmp, X.Data[rowOff:rowOff+embd], m.OutputNorm, m.RMSEpsilon)
+	}
+
+	// Output projection using GEMM
+	outCfg := SelectGemmConfigWithTiling(seqLen, embd, m.Config.Config.VocabSize, tiling)
+	GemmPar(outCfg, &logits, &X, m.Output, 1.0, 0.0, 0)
+
+	// Collect logits
+	outputs := make([][]float32, seqLen)
+	for i := range seqLen {
+		outputs[i] = make([]float32, m.Config.Config.VocabSize)
+		copy(outputs[i], logits.Data[i*logits.Stride:i*logits.Stride+m.Config.Config.VocabSize])
+	}
+
+	m.Pos += seqLen
+	return outputs, nil
+}
+
 // ForwardToken runs one autoregressive step for the provided token id.
 // It returns a logits slice owned by the model (overwritten on next call).
 // Implements model.Model interface.

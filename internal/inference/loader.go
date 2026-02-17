@@ -24,6 +24,7 @@ type Loader struct {
 	Backend             string
 	DisableSWA          bool
 	LoadOptions         simd.LoadModelOptions
+	TilingConfig        simd.TilingConfig
 }
 
 type LoadResult struct {
@@ -52,6 +53,10 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 		} else {
 			opts.HostCaps = hostcaps.Detect()
 		}
+	}
+	// Apply tiling configuration
+	if l.TilingConfig.TileM != 0 || l.TilingConfig.TileN != 0 || l.TilingConfig.TileK != 0 {
+		opts.TilingConfig = l.TilingConfig
 	}
 
 	if strings.TrimSpace(modelPath) == "" {

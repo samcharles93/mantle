@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/samcharles93/mantle/internal/backend/simd"
+	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/logits"
 )
 
@@ -143,6 +144,36 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 	var logitsVec []float32
 	var err error
 	promptStart := time.Now()
+	
+	// Use batched ForwardTokens for prompt prefill (uses GEMM with tiling)
+	// This is much faster than token-by-token for longer prompts
+	type batchForwarder interface {
+		ForwardTokens(tokens []int) ([][]float32, error)
+	}
+	
+	if len(newInTokens) > 1 {
+		if bf, ok := g.Model.(batchForwarder); ok {
+			allLogits, batchErr := bf.ForwardTokens(newInTokens)
+			if batchErr == nil && len(allLogits) > 0 {
+				// Use logits from the last token position
+				logitsVec = allLogits[len(allLogits)-1]
+				g.ContextTokens = append(g.ContextTokens, newInTokens...)
+				stats.PromptTokens = len(newInTokens)
+				stats.PromptDuration = time.Since(promptStart)
+				if stats.PromptDuration.Seconds() > 0 && stats.PromptTokens > 0 {
+					stats.PromptTPS = float64(stats.PromptTokens) / stats.PromptDuration.Seconds()
+				}
+				// Continue to generation phase with last logits already computed
+				goto afterPrompt
+			}
+			if batchErr != nil {
+				log := logger.FromContext(ctx)
+				log.Debug("batch prefill unavailable, falling back to token-by-token", "error", batchErr)
+			}
+		}
+	}
+	
+	// Process tokens one at a time (fallback or single token)
 	for _, id := range newInTokens {
 		logitsVec, err = safeForwardToken(g.Model, id)
 		if err != nil {
@@ -156,6 +187,7 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		stats.PromptTPS = float64(stats.PromptTokens) / stats.PromptDuration.Seconds()
 	}
 
+afterPrompt:
 	toks := append([]int(nil), g.ContextTokens...)
 	type greedyStepper interface {
 		ForwardTokenGreedy(id int) (next int, err error)

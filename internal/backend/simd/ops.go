@@ -90,16 +90,16 @@ func Softmax(x []float32) {
 			maxv = x[i]
 		}
 	}
-	var sum float64
+	var sum float32
 	for i := range x {
-		v := math.Exp(float64(x[i] - maxv))
-		x[i] = float32(v)
+		v := fastExp(x[i] - maxv)
+		x[i] = v
 		sum += v
 	}
 	if sum == 0 {
 		return
 	}
-	inv := float32(1.0 / sum)
+	inv := 1.0 / sum
 	for i := range x {
 		x[i] *= inv
 	}
@@ -124,12 +124,12 @@ func OnlineSoftmax(x []float32, m, l float32) {
 	rowSum := float32(0.0)
 	expVals := make([]float32, len(x))
 	for i := range x {
-		expVals[i] = float32(math.Exp(float64(x[i] - maxv)))
+		expVals[i] = fastExp(x[i] - maxv)
 		rowSum += expVals[i]
 	}
 
 	// Update statistics with online softmax formula
-	alpha := float32(math.Exp(float64(m - maxv)))
+	alpha := fastExp(m - maxv)
 	newL := alpha*l + rowSum
 
 	// Normalize
@@ -218,9 +218,9 @@ func Softplus(x float32) float32 {
 		return x
 	}
 	if x < -20 {
-		return float32(math.Exp(float64(x)))
+		return fastExp(x)
 	}
-	return float32(math.Log1p(math.Exp(float64(x))))
+	return float32(math.Log1p(float64(fastExp(x))))
 }
 
 // RMSNormGated applies SiLU gating to src using gate and then RMS-normalizes.

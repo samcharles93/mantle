@@ -1,8 +1,6 @@
 package simd
 
 import (
-	"math"
-
 	"simd/archsimd"
 )
 
@@ -135,9 +133,9 @@ func mambaScan(out []float32, ml *MambaLayer, x []float32, dt []float32, b []flo
 	groupSize := ml.GroupSize
 	for h := 0; h < ml.HeadCount; h++ {
 		group := h / groupSize
-		a := -float32(math.Exp(float64(ml.ALog[h])))
+		a := -fastExp(ml.ALog[h])
 		dtH := dt[h]
-		dA := float32(math.Exp(float64(a * dtH)))
+		dA := fastExp(a * dtH)
 		bGroup := b[group*dState : (group+1)*dState]
 		cGroup := c[group*dState : (group+1)*dState]
 		for p := range headDim {

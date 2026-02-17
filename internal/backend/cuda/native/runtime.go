@@ -313,7 +313,6 @@ static int mantleCublasSdgmm(
 	return (int)st;
 }
 */
-
 import "C"
 
 import (

@@ -46,6 +46,11 @@ func packCmd() *cli.Command {
 				Usage: "Float casting: keep|f16|bf16",
 				Value: "keep",
 			},
+			&cli.StringFlag{
+				Name:  "quant-embed",
+				Usage: "Embedding quantization: none|int8|int4",
+				Value: "none",
+			},
 			&cli.BoolFlag{
 				Name:  "no-resources",
 				Usage: "Do not embed config/tokenizer/vocab/merges sections",
@@ -89,6 +94,7 @@ func packCmd() *cli.Command {
 				Dedup:            cmd.Bool("dedup"),
 				TensorAlign:      cmd.Int("tensor-align"),
 				Cast:             cmd.String("cast"),
+				QuantEmbed:       cmd.String("quant-embed"),
 				IncludeResources: !cmd.Bool("no-resources"),
 				ProgressEvery:    cmd.Int("progress-every"),
 				Logf: func(format string, args ...any) {

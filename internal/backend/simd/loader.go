@@ -14,9 +14,10 @@ import (
 )
 
 type LoadModelOptions struct {
-	CacheTypeK string
-	CacheTypeV string
-	HostCaps   *hostcaps.Snapshot
+	CacheTypeK   string
+	CacheTypeV   string
+	HostCaps     *hostcaps.Snapshot
+	TilingConfig TilingConfig
 }
 
 type tensorPayload struct {
@@ -570,6 +571,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		MaxHeadKV:     maxHeadKV,
 		MuPScale:      muPScale,
 		RopeLocalOnly: spec.RopeLocalOnly,
+		TilingConfig:  opts.TilingConfig,
 	}
 	m.setHostCapabilities(opts.HostCaps)
 	m.bindDefaultOps()

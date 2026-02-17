@@ -22,6 +22,7 @@ type Ops struct {
 	blas   native.BlasHandle
 
 	mu             sync.Mutex
+	fastPathErr    error
 	weights        map[*simd.Mat]deviceMat
 	qweights       map[*simd.Mat]deviceQuantMat
 	normWeights    map[uintptr]native.DeviceBuffer
@@ -50,17 +51,18 @@ type Ops struct {
 	// persistent device buffer for hidden‑state vector x
 	xPersistDev   native.DeviceBuffer
 	xPersistBytes int
-	xHostRef      []float32 // host slice currently resident in xPersistDev
-	xHostPtr      uintptr   // &xHostRef[0] (or 0 if empty)
+	xHostRef      []float32
+	xHostPtr      uintptr // &xHostRef[0] (or 0 if empty)
 	xHostLen      int
-	xHostDirty    bool // host copy newer than device copy
-	xDevDirty     bool // device copy newer than host copy
+	xHostDirty    bool
+	xDevDirty     bool
 
 	// device-resident block output: avoids D2H + H2D round-trip through host
-	lastResultDev     native.DeviceBuffer // device buffer holding last block output
-	lastResultHostPtr uintptr             // host pointer the result would have been written to
-	lastResultLen     int                 // length in float32 elements
-	lastResultValid   bool                // unconsumed device result available
+	lastResultDev     native.DeviceBuffer
+	lastResultHostRef []float32
+	lastResultHostPtr uintptr
+	lastResultLen     int
+	lastResultValid   bool
 
 	// device-resident logits result for greedy decode (no host copy)
 	greedyResultDev   native.DeviceBuffer
@@ -196,22 +198,73 @@ func (o *Ops) clearNormDeviceView() {
 	o.normDevValid = false
 }
 
-// FlushBlockResult flushes a pending device-resident block output to host.
-// Exposed for the SIMD runtime to force host visibility before host-only ops.
-func (o *Ops) FlushBlockResult() {
+func (o *Ops) recordFastPathErrorLocked(err error) {
+	if err == nil || o.fastPathErr != nil {
+		return
+	}
+	o.fastPathErr = err
+}
+
+func (o *Ops) ConsumeFastPathError() error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.flushLastResult()
+	err := o.fastPathErr
+	o.fastPathErr = nil
+	return err
+}
+
+// FlushBlockResult flushes a pending device-resident block output to host.
+// Exposed for the SIMD runtime to force host visibility before host-only ops.
+func (o *Ops) FlushBlockResult() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if err := o.flushLastResult(); err != nil {
+		o.recordFastPathErrorLocked(err)
+		return err
+	}
+	return nil
 }
 
 // flushLastResult writes a pending device-resident block result back to host.
 // Must be called with o.mu held.
-func (o *Ops) flushLastResult() {
+func (o *Ops) flushLastResult() error {
 	if !o.lastResultValid {
-		return
+		return nil
+	}
+	if len(o.lastResultHostRef) == 0 {
+		o.clearLastResult()
+		return nil
 	}
 	bytes := int64(o.lastResultLen) * 4
-	_ = native.MemcpyD2H(unsafe.Pointer(o.lastResultHostPtr), o.lastResultDev, bytes)
+	err := native.MemcpyD2H(unsafe.Pointer(&o.lastResultHostRef[0]), o.lastResultDev, bytes)
+	o.clearLastResult()
+	if err != nil {
+		return fmt.Errorf("cuda: flush last result D2H failed (%d bytes): %w", bytes, err)
+	}
+	return nil
+}
+
+// setLastResult records a device result mapped to a host destination slice.
+// Must be called with o.mu held.
+func (o *Ops) setLastResult(dev native.DeviceBuffer, host []float32, n int) {
+	if n <= 0 || len(host) < n {
+		o.clearLastResult()
+		return
+	}
+	o.lastResultDev = dev
+	o.lastResultHostRef = host[:n]
+	o.lastResultHostPtr = uintptr(unsafe.Pointer(&host[0]))
+	o.lastResultLen = n
+	o.lastResultValid = true
+}
+
+// clearLastResult invalidates any pending device-resident block result.
+// Must be called with o.mu held.
+func (o *Ops) clearLastResult() {
+	o.lastResultDev = native.DeviceBuffer{}
+	o.lastResultHostRef = nil
+	o.lastResultHostPtr = 0
+	o.lastResultLen = 0
 	o.lastResultValid = false
 }
 
@@ -223,7 +276,7 @@ func (o *Ops) ResetConvStates() {
 	for k := range o.convStateReady {
 		delete(o.convStateReady, k)
 	}
-	o.lastResultValid = false
+	o.clearLastResult()
 	o.greedyResultValid = false
 }
 
@@ -492,7 +545,9 @@ func (o *Ops) BeginToken(x []float32) {
 func (o *Ops) EndToken(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.flushLastResult()
+	if err := o.flushLastResult(); err != nil {
+		panic(fmt.Errorf("cuda: end token flush failed: %w", err))
+	}
 	if len(x) == 0 || o.xHostLen == 0 || o.xHostPtr != uintptr(unsafe.Pointer(&x[0])) {
 		// Not our buffer, or no persistent buffer
 		return
@@ -533,7 +588,10 @@ func (o *Ops) HostStateDirty(x []float32) {
 func (o *Ops) SyncHostState(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.flushLastResult()
+	if err := o.flushLastResult(); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: sync host state flush failed: %w", err))
+		return
+	}
 	if len(x) == 0 || o.xHostLen == 0 || len(x) != o.xHostLen {
 		return
 	}
@@ -564,7 +622,9 @@ func (o *Ops) SyncDeviceSlice(x []float32) {
 
 	// Pending block output staged for residual add.
 	if o.lastResultValid && ptr == o.lastResultHostPtr && n == o.lastResultLen {
-		o.flushLastResult()
+		if err := o.flushLastResult(); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: sync device slice flush failed: %w", err))
+		}
 		return
 	}
 	// Persistent token state.
@@ -592,17 +652,24 @@ func (o *Ops) DeviceAdd(dst, src []float32) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.xHostLen == 0 || len(dst) != o.xHostLen || len(src) != o.xHostLen {
-		o.flushLastResult()
+		if err := o.flushLastResult(); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add pre-flush failed: %w", err))
+		}
 		return false
 	}
 	if uintptr(unsafe.Pointer(&dst[0])) != o.xHostPtr {
-		o.flushLastResult()
+		if err := o.flushLastResult(); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add pre-flush failed: %w", err))
+		}
 		return false
 	}
 	bytes := int64(len(dst)) * int64(unsafe.Sizeof(float32(0)))
 	if o.xHostDirty {
 		if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&dst[0]), bytes); err != nil {
-			o.flushLastResult()
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add dst upload failed (%d bytes): %w", bytes, err))
+			if flushErr := o.flushLastResult(); flushErr != nil {
+				o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add flush after upload failure failed: %w", flushErr))
+			}
 			return false
 		}
 		o.xHostDirty = false
@@ -612,17 +679,23 @@ func (o *Ops) DeviceAdd(dst, src []float32) bool {
 	// Fast path: consume device-resident block output directly (no H2D round-trip)
 	if o.lastResultValid && uintptr(unsafe.Pointer(&src[0])) == o.lastResultHostPtr && len(src) == o.lastResultLen {
 		if err := native.AddVectorsF32(o.xPersistDev, o.lastResultDev, len(dst), o.stream); err != nil {
-			o.flushLastResult()
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add fast path kernel failed (n=%d): %w", len(dst), err))
+			if flushErr := o.flushLastResult(); flushErr != nil {
+				o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add flush after fast path failure failed: %w", flushErr))
+			}
 			return false
 		}
-		o.lastResultValid = false
+		o.clearLastResult()
 		o.xHostDirty = false
 		o.xDevDirty = true
 		return true
 	}
 
 	// Slow path: H2D src from host
-	o.flushLastResult()
+	if err := o.flushLastResult(); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add slow path pre-flush failed: %w", err))
+		return false
+	}
 	if err := o.ensureDeviceVecs(0, int(bytes)); err != nil {
 		return false
 	}
@@ -630,6 +703,7 @@ func (o *Ops) DeviceAdd(dst, src []float32) bool {
 		return false
 	}
 	if err := native.AddVectorsF32(o.xPersistDev, o.yDev, len(dst), o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add slow path kernel failed (n=%d): %w", len(dst), err))
 		return false
 	}
 	o.xHostDirty = false
@@ -1026,12 +1100,6 @@ func (o *Ops) isNormDeviceX(x []float32) bool {
 	return uintptr(unsafe.Pointer(&x[0])) == o.normHostPtr
 }
 
-// matVecWithDeviceX performs MatVec using x already on device (xPersistDev).
-// Requires o.mu locked.
-func (o *Ops) matVecWithDeviceX(dst []float32, w *simd.Mat) error {
-	return o.matVecWithDeviceInput(dst, w, o.xPersistDev, o.xHostLen)
-}
-
 // matVecWithDeviceInput performs MatVec using an already resident device input vector.
 // Requires o.mu locked.
 func (o *Ops) matVecWithDeviceInput(dst []float32, w *simd.Mat, xDev native.DeviceBuffer, xLen int) error {
@@ -1137,12 +1205,6 @@ func (o *Ops) matVecWithDeviceInputNoCopy(w *simd.Mat, xDev native.DeviceBuffer,
 		native.BlasComputeF32,
 		native.BlasGemmDefault,
 	)
-}
-
-// matVecQuantWithDeviceX performs quantized MatVec using x already on device.
-// Requires o.mu locked.
-func (o *Ops) matVecQuantWithDeviceX(dst []float32, w *simd.Mat) error {
-	return o.matVecQuantWithDeviceInput(dst, w, o.xPersistDev)
 }
 
 // matVecQuantWithDeviceInput performs quantized MatVec with an already resident device input.
@@ -1307,8 +1369,9 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 
 	xInput := o.xDev
 	xInputType := upW.dtype
-	devInput, usedDeviceInput, err := o.deviceInputForVector(x[:len(x)], upW.dtype, len(x))
+	devInput, usedDeviceInput, err := o.deviceInputForVector(x[:], upW.dtype, len(x))
 	if err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn device input prepare failed: %w", err))
 		return false
 	}
 	if usedDeviceInput {
@@ -1334,7 +1397,7 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 	}
 
 	if !usedDeviceInput {
-		if err := fillXBuffer(o.xHost, upW.dtype, x[:len(x)]); err != nil {
+		if err := fillXBuffer(o.xHost, upW.dtype, x[:]); err != nil {
 			return false
 		}
 		if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
@@ -1350,6 +1413,7 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 	}
 
 	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, interm, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn silu kernel failed (n=%d): %w", interm, err))
 		return false
 	}
 
@@ -1360,6 +1424,7 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 		downInputType = native.BlasF32
 	} else {
 		if err := native.ConvertF32ToF16(o.yDev, o.aDev, interm, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn f32->f16 projection convert failed (n=%d): %w", interm, err))
 			return false
 		}
 	}
@@ -1454,18 +1519,17 @@ func (o *Ops) quantFFNBlock(layer *simd.Layer, x []float32, out []float32) bool 
 		if err := o.runQuantFFNGraph(qUp, qGate, qDown, xInput, interm, outRows, o.stream); err != nil {
 			native.RecordGraphFailure()
 			if err := o.runQuantFFNDirect(qUp, qGate, qDown, xInput, interm, o.stream); err != nil {
+				o.recordFastPathErrorLocked(fmt.Errorf("cuda: quant ffn fast path failed: %w", err))
 				return false
 			}
 		}
 	} else if err := o.runQuantFFNDirect(qUp, qGate, qDown, xInput, interm, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: quant ffn fast path failed: %w", err))
 		return false
 	}
 
 	// Result stays on device — DeviceAdd will consume it directly.
-	o.lastResultDev = o.zDev
-	o.lastResultHostPtr = uintptr(unsafe.Pointer(&out[0]))
-	o.lastResultLen = outRows
-	o.lastResultValid = true
+	o.setLastResult(o.zDev, out, outRows)
 	runtime.KeepAlive(x)
 	runtime.KeepAlive(out)
 	return true
@@ -1557,7 +1621,7 @@ func (o *Ops) runQuantFFNDirect(qUp, qGate, qDown deviceQuantMat, xInput native.
 		return err
 	}
 	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, interm, stream); err != nil {
-		return err
+		return fmt.Errorf("silu kernel failed (n=%d): %w", interm, err)
 	}
 	return runQuantKernelDirect(qDown, o.yDev, o.zDev, stream)
 }
@@ -1609,7 +1673,7 @@ func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.D
 	}
 	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, interm, stream); err != nil {
 		_, _ = stream.EndCapture()
-		return err
+		return fmt.Errorf("silu kernel failed (n=%d): %w", interm, err)
 	}
 	if err := runQuantKernelDirect(qDown, o.yDev, o.zDev, stream); err != nil {
 		_, _ = stream.EndCapture()
@@ -1758,6 +1822,7 @@ func (o *Ops) ShortConvBlock(layer *simd.Layer, x []float32, out []float32, embd
 	// Step 3: ShortConv depthwise kernel: proj(yDev) + convW + state → zDev
 	// Conv state is updated in-place on device by the kernel.
 	if err := native.ShortConvDepthwise(o.yDev, convWDev, convState.buf, o.zDev, embd, klen, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: shortconv depthwise kernel failed (embd=%d, klen=%d): %w", embd, klen, err))
 		return false
 	}
 
@@ -1771,10 +1836,7 @@ func (o *Ops) ShortConvBlock(layer *simd.Layer, x []float32, out []float32, embd
 	}
 
 	// Result stays on device — DeviceAdd will consume it directly.
-	o.lastResultDev = o.yDev
-	o.lastResultHostPtr = uintptr(unsafe.Pointer(&out[0]))
-	o.lastResultLen = outRows
-	o.lastResultValid = true
+	o.setLastResult(o.yDev, out, outRows)
 	runtime.KeepAlive(x)
 	runtime.KeepAlive(out)
 	runtime.KeepAlive(state)
@@ -1872,6 +1934,7 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bo
 	xInputType := dq.dtype
 	devInput, usedDeviceInput, err := o.deviceInputForVector(x[:wq.C], dq.dtype, wq.C)
 	if err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: qkv device input prepare failed: %w", err))
 		return false
 	}
 	if usedDeviceInput {
@@ -1985,7 +2048,7 @@ func (o *Ops) deviceInputForVector(x []float32, dtype native.BlasDataType, lengt
 			return deviceInputRef{}, false, err
 		}
 		if err := native.ConvertF32ToF16(src, o.xDev, length, o.stream); err != nil {
-			return deviceInputRef{}, false, err
+			return deviceInputRef{}, false, fmt.Errorf("f32->f16 device input conversion failed (n=%d): %w", length, err)
 		}
 		return deviceInputRef{buf: o.xDev, dtype: native.BlasF16}, true, nil
 	default:
@@ -2357,14 +2420,9 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, 
 		if err := o.rmsNormDevice(o.zDev, wDev, o.aDev, projDim, epsilon); err != nil {
 			return false
 		}
-		o.lastResultDev = o.aDev
+		o.setLastResult(o.aDev, projOut, projDim)
 	} else {
-		o.lastResultDev = o.zDev
-	}
-	if projDim > 0 {
-		o.lastResultHostPtr = uintptr(unsafe.Pointer(&projOut[0]))
-		o.lastResultLen = projDim
-		o.lastResultValid = true
+		o.setLastResult(o.zDev, projOut, projDim)
 	}
 	runtime.KeepAlive(projOut)
 	return true
@@ -3487,16 +3545,6 @@ func max64Local(a, b int64) int64 {
 		return a
 	}
 	return b
-}
-
-func maxInt3(a, b, c int) int {
-	if b > a {
-		a = b
-	}
-	if c > a {
-		a = c
-	}
-	return a
 }
 
 func fillXBuffer(buf native.HostBuffer, dtype native.BlasDataType, x []float32) error {

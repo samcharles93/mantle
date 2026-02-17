@@ -5,6 +5,31 @@ import (
 	"math/rand"
 )
 
+// fastExp computes an approximation of exp(x) using polynomial approximation
+// with range reduction. Accurate to <0.1% relative error for x in [-88, 88].
+func fastExp(x float32) float32 {
+	if x > 88.0 {
+		return 3.4028235e38
+	}
+	if x < -88.0 {
+		return 0.0
+	}
+	const ln2 = 0.693147180559945309417
+	const ln2Inv = 1.44269504088896340736
+	k := int32(x*ln2Inv + 0.5)
+	if x < 0 {
+		k = int32(x*ln2Inv - 0.5)
+	}
+	r := x - float32(k)*ln2
+	r2 := r * r
+	r3 := r2 * r
+	r4 := r2 * r2
+	poly := 1.0 + r + r2*0.5 + r3*0.16666667 + r4*0.041666667 + (r4*r)*0.008333333
+	exp := uint32(k+127) << 23
+	scale := math.Float32frombits(exp)
+	return poly * scale
+}
+
 // SamplerConfig configures the behaviour of a Sampler.
 type SamplerConfig struct {
 	Seed          int64
@@ -139,8 +164,7 @@ func (s *Sampler) Sample(logits []float32, recent []int, excludePenalty []int) i
 	prob := s.prob[:len(topVal)]
 	var sum float64
 	for i := range topVal {
-		x := float64(topVal[i] - maxv)
-		e := math.Exp(x)
+		e := float64(fastExp(topVal[i] - maxv))
 		prob[i] = e
 		sum += e
 	}

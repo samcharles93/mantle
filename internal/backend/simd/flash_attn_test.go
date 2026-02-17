@@ -234,14 +234,27 @@ func TestOnlineSoftmax(t *testing.T) {
 
 	OnlineSoftmax(x, m, l)
 
-	// Check that values sum to approximately 1 (after normalization)
+	// Check that values sum to the expected online-softmax block mass:
+	// rowSum / (exp(m-maxv)*l + rowSum)
 	var sum float32
 	for _, val := range x {
 		sum += val
 	}
 
-	if sum < 0.99 || sum > 1.01 {
-		t.Errorf("Softmax output should sum to ~1.0, got %f", sum)
+	maxv := originalX[0]
+	for _, val := range originalX[1:] {
+		if val > maxv {
+			maxv = val
+		}
+	}
+	rowSum := float32(0)
+	for _, val := range originalX {
+		rowSum += float32(math.Exp(float64(val - maxv)))
+	}
+	alpha := float32(math.Exp(float64(m - maxv)))
+	expectedSum := rowSum / (alpha*l + rowSum)
+	if math.Abs(float64(sum-expectedSum)) > 1e-5 {
+		t.Errorf("Softmax output sum mismatch: got %f want %f", sum, expectedSum)
 	}
 
 	// Check that no values are negative

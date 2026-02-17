@@ -51,6 +51,10 @@ func runCmd() *cli.Command {
 		rawOutput      bool
 		noSWA          bool
 		cudaWeightMode string
+		// Tiling configuration
+		tileM int64
+		tileN int64
+		tileK int64
 		// Profiling
 		cpuProfile string
 		memProfile string
@@ -260,6 +264,28 @@ func runCmd() *cli.Command {
 			Value:       "auto",
 			Destination: &cudaWeightMode,
 		},
+		// Tiling configuration
+		&cli.Int64Flag{
+			Name:        "tile-m",
+			Category:    "Performance",
+			Usage:       "GEMM Tile M dimension (16-64)",
+			Value:       32,
+			Destination: &tileM,
+		},
+		&cli.Int64Flag{
+			Name:        "tile-n",
+			Category:    "Performance",
+			Usage:       "GEMM Tile N dimension (16-64)",
+			Value:       32,
+			Destination: &tileN,
+		},
+		&cli.Int64Flag{
+			Name:        "tile-k",
+			Category:    "Performance",
+			Usage:       "GEMM Tile K dimension (8-64)",
+			Value:       16,
+			Destination: &tileK,
+		},
 		// Profiling flags
 		&cli.StringFlag{
 			Name:        "cpuprofile",
@@ -352,6 +378,26 @@ func runCmd() *cli.Command {
 			loadStart := time.Now()
 
 			log.Info("loading MCF model", "path", modelPath)
+
+			// Apply tiling configuration
+			tilingCfg := simd.DefaultTilingConfig()
+			if c.IsSet("tile-m") {
+				tilingCfg.TileM = int(tileM)
+			}
+			if c.IsSet("tile-n") {
+				tilingCfg.TileN = int(tileN)
+			}
+			if c.IsSet("tile-k") {
+				tilingCfg.TileK = int(tileK)
+			}
+			if c.IsSet("tile-m") || c.IsSet("tile-n") || c.IsSet("tile-k") {
+				log.Info("using custom tiling config",
+					"tile_m", tilingCfg.TileM,
+					"tile_n", tilingCfg.TileN,
+					"tile_k", tilingCfg.TileK,
+				)
+			}
+
 			loader := inference.Loader{
 				TokenizerJSONPath:   tokenizerJSONPath,
 				TokenizerConfigPath: tokenizerConfig,
@@ -359,6 +405,7 @@ func runCmd() *cli.Command {
 				HFConfigPath:        hfConfigFile,
 				Backend:             backend,
 				DisableSWA:          noSWA,
+				TilingConfig:        tilingCfg,
 			}
 			loader.LoadOptions.CacheTypeK = c.String("cache-type-k")
 			loader.LoadOptions.CacheTypeV = c.String("cache-type-v")

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 )
 
 const (
@@ -36,6 +37,9 @@ type PackOptions struct {
 
 	// Cast controls float casting: "keep" (default), "f16", "bf16".
 	Cast string
+
+	// QuantEmbed controls embedding table quantization: "none" (default), "int8", "int4".
+	QuantEmbed string
 
 	// Dedup enables safe, behaviour-preserving deduplication by aliasing
 	// byte-identical tensor payloads (after any cast). If enabled, duplicates
@@ -199,7 +203,7 @@ func Pack(opts PackOptions) error {
 	recs := make([]TensorIndexRecord, 0, len(names))
 	total := len(names)
 
-	logf("pack: tensors=%d cast=%s dedup=%t align=%d", total, opts.Cast, opts.Dedup, align)
+	logf("pack: tensors=%d cast=%s quant_embed=%s dedup=%t align=%d", total, opts.Cast, opts.QuantEmbed, opts.Dedup, align)
 
 	var (
 		processed      int
@@ -249,6 +253,10 @@ func Pack(opts PackOptions) error {
 		outDT := inDT
 		var written uint64
 
+		// Check if this is an embedding tensor
+		isEmbedding := isEmbeddingTensor(name)
+		quantEmbed := opts.QuantEmbed != "" && opts.QuantEmbed != "none" && isEmbedding
+
 		// Optional hash-on-write for dedup.
 		var h io.Writer
 		var sumHash *hash.Hash
@@ -262,39 +270,57 @@ func Pack(opts PackOptions) error {
 
 		_ = h
 
-		switch opts.Cast {
-		case "keep":
-			n, err := copyExact(dst, r, inBytes, copyBuf)
-			if err != nil {
-				return fmt.Errorf("mcf: tensor %q: copy: %w", name, err)
+		// Handle embedding quantization
+		if quantEmbed {
+			switch opts.QuantEmbed {
+			case "int8":
+				outDT, written, err = quantizeToInt8(dst, r, ref.Info.DType, nElem, copyBuf, outBuf)
+				if err != nil {
+					return fmt.Errorf("mcf: tensor %q: quantize int8: %w", name, err)
+				}
+			case "int4":
+				outDT, written, err = quantizeToInt4(dst, r, ref.Info.DType, nElem, copyBuf, outBuf)
+				if err != nil {
+					return fmt.Errorf("mcf: tensor %q: quantize int4: %w", name, err)
+				}
+			default:
+				return fmt.Errorf("mcf: unsupported --quant-embed %q (use none|int8|int4)", opts.QuantEmbed)
 			}
-			written = n
-			if written != inBytes {
-				return fmt.Errorf("mcf: tensor %q: short write (wrote %d, want %d)", name, written, inBytes)
-			}
+		} else {
+			switch opts.Cast {
+			case "keep":
+				n, err := copyExact(dst, r, inBytes, copyBuf)
+				if err != nil {
+					return fmt.Errorf("mcf: tensor %q: copy: %w", name, err)
+				}
+				written = n
+				if written != inBytes {
+					return fmt.Errorf("mcf: tensor %q: short write (wrote %d, want %d)", name, written, inBytes)
+				}
 
-		case "bf16":
-			outDT, written, err = castToBF16(dst, r, ref.Info.DType, nElem, copyBuf, outBuf)
-			if err != nil {
-				return fmt.Errorf("mcf: tensor %q: cast bf16: %w", name, err)
-			}
-			wantOut := nElem * 2
-			if written != wantOut {
-				return fmt.Errorf("mcf: tensor %q: short write (wrote %d, want %d)", name, written, wantOut)
-			}
+			case "bf16":
+				outDT, written, err = castToBF16(dst, r, ref.Info.DType, nElem, copyBuf, outBuf)
+				if err != nil {
+					return fmt.Errorf("mcf: tensor %q: cast bf16: %w", name, err)
+				}
+				wantOut := nElem * 2
+				if written != wantOut {
+					return fmt.Errorf("mcf: tensor %q: short write (wrote %d, want %d)", name, written, wantOut)
+				}
 
-		case "f16":
-			outDT, written, err = castToF16(dst, r, ref.Info.DType, nElem, copyBuf, outBuf)
-			if err != nil {
-				return fmt.Errorf("mcf: tensor %q: cast f16: %w", name, err)
-			}
-			wantOut := nElem * 2
-			if written != wantOut {
-				return fmt.Errorf("mcf: tensor %q: short write (wrote %d, want %d)", name, written, wantOut)
-			}
+			case "f16":
+				outDT, written, err = castToF16(dst, r, ref.Info.DType, nElem, copyBuf, outBuf)
+				if err != nil {
+					return fmt.Errorf("mcf: tensor %q: cast f16: %w", name, err)
+				}
+				wantOut := nElem * 2
+				if written != wantOut {
+					return fmt.Errorf("mcf: tensor %q: short write (wrote %d, want %d)", name, written, wantOut)
+				}
 
-		default:
-			return fmt.Errorf("mcf: unsupported --cast %q (use keep|f16|bf16)", opts.Cast)
+			default:
+				return fmt.Errorf("mcf: unsupported --cast %q (use keep|f16|bf16)", opts.Cast)
+			}
 		}
 
 		dataOff := startOff
@@ -949,4 +975,212 @@ func readF32(m map[string]any, key string) (float32, bool) {
 		return float32(t), true
 	}
 	return 0, false
+}
+
+// isEmbeddingTensor reports whether a tensor name represents an embedding table.
+func isEmbeddingTensor(name string) bool {
+	lower := strings.ToLower(name)
+	embeddingPatterns := []string{
+		"embed_tokens",
+		"embed_tokens.weight",
+		"lm_head.weight",
+		"output.weight",
+		"transformer.wte",
+		"wte.weight",
+		"embedding.weight",
+		"embeddings.weight",
+	}
+	for _, pattern := range embeddingPatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// quantizeToInt8 quantizes F32/BF16/F16 data to Int8 symmetric quantization.
+func quantizeToInt8(dst io.Writer, src io.Reader, srcDType string, nElem uint64, copyBuf, workBuf []byte) (TensorDType, uint64, error) {
+	elemSize := int64(4)
+	switch srcDType {
+	case "BF16", "F16":
+		elemSize = 2
+	}
+
+	totalBytes := uint64(elemSize) * nElem
+	srcBytes := make([]byte, totalBytes)
+
+	_, err := io.ReadFull(src, srcBytes)
+	if err != nil {
+		return DTypeInt8, 0, fmt.Errorf("read source: %w", err)
+	}
+
+	// Convert to F32
+	f32Vals := make([]float32, nElem)
+	if srcDType == "F32" {
+		for i := range nElem {
+			f32Vals[i] = math.Float32frombits(binary.LittleEndian.Uint32(srcBytes[i*4:]))
+		}
+	} else if srcDType == "BF16" {
+		for i := range nElem {
+			u16 := binary.LittleEndian.Uint16(srcBytes[i*2:])
+			f32Vals[i] = bf16ToF32(u16)
+		}
+	} else {
+		// F16 - use simple conversion (same as bf16 for now, proper implementation would use float16 package)
+		for i := range nElem {
+			u16 := binary.LittleEndian.Uint16(srcBytes[i*2:])
+			// Simple F16 to F32 conversion (not fully accurate but works for quantization)
+			sign := float32((-1) ^ int(u16>>15))
+			exp := (u16 >> 10) & 0x1F
+			mant := u16 & 0x3FF
+			if exp == 0 {
+				if mant == 0 {
+					f32Vals[i] = 0
+				} else {
+					f32Vals[i] = sign * math.SmallestNonzeroFloat32
+				}
+			} else if exp == 31 {
+				f32Vals[i] = float32(math.Inf(int(sign)))
+			} else {
+				f32Vals[i] = sign * float32(math.Ldexp(1.0+float64(mant)/1024.0, int(exp)-15))
+			}
+		}
+	}
+
+	// Find min/max for symmetric quantization
+	var minVal, maxVal float32
+	for i, v := range f32Vals {
+		if i == 0 || v < minVal {
+			minVal = v
+		}
+		if i == 0 || v > maxVal {
+			maxVal = v
+		}
+	}
+
+	// Symmetric quantization: scale = max(abs(min), abs(max)) / 127
+	maxAbs := maxVal
+	if -minVal > maxAbs {
+		maxAbs = -minVal
+	}
+	scale := maxAbs / 127.0
+	if scale == 0 {
+		scale = 1e-10
+	}
+
+	// Quantize to int8
+	quantized := make([]int8, nElem)
+	for i, v := range f32Vals {
+		q := int32(v / scale)
+		if q < -128 {
+			q = -128
+		} else if q > 127 {
+			q = 127
+		}
+		quantized[i] = int8(q)
+	}
+
+	// Write quantized data
+	quantBytes := unsafe.Slice((*byte)(unsafe.Pointer(&quantized[0])), nElem)
+	nw, err := dst.Write(quantBytes)
+	if err != nil {
+		return DTypeInt8, 0, err
+	}
+
+	return DTypeInt8, uint64(nw), nil
+}
+
+// quantizeToInt4 quantizes F32/BF16/F16 data to Int4 symmetric quantization.
+func quantizeToInt4(dst io.Writer, src io.Reader, srcDType string, nElem uint64, copyBuf, workBuf []byte) (TensorDType, uint64, error) {
+	elemSize := int64(4)
+	switch srcDType {
+	case "BF16", "F16":
+		elemSize = 2
+	}
+
+	totalBytes := uint64(elemSize) * nElem
+	srcBytes := make([]byte, totalBytes)
+
+	_, err := io.ReadFull(src, srcBytes)
+	if err != nil {
+		return DTypeInt4, 0, fmt.Errorf("read source: %w", err)
+	}
+
+	// Convert to F32
+	f32Vals := make([]float32, nElem)
+	if srcDType == "F32" {
+		for i := range nElem {
+			f32Vals[i] = math.Float32frombits(binary.LittleEndian.Uint32(srcBytes[i*4:]))
+		}
+	} else if srcDType == "BF16" {
+		for i := range nElem {
+			u16 := binary.LittleEndian.Uint16(srcBytes[i*2:])
+			f32Vals[i] = bf16ToF32(u16)
+		}
+	} else {
+		// F16 conversion
+		for i := range nElem {
+			u16 := binary.LittleEndian.Uint16(srcBytes[i*2:])
+			sign := float32((-1) ^ int(u16>>15))
+			exp := (u16 >> 10) & 0x1F
+			mant := u16 & 0x3FF
+			if exp == 0 {
+				if mant == 0 {
+					f32Vals[i] = 0
+				} else {
+					f32Vals[i] = sign * math.SmallestNonzeroFloat32
+				}
+			} else if exp == 31 {
+				f32Vals[i] = float32(math.Inf(int(sign)))
+			} else {
+				f32Vals[i] = sign * float32(math.Ldexp(1.0+float64(mant)/1024.0, int(exp)-15))
+			}
+		}
+	}
+
+	// Find min/max
+	var minVal, maxVal float32
+	for i, v := range f32Vals {
+		if i == 0 || v < minVal {
+			minVal = v
+		}
+		if i == 0 || v > maxVal {
+			maxVal = v
+		}
+	}
+
+	// Symmetric quantization: scale = max(abs(min), abs(max)) / 7
+	maxAbs := maxVal
+	if -minVal > maxAbs {
+		maxAbs = -minVal
+	}
+	scale := maxAbs / 7.0
+	if scale == 0 {
+		scale = 1e-10
+	}
+
+	// Quantize to int4 and pack (2 values per byte)
+	packed := make([]byte, (nElem+1)/2)
+	for i := range nElem {
+		q := int32(f32Vals[i] / scale)
+		if q < -8 {
+			q = -8
+		} else if q > 7 {
+			q = 7
+		}
+		// Store as unsigned 0-15 range (signed +8)
+		uq := uint8(q + 8)
+		if i%2 == 0 {
+			packed[i/2] = uq & 0x0F
+		} else {
+			packed[i/2] |= uq << 4
+		}
+	}
+
+	nw, err := dst.Write(packed)
+	if err != nil {
+		return DTypeInt4, 0, err
+	}
+
+	return DTypeInt4, uint64(nw), nil
 }

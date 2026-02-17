@@ -146,12 +146,12 @@ func softmaxAccumulateAVX512(acc []float32, scores [][]float32, v []float32,
 		rowSum := float32(0.0)
 		expVals := make([]float32, blockK)
 		for ki := range blockK {
-			expVals[ki] = float32(math.Exp(float64(scores[qi][ki] - rowMax)))
+			expVals[ki] = fastExp(scores[qi][ki] - rowMax)
 			rowSum += expVals[ki]
 		}
 
 		// Update statistics with online softmax formula
-		alpha := float32(math.Exp(float64(blockM[qi] - rowMax)))
+		alpha := fastExp(blockM[qi] - rowMax)
 		newL := alpha*blockL[qi] + rowSum
 
 		// Rescale accumulator with vectorized multiply
@@ -316,12 +316,12 @@ func softmaxAccumulateAVX2(acc []float32, scores [][]float32, v []float32,
 		rowSum := float32(0.0)
 		expVals := make([]float32, blockK)
 		for ki := range blockK {
-			expVals[ki] = float32(math.Exp(float64(scores[qi][ki] - rowMax)))
+			expVals[ki] = fastExp(scores[qi][ki] - rowMax)
 			rowSum += expVals[ki]
 		}
 
 		// Update statistics with online softmax formula
-		alpha := float32(math.Exp(float64(blockM[qi] - rowMax)))
+		alpha := fastExp(blockM[qi] - rowMax)
 		newL := alpha*blockL[qi] + rowSum
 
 		// Rescale accumulator with vectorized multiply
@@ -401,12 +401,12 @@ func flashAttentionScalar(output, q, k, v []float32, seqLenQ, seqLenK, dim int, 
 		// Compute exp and sum
 		rowSum := float32(0.0)
 		for j := range seqLenK {
-			scores[j] = float32(math.Exp(float64(scores[j] - rowMax)))
+			scores[j] = fastExp(scores[j] - rowMax)
 			rowSum += scores[j]
 		}
 
 		// Update statistics
-		alpha := float32(math.Exp(float64(m[i] - rowMax)))
+		alpha := fastExp(m[i] - rowMax)
 		newL := alpha*l[i] + rowSum
 
 		// Rescale output
