@@ -98,7 +98,7 @@ func main() {
 	}
 
 	caps := hostcaps.Detect()
-	loadOpts := simd.LoadModelOptions{HostCaps: caps}
+	loadOpts := simd.LoadModelOptions{HostCaps: caps, GpuLayers: -1}
 
 	bfModel, err := simd.LoadModelMCF(bf16File, bfCfgBytes, maxContext, loadOpts)
 	if err != nil {

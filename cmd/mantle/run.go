@@ -51,6 +51,7 @@ func runCmd() *cli.Command {
 		rawOutput      bool
 		noSWA          bool
 		cudaWeightMode string
+		gpuLayers      int64
 		// Tiling configuration
 		tileM int64
 		tileN int64
@@ -264,6 +265,13 @@ func runCmd() *cli.Command {
 			Value:       "auto",
 			Destination: &cudaWeightMode,
 		},
+		&cli.Int64Flag{
+			Name:        "gpu-layers",
+			Category:    "Performance",
+			Usage:       "number of transformer layers to keep on GPU (-1 auto, 0 all CPU)",
+			Value:       -1,
+			Destination: &gpuLayers,
+		},
 		// Tiling configuration
 		&cli.Int64Flag{
 			Name:        "tile-m",
@@ -325,6 +333,9 @@ func runCmd() *cli.Command {
 				_ = os.Setenv("MANTLE_CUDA_WEIGHT_MODE", strings.ToLower(strings.TrimSpace(cudaWeightMode)))
 			default:
 				return cli.Exit("error: --cuda-weight-mode must be one of: auto, quant, dequant", 1)
+			}
+			if gpuLayers < -1 {
+				return cli.Exit("error: --gpu-layers must be >= -1", 1)
 			}
 			// Keep verbose CUDA diagnostics gated behind debug mode.
 			if debug && os.Getenv("MANTLE_CUDA_TRACE") == "" {
@@ -409,6 +420,7 @@ func runCmd() *cli.Command {
 			}
 			loader.LoadOptions.CacheTypeK = c.String("cache-type-k")
 			loader.LoadOptions.CacheTypeV = c.String("cache-type-v")
+			loader.LoadOptions.GpuLayers = int(gpuLayers)
 			loadResult, err := loader.Load(ctx, modelPath, int(maxContext))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)

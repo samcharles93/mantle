@@ -59,6 +59,11 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 	}
 
 	ops := NewOps(stream, blas)
+	if opts.GpuLayers < -1 {
+		ops.gpuLayers = -1
+	} else {
+		ops.gpuLayers = opts.GpuLayers
+	}
 	m.SetOps(ops)
 	mode := currentCUDAWeightMode()
 	estimatedWeights := estimateModelWeightBytes(m, mode)
@@ -180,6 +185,27 @@ func (r *cudaRuntime) ForwardTokenGreedy(id int) (next int, err error) {
 	return next, nil
 }
 
+// PrefillTokens advances model state for a prompt token slice and returns logits
+// for the final prompt token. It avoids downloading full logits for intermediate
+// prompt tokens by using the device-greedy path.
+func (r *cudaRuntime) PrefillTokens(tokens []int) ([]float32, error) {
+	if r.model == nil {
+		return nil, fmt.Errorf("cuda runtime is closed")
+	}
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("no tokens to prefill")
+	}
+	for i, id := range tokens {
+		if i == len(tokens)-1 {
+			return r.ForwardToken(id)
+		}
+		if _, err := r.ForwardTokenGreedy(id); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("unreachable prefill state")
+}
+
 func (r *cudaRuntime) Reset() {
 	if r.model == nil {
 		return
@@ -226,7 +252,8 @@ func (r *cudaRuntime) emitPerfSummary() {
 	fmt.Fprintf(os.Stderr, "\n=== CUDA Performance Summary ===\n")
 	fmt.Fprintf(os.Stderr, "Tokens processed: %d\n", toks)
 	fmt.Fprintf(os.Stderr, "-- Decode Counters --\n")
-	fmt.Fprintf(os.Stderr, "MatVec calls: %d (%.1f per token)\n", decode.MatVecCalls, float64(decode.MatVecCalls)/float64(max(toks, 1)))
+	fmt.Fprintf(os.Stderr, "MatVec CUDA calls: %d (%.1f per token)\n", decode.MatVecCalls, float64(decode.MatVecCalls)/float64(max(toks, 1)))
+	fmt.Fprintf(os.Stderr, "MatVec CPU fallbacks: %d (%.1f per token)\n", decode.MatVecCPUFallbackCalls, float64(decode.MatVecCPUFallbackCalls)/float64(max(toks, 1)))
 	fmt.Fprintf(os.Stderr, "RMSNorm calls: %d (%.1f per token)\n", decode.RMSNormCalls, float64(decode.RMSNormCalls)/float64(max(toks, 1)))
 	fmt.Fprintf(os.Stderr, "StoreKV calls: %d (%.1f per token)\n", decode.StoreKVCalls, float64(decode.StoreKVCalls)/float64(max(toks, 1)))
 	fmt.Fprintf(os.Stderr, "Stream syncs: %d\n", decode.StreamSyncs)
@@ -238,7 +265,8 @@ func (r *cudaRuntime) emitPerfSummary() {
 	fmt.Fprintf(os.Stderr, "Device allocs: %d (%.1f MB)\n", decode.DeviceAllocs, float64(decode.DeviceBytes)/1024/1024)
 	fmt.Fprintf(os.Stderr, "Managed allocs: %d (%.1f MB)\n", decode.ManagedAllocs, float64(decode.ManagedBytes)/1024/1024)
 	fmt.Fprintf(os.Stderr, "-- Preload Counters --\n")
-	fmt.Fprintf(os.Stderr, "MatVec calls: %d\n", r.preloadCounters.MatVecCalls)
+	fmt.Fprintf(os.Stderr, "MatVec CUDA calls: %d\n", r.preloadCounters.MatVecCalls)
+	fmt.Fprintf(os.Stderr, "MatVec CPU fallbacks: %d\n", r.preloadCounters.MatVecCPUFallbackCalls)
 	fmt.Fprintf(os.Stderr, "RMSNorm calls: %d\n", r.preloadCounters.RMSNormCalls)
 	fmt.Fprintf(os.Stderr, "StoreKV calls: %d\n", r.preloadCounters.StoreKVCalls)
 	fmt.Fprintf(os.Stderr, "Stream syncs: %d\n", r.preloadCounters.StreamSyncs)

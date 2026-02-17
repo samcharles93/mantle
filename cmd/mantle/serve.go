@@ -98,6 +98,7 @@ func serveCmd() *cli.Command {
 				ChatTemplatePath:    chatTemplate,
 				Backend:             backend,
 			}
+			loader.LoadOptions.GpuLayers = -1
 			provider := api.NewCachedEngineProvider(api.EngineProviderConfig{
 				DefaultModelPath: modelPath,
 				ModelsPath:       modelsPath,

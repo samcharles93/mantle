@@ -79,6 +79,7 @@ func benchmarkCmd() *cli.Command {
 			loader := inference.Loader{
 				Backend: backend,
 			}
+			loader.LoadOptions.GpuLayers = -1
 			loadResult, err := loader.Load(ctx, modelPath, int(maxContext))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load model: %v", err), 1)

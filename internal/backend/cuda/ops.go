@@ -25,6 +25,8 @@ type Ops struct {
 	fastPathErr    error
 	weights        map[*simd.Mat]deviceMat
 	qweights       map[*simd.Mat]deviceQuantMat
+	offloadedMats  map[*simd.Mat]struct{} // weights intentionally kept on CPU
+	gpuLayers      int                    // -1 auto, 0 all layers on CPU, N first N layers on GPU
 	normWeights    map[uintptr]native.DeviceBuffer
 	attnCaches     map[*simd.Layer]deviceAttnCache
 	f16Dequant     map[*simd.Mat]native.DeviceBuffer  // Cached F16 dequantized weights
@@ -181,6 +183,8 @@ func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 		blas:           blas,
 		weights:        make(map[*simd.Mat]deviceMat),
 		qweights:       make(map[*simd.Mat]deviceQuantMat),
+		offloadedMats:  make(map[*simd.Mat]struct{}),
+		gpuLayers:      -1,
 		normWeights:    make(map[uintptr]native.DeviceBuffer),
 		attnCaches:     make(map[*simd.Layer]deviceAttnCache),
 		f16Dequant:     make(map[*simd.Mat]native.DeviceBuffer),
@@ -366,8 +370,31 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	clear(o.offloadedMats)
 
 	mode := currentCUDAWeightMode()
+	budgeted := false
+	uploadBudget := int64(0)
+	if freeBytes, totalBytes, err := native.MemInfo(); err == nil && freeBytes > 0 {
+		uploadBudget = int64(float64(freeBytes) * 0.85) // reserve ~15% for KV + scratch
+		budgeted = true
+		if cudaTraceEnabled() {
+			fmt.Fprintf(
+				os.Stderr,
+				"CUDA preload budget: free=%d MiB total=%d MiB budget=%d MiB\n",
+				freeBytes/1024/1024,
+				totalBytes/1024/1024,
+				uploadBudget/1024/1024,
+			)
+		}
+	} else if cudaTraceEnabled() {
+		fmt.Fprintln(os.Stderr, "CUDA preload budget unavailable: continuing without VRAM budgeting")
+	}
+	targetGPULayers := len(m.Layers)
+	if o.gpuLayers >= 0 {
+		targetGPULayers = min(o.gpuLayers, len(m.Layers))
+	}
+
 	uploadMat := func(name string, mat *simd.Mat) error {
 		if mat == nil {
 			return nil
@@ -409,40 +436,30 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 		}
 		return nil
 	}
-
-	if err := uploadMat("embeddings", m.Embeddings); err != nil {
-		return err
+	seenMats := make(map[*simd.Mat]struct{})
+	recordMatBytes := func(mat *simd.Mat, used *int64) {
+		if mat == nil {
+			return
+		}
+		if _, ok := seenMats[mat]; ok {
+			return
+		}
+		seenMats[mat] = struct{}{}
+		*used += estimateMatBytes(mat, mode)
 	}
-	if err := uploadMat("output", m.Output); err != nil {
-		return err
+	layerWithinBudget := func(layer *simd.Layer, used int64) bool {
+		if !budgeted || layer == nil {
+			return true
+		}
+		layerBytes := estimateLayerMatBytes(layer, mode, seenMats)
+		return used+layerBytes <= uploadBudget
 	}
-	if err := uploadNorm("output_norm", m.OutputNorm); err != nil {
-		return err
+	recordLayerMatBytes := func(layer *simd.Layer, used *int64) {
+		for _, mat := range layerMats(layer) {
+			recordMatBytes(mat, used)
+		}
 	}
-
-	for i := range m.Layers {
-		layer := &m.Layers[i]
-		prefix := fmt.Sprintf("layer[%d]", i)
-
-		if err := uploadNorm(prefix+".attn_norm", layer.AttnNorm); err != nil {
-			return err
-		}
-		if err := uploadNorm(prefix+".post_attn_norm", layer.PostAttnNorm); err != nil {
-			return err
-		}
-		if err := uploadNorm(prefix+".ffn_norm", layer.FfnNorm); err != nil {
-			return err
-		}
-		if err := uploadNorm(prefix+".post_ffn_norm", layer.PostFfnNorm); err != nil {
-			return err
-		}
-		if err := uploadNorm(prefix+".attn_q_norm", layer.AttnQNorm); err != nil {
-			return err
-		}
-		if err := uploadNorm(prefix+".attn_k_norm", layer.AttnKNorm); err != nil {
-			return err
-		}
-
+	uploadLayerMats := func(prefix string, layer *simd.Layer) error {
 		if err := uploadMat(prefix+".wq", layer.Wq); err != nil {
 			return err
 		}
@@ -503,6 +520,84 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 				}
 			}
 		}
+		return nil
+	}
+
+	var usedBytes int64
+	if err := uploadMat("embeddings", m.Embeddings); err != nil {
+		return err
+	}
+	recordMatBytes(m.Embeddings, &usedBytes)
+	if err := uploadMat("output", m.Output); err != nil {
+		return err
+	}
+	recordMatBytes(m.Output, &usedBytes)
+	if err := uploadNorm("output_norm", m.OutputNorm); err != nil {
+		return err
+	}
+	usedBytes += int64(len(m.OutputNorm)) * 4
+
+	gpuLayersLoaded := 0
+	offloadedLayers := 0
+	forceOffloadRemainder := false
+
+	for i := range m.Layers {
+		layer := &m.Layers[i]
+		prefix := fmt.Sprintf("layer[%d]", i)
+
+		if err := uploadNorm(prefix+".attn_norm", layer.AttnNorm); err != nil {
+			return err
+		}
+		if err := uploadNorm(prefix+".post_attn_norm", layer.PostAttnNorm); err != nil {
+			return err
+		}
+		if err := uploadNorm(prefix+".ffn_norm", layer.FfnNorm); err != nil {
+			return err
+		}
+		if err := uploadNorm(prefix+".post_ffn_norm", layer.PostFfnNorm); err != nil {
+			return err
+		}
+		if err := uploadNorm(prefix+".attn_q_norm", layer.AttnQNorm); err != nil {
+			return err
+		}
+		if err := uploadNorm(prefix+".attn_k_norm", layer.AttnKNorm); err != nil {
+			return err
+		}
+		usedBytes += int64(len(layer.AttnNorm)+len(layer.PostAttnNorm)+len(layer.FfnNorm)+len(layer.PostFfnNorm)+len(layer.AttnQNorm)+len(layer.AttnKNorm)) * 4
+
+		offloadLayer := forceOffloadRemainder || i >= targetGPULayers
+		if !offloadLayer && o.gpuLayers < 0 && !layerWithinBudget(layer, usedBytes) {
+			offloadLayer = true
+		}
+		if offloadLayer {
+			o.markLayerOffloadedLocked(layer)
+			offloadedLayers++
+			continue
+		}
+
+		if err := uploadLayerMats(prefix, layer); err != nil {
+			if native.IsOOM(err) {
+				o.markLayerOffloadedLocked(layer)
+				offloadedLayers++
+				forceOffloadRemainder = true
+				if cudaTraceEnabled() {
+					fmt.Fprintf(os.Stderr, "CUDA preload: offloading %s and remaining layers after OOM: %v\n", prefix, err)
+				}
+				continue
+			}
+			return err
+		}
+		recordLayerMatBytes(layer, &usedBytes)
+		gpuLayersLoaded++
+	}
+
+	if offloadedLayers > 0 {
+		fmt.Fprintf(os.Stderr, "CUDA layer offload active: %d/%d layers on GPU, %d offloaded to CPU\n", gpuLayersLoaded, len(m.Layers), offloadedLayers)
+	} else if cudaTraceEnabled() {
+		fmt.Fprintf(os.Stderr, "CUDA layer offload: all %d layers on GPU\n", len(m.Layers))
+	}
+	if cudaTraceEnabled() && budgeted {
+		fmt.Fprintf(os.Stderr, "CUDA preload usage estimate: %d MiB / %d MiB budget\n", usedBytes/1024/1024, uploadBudget/1024/1024)
 	}
 
 	return nil
@@ -1007,7 +1102,6 @@ func (o *Ops) Close() error {
 }
 
 func (o *Ops) MatVec(dst []float32, w *simd.Mat, x []float32) {
-	native.RecordMatVec()
 	if w == nil || w.R == 0 || w.C == 0 {
 		return
 	}
@@ -1019,7 +1113,14 @@ func (o *Ops) MatVec(dst []float32, w *simd.Mat, x []float32) {
 	}
 
 	o.mu.Lock()
+	if _, offloaded := o.offloadedMats[w]; offloaded {
+		o.mu.Unlock()
+		native.RecordMatVecCPUFallback()
+		simd.MatVec(dst, w, x)
+		return
+	}
 	defer o.mu.Unlock()
+	native.RecordMatVec()
 
 	if useQuantKernel() && shouldPreferQuantWeights(w, currentCUDAWeightMode()) {
 		o.matVecQuant(dst, w, x)
@@ -1313,7 +1414,18 @@ func (o *Ops) matVecQuant(dst []float32, w *simd.Mat, x []float32) {
 	runtime.KeepAlive(dst)
 }
 
-func (o *Ops) MatVecWithQuant(dst []float32, w *simd.Mat, x []float32, _ *simd.QuantVec) {
+func (o *Ops) MatVecWithQuant(dst []float32, w *simd.Mat, x []float32, qx *simd.QuantVec) {
+	if o == nil {
+		panic("cuda ops is nil")
+	}
+	o.mu.Lock()
+	if _, offloaded := o.offloadedMats[w]; offloaded {
+		o.mu.Unlock()
+		native.RecordMatVecCPUFallback()
+		simd.MatVecWithQuant(dst, w, x, qx)
+		return
+	}
+	o.mu.Unlock()
 	o.MatVec(dst, w, x)
 }
 
@@ -1891,6 +2003,13 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bo
 	if len(q) < wq.R || len(k) < wk.R || len(v) < wv.R || len(x) < wq.C || wq.C != wk.C || wq.C != wv.C {
 		return false
 	}
+	// Quantized weights are handled by the stable quant matvec path.
+	// QKV GEMM fast path uses dequantized weight uploads and has shown
+	// illegal-memory failures for K4/Q8 models under mixed execution.
+	mode := currentCUDAWeightMode()
+	if shouldPreferQuantWeights(wq, mode) || shouldPreferQuantWeights(wk, mode) || shouldPreferQuantWeights(wv, mode) {
+		return false
+	}
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -1911,7 +2030,10 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bo
 		return false
 	}
 
-	xBytes := xBufferBytes(dq.dtype, wq.C)
+	// Use F32 input vector for QKV GEMM regardless of weight dtype.
+	// This matches the stable DeviceMatVec path and avoids BF16/F16 host
+	// packing differences that can degrade generation quality.
+	xBytes := xBufferBytes(native.BlasF32, wq.C)
 	qBytes := int64(dq.rows) * 4
 	kBytes := int64(dk.rows) * 4
 	vBytes := int64(dv.rows) * 4
@@ -1931,8 +2053,8 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bo
 	}
 
 	xInput := o.xDev
-	xInputType := dq.dtype
-	devInput, usedDeviceInput, err := o.deviceInputForVector(x[:wq.C], dq.dtype, wq.C)
+	xInputType := native.BlasF32
+	devInput, usedDeviceInput, err := o.deviceInputForVector(x[:wq.C], native.BlasF32, wq.C)
 	if err != nil {
 		o.recordFastPathErrorLocked(fmt.Errorf("cuda: qkv device input prepare failed: %w", err))
 		return false
@@ -1941,7 +2063,7 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bo
 		xInput = devInput.buf
 		xInputType = devInput.dtype
 	} else {
-		if err := fillXBuffer(o.xHost, dq.dtype, x[:wq.C]); err != nil {
+		if err := fillXBuffer(o.xHost, native.BlasF32, x[:wq.C]); err != nil {
 			return false
 		}
 		if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
@@ -2043,14 +2165,10 @@ func (o *Ops) deviceInputForVector(x []float32, dtype native.BlasDataType, lengt
 	case native.BlasF32:
 		return deviceInputRef{buf: src, dtype: native.BlasF32}, true, nil
 	case native.BlasF16:
-		xBytes := int(xBufferBytes(native.BlasF16, length))
-		if err := o.ensureDeviceVecs(xBytes, 0); err != nil {
-			return deviceInputRef{}, false, err
-		}
-		if err := native.ConvertF32ToF16(src, o.xDev, length, o.stream); err != nil {
-			return deviceInputRef{}, false, fmt.Errorf("f32->f16 device input conversion failed (n=%d): %w", length, err)
-		}
-		return deviceInputRef{buf: o.xDev, dtype: native.BlasF16}, true, nil
+		// Keep device input in F32 to avoid conversion-kernel instability under
+		// memory pressure; cublas GemmEx accepts mixed input/weight types.
+		_ = length
+		return deviceInputRef{buf: src, dtype: native.BlasF32}, true, nil
 	default:
 		// BF16 and other encodings currently fall back to host upload.
 		return deviceInputRef{}, false, nil
@@ -2651,6 +2769,9 @@ func (o *Ops) deviceMat(w *simd.Mat) (deviceMat, error) {
 	if buf, ok := o.weights[w]; ok {
 		return buf, nil
 	}
+	if _, offloaded := o.offloadedMats[w]; offloaded {
+		return deviceMat{}, fmt.Errorf("weight matrix offloaded to CPU")
+	}
 	if w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType) {
 		dev, err := o.uploadQuantAsF16Device(w)
 		if err != nil {
@@ -2938,6 +3059,9 @@ func (o *Ops) waitForResult(hostDst unsafe.Pointer, devSrc native.DeviceBuffer, 
 func (o *Ops) ensureQuantMat(w *simd.Mat) (deviceQuantMat, error) {
 	if buf, ok := o.qweights[w]; ok {
 		return buf, nil
+	}
+	if _, offloaded := o.offloadedMats[w]; offloaded {
+		return deviceQuantMat{}, fmt.Errorf("quant matrix offloaded to CPU")
 	}
 	if w == nil {
 		return deviceQuantMat{}, fmt.Errorf("missing quant matrix")
@@ -3576,6 +3700,69 @@ func bf16FromF32(v float32) uint16 {
 	return uint16((u + rnd) >> 16)
 }
 
+func layerMats(layer *simd.Layer) []*simd.Mat {
+	if layer == nil {
+		return nil
+	}
+	mats := []*simd.Mat{
+		layer.Wq,
+		layer.Wk,
+		layer.Wv,
+		layer.Wo,
+		layer.AttnGate,
+		layer.ShortConvKernel,
+		layer.ShortConvInProj,
+		layer.ShortConvOutProj,
+		layer.FfnUp,
+		layer.FfnGate,
+		layer.FfnDown,
+	}
+	if layer.MoE != nil {
+		mats = append(mats,
+			layer.MoE.Router,
+			layer.MoE.Shared.Up,
+			layer.MoE.Shared.Gate,
+			layer.MoE.Shared.Down,
+		)
+		for i := range layer.MoE.Experts {
+			ex := &layer.MoE.Experts[i]
+			mats = append(mats, ex.Up, ex.Gate, ex.Down)
+		}
+	}
+	if layer.Mamba != nil {
+		mats = append(mats, layer.Mamba.InProj, layer.Mamba.OutProj, layer.Mamba.Conv)
+	}
+	return mats
+}
+
+func estimateLayerMatBytes(layer *simd.Layer, mode cudaWeightMode, seen map[*simd.Mat]struct{}) int64 {
+	if layer == nil {
+		return 0
+	}
+	var total int64
+	for _, mat := range layerMats(layer) {
+		if mat == nil {
+			continue
+		}
+		if _, ok := seen[mat]; ok {
+			continue
+		}
+		total += estimateMatBytes(mat, mode)
+	}
+	return total
+}
+
+func (o *Ops) markLayerOffloadedLocked(layer *simd.Layer) {
+	if layer == nil {
+		return
+	}
+	for _, mat := range layerMats(layer) {
+		if mat != nil {
+			o.offloadedMats[mat] = struct{}{}
+		}
+	}
+}
+
 func estimateModelWeightBytes(m *simd.Instance, mode cudaWeightMode) int64 {
 	if m == nil {
 		return 0
@@ -3631,6 +3818,18 @@ func estimateMatBytes(mat *simd.Mat, mode cudaWeightMode) int64 {
 	}
 	if shouldPreferQuantWeights(mat, mode) {
 		if len(mat.Raw) > 0 {
+			// Q4 always uploads raw payload by default.
+			if mat.DType == mcf.DTypeQ4 {
+				return int64(len(mat.Raw))
+			}
+			// K4 uploads raw payload only when explicitly enabled.
+			if mat.DType == mcf.DTypeK4 && useK4RawKernel() {
+				return int64(len(mat.Raw))
+			}
+			// Cached int8 upload footprint used by default quant path.
+			if cacheBytes, ok := estimateQuantCacheBytes(mat); ok {
+				return cacheBytes
+			}
 			return int64(len(mat.Raw))
 		}
 	}
@@ -3646,4 +3845,17 @@ func estimateMatBytes(mat *simd.Mat, mode cudaWeightMode) int64 {
 
 func dtypeString(dt mcf.TensorDType) string {
 	return fmt.Sprintf("0x%04x", uint16(dt))
+}
+
+func estimateQuantCacheBytes(mat *simd.Mat) (int64, bool) {
+	if mat == nil || mat.R <= 0 || mat.C <= 0 {
+		return 0, false
+	}
+	_, totalBlocks, err := quantBlocks(mat.R, mat.C)
+	if err != nil || totalBlocks <= 0 {
+		return 0, false
+	}
+	// int8 block payload + float32 scale per block.
+	bytes := int64(totalBlocks) * (32 + int64(unsafe.Sizeof(float32(0))))
+	return bytes, true
 }
