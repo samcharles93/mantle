@@ -21,7 +21,7 @@ __host__ int mantleCudaAddVectorsF32(
     int n,
     cudaStream_t stream
 ) {
-    if (n <= 0) return 0;
+    if (!dst || !src || n <= 0) return cudaErrorInvalidValue;
     const int blockSize = 256;
     int gridSize = (n + blockSize - 1) / blockSize;
     add_vectors_f32_kernel<<<gridSize, blockSize, 0, stream>>>(dst, src, n);

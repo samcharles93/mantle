@@ -14,6 +14,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/samcharles93/mantle/internal/backend/simd"
+	"github.com/samcharles93/mantle/internal/hostcaps"
 	"github.com/samcharles93/mantle/internal/inference"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/reasoning"
@@ -303,6 +304,7 @@ func runCmd() *cli.Command {
 			if debug && os.Getenv("MANTLE_CUDA_TRACE") == "" {
 				_ = os.Setenv("MANTLE_CUDA_TRACE", "1")
 			}
+			ctx = hostcaps.WithContext(ctx, hostcaps.Detect())
 
 			if cpuProfile != "" {
 				f, err := os.Create(cpuProfile)

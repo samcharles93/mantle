@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/samcharles93/mantle/internal/hostcaps"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/pkg/mcf"
@@ -15,6 +16,7 @@ import (
 type LoadModelOptions struct {
 	CacheTypeK string
 	CacheTypeV string
+	HostCaps   *hostcaps.Snapshot
 }
 
 type tensorPayload struct {
@@ -569,7 +571,8 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		MuPScale:      muPScale,
 		RopeLocalOnly: spec.RopeLocalOnly,
 	}
-	m.SetOps(DefaultOps{})
+	m.setHostCapabilities(opts.HostCaps)
+	m.bindDefaultOps()
 	initInstanceScratch(m)
 	updateInstanceRoPE(m)
 	return m, nil

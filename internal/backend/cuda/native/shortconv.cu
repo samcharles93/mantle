@@ -55,7 +55,7 @@ __host__ int mantleCudaShortConvDepthwise(
     int klen,
     cudaStream_t stream
 ) {
-    if (embd <= 0 || klen <= 0) return 0;
+    if (!proj || !conv_w || !state || !out || embd <= 0 || klen <= 0) return cudaErrorInvalidValue;
     const int blockSize = 256;
     int gridSize = (embd + blockSize - 1) / blockSize;
     shortconv_depthwise_kernel<<<gridSize, blockSize, 0, stream>>>(

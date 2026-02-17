@@ -1,6 +1,10 @@
 package simd
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/samcharles93/mantle/internal/hostcaps"
+)
 
 func TestDefaultOpsStoreKVF32(t *testing.T) {
 	ops := DefaultOps{}
@@ -61,5 +65,34 @@ func TestDefaultOpsApplyRoPEMatchesFunction(t *testing.T) {
 		if x0[i] != x1[i] {
 			t.Fatalf("x[%d]: got %v want %v", i, x0[i], x1[i])
 		}
+	}
+}
+
+func TestInstanceBindDefaultOpsUsesBoundDispatch(t *testing.T) {
+	m := &Instance{HeadDim: 128}
+	m.setHostCapabilities(&hostcaps.Snapshot{
+		CPU: hostcaps.CPUFeatures{
+			HasAVX2:   true,
+			HasAVX512: true,
+		},
+	})
+	m.bindDefaultOps()
+
+	if _, ok := m.Ops().(*boundCPUOps); !ok {
+		t.Fatalf("expected *boundCPUOps, got %T", m.Ops())
+	}
+}
+
+type customOps struct {
+	DefaultOps
+}
+
+func TestInstanceBindDefaultOpsPreservesCustomOps(t *testing.T) {
+	m := &Instance{HeadDim: 128}
+	m.SetOps(customOps{})
+	m.bindDefaultOps()
+
+	if _, ok := m.Ops().(customOps); !ok {
+		t.Fatalf("expected customOps, got %T", m.Ops())
 	}
 }

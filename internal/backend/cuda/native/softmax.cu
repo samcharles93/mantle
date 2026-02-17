@@ -736,7 +736,7 @@ __global__ void attention_inner_mixed_cache_f32_kernel(
 }
 
 int mantleCudaSoftmaxRowsF32(float* data, int rows, int cols, cudaStream_t stream) {
-    if (!data || rows <= 0 || cols <= 0) return 0;
+    if (!data || rows <= 0 || cols <= 0) return cudaErrorInvalidValue;
     if (rows > INT_MAX / cols) return cudaErrorInvalidValue;
 
     const int threads = 256;

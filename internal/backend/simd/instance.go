@@ -1,6 +1,10 @@
 package simd
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/samcharles93/mantle/internal/hostcaps"
+)
 
 // Instance holds the CPU backend runtime state for a loaded model.
 // It implements model.Runtime interface.
@@ -30,6 +34,9 @@ type Instance struct {
 
 	Scratch ScratchBuffers
 	ops     Ops
+
+	hostCaps    *hostcaps.Snapshot
+	opsBindOnce sync.Once
 }
 
 // Layer represents a single transformer layer with all its parameters.
@@ -221,6 +228,10 @@ type ScratchBuffers struct {
 
 // Ops returns the ops interface for this instance.
 func (m *Instance) Ops() Ops {
+	if m == nil {
+		return DefaultOps{}
+	}
+	m.bindDefaultOps()
 	if m.ops == nil {
 		return DefaultOps{}
 	}
@@ -233,6 +244,13 @@ func (m *Instance) SetOps(ops Ops) {
 		return
 	}
 	m.ops = ops
+}
+
+func (m *Instance) setHostCapabilities(caps *hostcaps.Snapshot) {
+	if m == nil || caps == nil {
+		return
+	}
+	m.hostCaps = caps
 }
 
 // ModelConfig returns the model configuration (implements model.Runtime).

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/samcharles93/mantle/internal/backend/simd"
+	"github.com/samcharles93/mantle/internal/hostcaps"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
@@ -96,12 +97,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	bfModel, err := simd.LoadModelMCF(bf16File, bfCfgBytes, maxContext, simd.LoadModelOptions{})
+	caps := hostcaps.Detect()
+	loadOpts := simd.LoadModelOptions{HostCaps: caps}
+
+	bfModel, err := simd.LoadModelMCF(bf16File, bfCfgBytes, maxContext, loadOpts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "bf16 load:", err)
 		os.Exit(1)
 	}
-	k4Model, err := simd.LoadModelMCF(k4File, k4CfgBytes, maxContext, simd.LoadModelOptions{})
+	k4Model, err := simd.LoadModelMCF(k4File, k4CfgBytes, maxContext, loadOpts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "k4 load:", err)
 		os.Exit(1)

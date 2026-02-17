@@ -9,6 +9,7 @@ import (
 
 	"github.com/samcharles93/mantle/internal/backend"
 	"github.com/samcharles93/mantle/internal/backend/simd"
+	"github.com/samcharles93/mantle/internal/hostcaps"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/tokenizer"
@@ -44,6 +45,14 @@ type GenDefaults struct {
 
 func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*LoadResult, error) {
 	log := logger.FromContext(ctx)
+	opts := l.LoadOptions
+	if opts.HostCaps == nil {
+		if caps := hostcaps.FromContext(ctx); caps != nil {
+			opts.HostCaps = caps
+		} else {
+			opts.HostCaps = hostcaps.Detect()
+		}
+	}
 
 	if strings.TrimSpace(modelPath) == "" {
 		return nil, fmt.Errorf("model path is required")
@@ -113,7 +122,7 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 		return cleanup(fmt.Errorf("unknown backend %q (expected auto, cpu, or cuda)", backendName))
 	}
 
-	modelRuntime, err := runtime.LoadModel(mcfFile, cfgBytes, maxContext, l.LoadOptions)
+	modelRuntime, err := runtime.LoadModel(mcfFile, cfgBytes, maxContext, opts)
 	if err != nil {
 		return cleanup(err)
 	}

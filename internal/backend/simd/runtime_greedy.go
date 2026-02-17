@@ -27,31 +27,40 @@ func (m *Instance) ForwardTokenGreedy(tok int) (int, error) {
 		}
 	}
 
+	ops := m.Ops()
+
 	var ds DeviceStateOps
-	if d, ok := m.Ops().(DeviceStateOps); ok {
+	if d, ok := ops.(DeviceStateOps); ok {
 		ds = d
 		ds.BeginToken(x)
 		defer ds.EndToken(x)
 	}
 
 	type blockFlusher interface {
-		FlushBlockResult()
+		FlushBlockResult() error
 	}
 	var bf blockFlusher
-	if f, ok := m.Ops().(blockFlusher); ok {
+	if f, ok := ops.(blockFlusher); ok {
 		bf = f
 	}
 
 	for i := range m.Layers {
 		layer := &m.Layers[i]
 
-		if ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp, x, layer.AttnNorm, m.RMSEpsilon) {
+		attnNormFast := ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp, x, layer.AttnNorm, m.RMSEpsilon)
+		if err := consumeFastPathError(ops); err != nil {
+			return 0, fmt.Errorf("attention pre-norm fast path failed: %w", err)
+		}
+		if attnNormFast {
 			// device-side pre-norm succeeded
 		} else {
 			if ds != nil {
 				ds.SyncHostState(x)
+				if err := consumeFastPathError(ops); err != nil {
+					return 0, fmt.Errorf("attention pre-norm sync failed: %w", err)
+				}
 			}
-			m.Ops().RMSNorm(m.Scratch.Tmp, x, layer.AttnNorm, m.RMSEpsilon)
+			ops.RMSNorm(m.Scratch.Tmp, x, layer.AttnNorm, m.RMSEpsilon)
 		}
 
 		var opOut []float32
@@ -92,38 +101,64 @@ func (m *Instance) ForwardTokenGreedy(tok int) (int, error) {
 		} else {
 			opOut = Attention(m, layer, m.Scratch.Tmp, m.Pos)
 		}
+		if err := consumeFastPathError(ops); err != nil {
+			return 0, fmt.Errorf("attention fast path failed: %w", err)
+		}
 		if len(layer.PostAttnNorm) > 0 {
 			if bf != nil {
-				bf.FlushBlockResult()
+				if err := bf.FlushBlockResult(); err != nil {
+					return 0, fmt.Errorf("post-attention flush failed: %w", err)
+				}
 			}
-			m.Ops().RMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
+			ops.RMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
 			opOut = m.Scratch.Tmp2
 		}
 		addResidual(ds, x, opOut)
+		if err := consumeFastPathError(ops); err != nil {
+			return 0, fmt.Errorf("attention residual fast path failed: %w", err)
+		}
 
-		if ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon) {
+		ffnNormFast := ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon)
+		if err := consumeFastPathError(ops); err != nil {
+			return 0, fmt.Errorf("ffn pre-norm fast path failed: %w", err)
+		}
+		if ffnNormFast {
 			// device-side pre-norm succeeded
 		} else {
 			if ds != nil {
 				ds.SyncHostState(x)
+				if err := consumeFastPathError(ops); err != nil {
+					return 0, fmt.Errorf("ffn pre-norm sync failed: %w", err)
+				}
 			}
-			m.Ops().RMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon)
+			ops.RMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon)
 		}
 		var ffnOut []float32
 		if layer.MoE != nil {
-			syncDeviceSlice(m.Ops(), m.Scratch.Tmp)
+			syncDeviceSlice(ops, m.Scratch.Tmp)
+			if err := consumeFastPathError(ops); err != nil {
+				return 0, fmt.Errorf("moe sync fast path failed: %w", err)
+			}
 			ffnOut = MoE(m, layer, m.Scratch.Tmp)
 		} else {
 			ffnOut = FFN(m, layer, m.Scratch.Tmp)
 		}
+		if err := consumeFastPathError(ops); err != nil {
+			return 0, fmt.Errorf("ffn fast path failed: %w", err)
+		}
 		if len(layer.PostFfnNorm) > 0 {
 			if bf != nil {
-				bf.FlushBlockResult()
+				if err := bf.FlushBlockResult(); err != nil {
+					return 0, fmt.Errorf("post-ffn flush failed: %w", err)
+				}
 			}
-			m.Ops().RMSNorm(m.Scratch.Tmp, ffnOut, layer.PostFfnNorm, m.RMSEpsilon)
+			ops.RMSNorm(m.Scratch.Tmp, ffnOut, layer.PostFfnNorm, m.RMSEpsilon)
 			ffnOut = m.Scratch.Tmp
 		}
 		addResidual(ds, x, ffnOut)
+		if err := consumeFastPathError(ops); err != nil {
+			return 0, fmt.Errorf("ffn residual fast path failed: %w", err)
+		}
 	}
 
 	type greedyHeadOps interface {
@@ -132,18 +167,24 @@ func (m *Instance) ForwardTokenGreedy(tok int) (int, error) {
 	}
 
 	if ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp, x, m.OutputNorm, m.RMSEpsilon) {
-		if gh, ok := m.Ops().(greedyHeadOps); ok && gh.DeviceMatVecNoCopy(m.Output, m.Scratch.Tmp) {
+		if gh, ok := ops.(greedyHeadOps); ok && gh.DeviceMatVecNoCopy(m.Output, m.Scratch.Tmp) {
 			if next, ok := gh.DeviceArgMaxLastResult(); ok {
 				m.Pos++
 				return next, nil
 			}
 		}
 	}
+	if err := consumeFastPathError(ops); err != nil {
+		return 0, fmt.Errorf("output head fast path failed: %w", err)
+	}
 
 	if ds != nil {
 		ds.SyncHostState(x)
+		if err := consumeFastPathError(ops); err != nil {
+			return 0, fmt.Errorf("output head sync failed: %w", err)
+		}
 	}
-	FusedRMSNormMatVec(m.Ops(), m.Scratch.Logits, m.Output, x, m.OutputNorm, m.RMSEpsilon, m.Scratch.Tmp)
+	FusedRMSNormMatVec(ops, m.Scratch.Logits, m.Output, x, m.OutputNorm, m.RMSEpsilon, m.Scratch.Tmp)
 	if scale := m.Config.Config.LMHeadMultiplier; scale != 0 && scale != 1 {
 		s := float32(scale)
 		for i := range m.Scratch.Logits {
