@@ -2,14 +2,19 @@
 
 package simd
 
-import "simd/archsimd"
+import (
+	"simd/archsimd"
+	"strings"
+)
 
 type ffnFastPath interface {
 	FFNBlock(layer *Layer, x []float32, out []float32) bool
 }
 
-// FFN performs feed-forward network computation with SiLU activation.
-// Computes: SiLU(Gate(x)) * Up(x) -> Down
+// FFN performs feed-forward network computation with gated activation.
+// The activation function is determined by Config.HiddenAct: "gelu" variants
+// use GELU, all others (including default) use SiLU.
+// Computes: Activation(Gate(x)) * Up(x) -> Down
 func FFN(m *Instance, layer *Layer, x []float32) []float32 {
 	if fp, ok := m.Ops().(ffnFastPath); ok && fp.FFNBlock(layer, x, m.Scratch.Tmp2) {
 		return m.Scratch.Tmp2
@@ -51,20 +56,34 @@ func FFN(m *Instance, layer *Layer, x []float32) []float32 {
 	runInputMatVec(m.Scratch.FfnUp, layer.FfnUp)
 	runInputMatVec(m.Scratch.FfnGate, layer.FfnGate)
 
-	// Vectorized SiLU activation
+	useGelu := strings.Contains(m.Config.Config.HiddenAct, "gelu")
 	n := len(m.Scratch.FfnAct)
 	i := 0
 
-	if cpu.HasAVX2 {
-		for ; i+8 <= n; i += 8 {
-			vgate := archsimd.LoadFloat32x8Slice(m.Scratch.FfnGate[i:])
-			vup := archsimd.LoadFloat32x8Slice(m.Scratch.FfnUp[i:])
-			vact := fastSiluVec(vgate).Mul(vup)
-			vact.StoreSlice(m.Scratch.FfnAct[i:])
+	if useGelu {
+		if cpu.HasAVX2 {
+			for ; i+8 <= n; i += 8 {
+				vgate := archsimd.LoadFloat32x8Slice(m.Scratch.FfnGate[i:])
+				vup := archsimd.LoadFloat32x8Slice(m.Scratch.FfnUp[i:])
+				vact := fastGeluVec(vgate).Mul(vup)
+				vact.StoreSlice(m.Scratch.FfnAct[i:])
+			}
 		}
-	}
-	for ; i < n; i++ {
-		m.Scratch.FfnAct[i] = Silu(m.Scratch.FfnGate[i]) * m.Scratch.FfnUp[i]
+		for ; i < n; i++ {
+			m.Scratch.FfnAct[i] = Gelu(m.Scratch.FfnGate[i]) * m.Scratch.FfnUp[i]
+		}
+	} else {
+		if cpu.HasAVX2 {
+			for ; i+8 <= n; i += 8 {
+				vgate := archsimd.LoadFloat32x8Slice(m.Scratch.FfnGate[i:])
+				vup := archsimd.LoadFloat32x8Slice(m.Scratch.FfnUp[i:])
+				vact := fastSiluVec(vgate).Mul(vup)
+				vact.StoreSlice(m.Scratch.FfnAct[i:])
+			}
+		}
+		for ; i < n; i++ {
+			m.Scratch.FfnAct[i] = Silu(m.Scratch.FfnGate[i]) * m.Scratch.FfnUp[i]
+		}
 	}
 
 	m.Ops().MatVec(m.Scratch.Tmp2, layer.FfnDown, m.Scratch.FfnAct)

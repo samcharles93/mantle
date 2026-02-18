@@ -327,7 +327,7 @@ func (o *attentionFastPathOps) MatVecQKV(q, k, v []float32, _ *Mat, _ *Mat, _ *M
 	return true
 }
 
-func (o *attentionFastPathOps) AttentionInner(attnOut []float32, _ *Layer, _ []float32, _ []float32, _ []float32, _ int, _ int, _ int, _ int, _ int, _ int, _ float32) bool {
+func (o *attentionFastPathOps) AttentionInner(attnOut []float32, _ *Layer, _ []float32, _ []float32, _ []float32, _ int, _ int, _ int, _ int, _ int, _ int, _ float32, _ float32) bool {
 	if !o.useInnerFastPath {
 		return false
 	}
@@ -339,7 +339,7 @@ func (o *attentionFastPathOps) AttentionInner(attnOut []float32, _ *Layer, _ []f
 	return true
 }
 
-func (o *attentionFastPathOps) AttentionInnerProjection(projOut []float32, _ *Layer, _ []float32, _ []float32, _ []float32, _ int, _ int, _ int, _ int, _ int, _ int, _ float32, _ float32) bool {
+func (o *attentionFastPathOps) AttentionInnerProjection(projOut []float32, _ *Layer, _ []float32, _ []float32, _ []float32, _ int, _ int, _ int, _ int, _ int, _ int, _ float32, _ float32, _ float32) bool {
 	if !o.useInnerProjectionFastPath {
 		return false
 	}

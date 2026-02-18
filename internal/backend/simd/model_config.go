@@ -55,6 +55,7 @@ type Config struct {
 	CacheTypeK          string
 	CacheTypeV          string
 	FlashAttention      bool
+	HiddenAct           string
 }
 
 const (

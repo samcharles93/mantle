@@ -269,6 +269,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			LayerTypes:             layerTypes,
 			MuPEnabled:             cfg.MuPEnabled,
 			AttentionBias:          cfg.AttentionBias,
+			HiddenAct:              cfg.HiddenActivation,
 		},
 	}
 	if opts.CacheTypeK != "" {
@@ -580,6 +581,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	m.bindDefaultOps()
 	initInstanceScratch(m)
 	updateInstanceRoPE(m)
+	adjustGemmaNorms(m, cfg)
 	return m, nil
 }
 
@@ -1309,5 +1311,48 @@ func toModelRopeScaling(rs *RopeScaling) *model.RopeScaling {
 		MScaleAllDim:    rs.MScaleAllDim,
 		Truncate:        rs.Truncate,
 		HasTruncate:     rs.HasTruncate,
+	}
+}
+
+func adjustGemmaNorms(m *Instance, cfg *model.HFConfig) {
+	if m == nil || cfg == nil {
+		return
+	}
+	// Check for Gemma model types
+	isGemma := false
+	mt := strings.ToLower(cfg.ModelType)
+	if strings.Contains(mt, "gemma") {
+		isGemma = true
+	}
+	// Also check architecture list if model_type is generic
+	for _, arch := range cfg.Architectures {
+		at := strings.ToLower(arch)
+		if strings.Contains(at, "gemma") {
+			isGemma = true
+			break
+		}
+	}
+
+	if !isGemma {
+		return
+	}
+
+	// Helper to add 1.0 to a slice
+	addOne := func(s []float32) {
+		for i := range s {
+			s[i] += 1.0
+		}
+	}
+
+	addOne(m.OutputNorm)
+
+	for i := range m.Layers {
+		l := &m.Layers[i]
+		addOne(l.AttnNorm)
+		addOne(l.PostAttnNorm)
+		addOne(l.FfnNorm)
+		addOne(l.PostFfnNorm)
+		addOne(l.AttnQNorm)
+		addOne(l.AttnKNorm)
 	}
 }

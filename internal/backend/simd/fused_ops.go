@@ -151,3 +151,28 @@ func fusedSiluActAVX2(dst, gate, up []float32) {
 		dst[i] = g * sig * up[i]
 	}
 }
+
+// FusedGeluAct applies GELU activation and stores result.
+// Computes: dst = gelu(gate) * up
+func FusedGeluAct(dst, gate, up []float32) {
+	if cpu.HasAVX2 {
+		fusedGeluActAVX2(dst, gate, up)
+		return
+	}
+	for i := range gate {
+		dst[i] = Gelu(gate[i]) * up[i]
+	}
+}
+
+func fusedGeluActAVX2(dst, gate, up []float32) {
+	i := 0
+	for ; i+8 <= len(gate); i += 8 {
+		vgate := archsimd.LoadFloat32x8Slice(gate[i:])
+		vup := archsimd.LoadFloat32x8Slice(up[i:])
+		vact := fastGeluVec(vgate).Mul(vup)
+		vact.StoreSlice(dst[i:])
+	}
+	for ; i < len(gate); i++ {
+		dst[i] = Gelu(gate[i]) * up[i]
+	}
+}

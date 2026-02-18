@@ -485,13 +485,13 @@ func GetOptimalBlockSize() (blockQ, blockK int) {
 // ValidateFlashAttention checks if inputs are valid
 func ValidateFlashAttention(q, k, v []float32, seqLenQ, seqLenK, dim int) error {
 	if len(q) < seqLenQ*dim {
-		return fmt.Errorf("Q buffer too small: expected %d, got %d", seqLenQ*dim, len(q))
+		return fmt.Errorf("q buffer too small: expected %d, got %d", seqLenQ*dim, len(q))
 	}
 	if len(k) < seqLenK*dim {
-		return fmt.Errorf("K buffer too small: expected %d, got %d", seqLenK*dim, len(k))
+		return fmt.Errorf("k buffer too small: expected %d, got %d", seqLenK*dim, len(k))
 	}
 	if len(v) < seqLenK*dim {
-		return fmt.Errorf("V buffer too small: expected %d, got %d", seqLenK*dim, len(v))
+		return fmt.Errorf("v buffer too small: expected %d, got %d", seqLenK*dim, len(v))
 	}
 	if dim <= 0 || seqLenQ <= 0 || seqLenK <= 0 {
 		return fmt.Errorf("invalid dimensions: seqLenQ=%d, seqLenK=%d, dim=%d", seqLenQ, seqLenK, dim)

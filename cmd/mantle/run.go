@@ -738,7 +738,7 @@ func runCmd() *cli.Command {
 					log.Info("reasoning mode", "format", reasoningFmt, "budget", reasoningBgt)
 				}
 
-				writer := NewStreamWriter(mode, rawOutput)
+				writer := NewStreamWriter(log, mode, rawOutput)
 				var split reasoning.Splitter
 				reasoningOpen := false
 				assistantStarted := false
@@ -809,7 +809,7 @@ func joinInts(ids []int) string {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		b.WriteString(fmt.Sprintf("%d", id))
+		fmt.Fprintf(&b, "%d", id)
 	}
 	b.WriteByte(']')
 	return b.String()
@@ -823,13 +823,13 @@ func escapeRawOutput(s string) string {
 	for _, r := range s {
 		switch r {
 		case '\n':
-			b.WriteString(`\n`)
+			fmt.Fprint(&b, "\\n")
 		case '\r':
-			b.WriteString(`\r`)
+			fmt.Fprint(&b, "\\r")
 		case '\t':
-			b.WriteString(`\t`)
+			fmt.Fprint(&b, "\\t")
 		case '\\':
-			b.WriteString(`\\`)
+			fmt.Fprint(&b, "\\\\")
 		default:
 			if strconv.IsPrint(r) {
 				b.WriteRune(r)

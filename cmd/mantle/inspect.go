@@ -63,7 +63,9 @@ func inspectCmd() *cli.Command {
 		showTensorData   bool
 		tensorLimit      int
 		vocabLimit       int
-		tensorFilter     string
+
+		tensorFilter string
+		dumpTensor   string
 	)
 
 	return &cli.Command{
@@ -95,6 +97,7 @@ func inspectCmd() *cli.Command {
 			&cli.BoolFlag{Name: "merges", Usage: "print raw merges.txt", Destination: &showMerges},
 			&cli.BoolFlag{Name: "modelinfo", Usage: "print raw modelinfo", Destination: &showModelInfo},
 			&cli.BoolFlag{Name: "tensor-data", Usage: "print tensor data section bounds", Destination: &showTensorData},
+			&cli.StringFlag{Name: "dump-tensor", Usage: "dump raw tensor data (hex/u16)", Destination: &dumpTensor},
 		},
 		Action: func(ctx context.Context, c *cli.Command) error {
 			_ = ctx
@@ -207,6 +210,10 @@ func inspectCmd() *cli.Command {
 				if s := sec(mcf.SectionTensorData); s != nil {
 					printSectionBounds("Tensor Data", s)
 				}
+			}
+
+			if dumpTensor != "" {
+				printTensorDump(dumpTensor, tensorIndexBytes, getData(mcf.SectionTensorData))
 			}
 
 			return nil

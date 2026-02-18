@@ -191,6 +191,16 @@ func Silu(x float32) float32 {
 	return fastSilu(x)
 }
 
+// Gelu computes the Gaussian Error Linear Unit activation using the tanh
+// approximation matching PyTorch's gelu_pytorch_tanh:
+//
+//	0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+func Gelu(x float32) float32 {
+	const sqrt2OverPi = 0.7978845608028654 // sqrt(2/pi)
+	inner := sqrt2OverPi * (x + 0.044715*x*x*x)
+	return 0.5 * x * (1 + fastTanh(inner))
+}
+
 // Softplus computes log(1+exp(x)) in a numerically stable way.
 func Softplus(x float32) float32 {
 	if x > 20 {

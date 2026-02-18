@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/samcharles93/mantle/internal/logger"
 )
 
 type StreamMode string
@@ -38,10 +40,12 @@ type StreamWriter struct {
 
 	// For raw output mode
 	rawOutput bool
+
+	log logger.Logger
 }
 
 // NewStreamWriter creates a new streaming output handler
-func NewStreamWriter(mode StreamMode, rawOutput bool) *StreamWriter {
+func NewStreamWriter(log logger.Logger, mode StreamMode, rawOutput bool) *StreamWriter {
 	w := &StreamWriter{
 		mode:          mode,
 		output:        os.Stdout,
@@ -50,6 +54,7 @@ func NewStreamWriter(mode StreamMode, rawOutput bool) *StreamWriter {
 		batchSize:     5,
 		lastFlush:     time.Now(),
 		rawOutput:     rawOutput,
+		log:           log,
 	}
 
 	// Start background flusher for smooth mode
@@ -86,16 +91,22 @@ func (w *StreamWriter) Flush() string {
 		if w.rawOutput {
 			// Apply escaping to full output at once
 			escaped := escapeRawOutput(result)
-			fmt.Fprint(w.output, escaped)
+			if _, err := fmt.Fprint(w.output, escaped); err != nil {
+				w.log.Debug("failed to write output", "error", err)
+			}
 		} else {
-			fmt.Fprint(w.output, result)
+			if _, err := fmt.Fprint(w.output, result); err != nil {
+				w.log.Debug("failed to write output", "error", err)
+			}
 		}
 		return result
 	case StreamSmooth:
 		w.flushBatch()
 		return w.accumulator.String()
 	default:
-		_ = w.buffer.Flush()
+		if err := w.buffer.Flush(); err != nil {
+			w.log.Debug("failed to flush buffer", "error", err)
+		}
 		return w.accumulator.String()
 	}
 }
@@ -109,11 +120,17 @@ func (w *StreamWriter) writeInstant(token string) {
 
 	if w.rawOutput {
 		escaped := escapeRawOutput(token)
-		_, _ = w.buffer.WriteString(escaped)
+		if _, err := w.buffer.WriteString(escaped); err != nil {
+			w.log.Debug("failed to write to buffer", "error", err)
+		}
 	} else {
-		_, _ = w.buffer.WriteString(token)
+		if _, err := w.buffer.WriteString(token); err != nil {
+			w.log.Debug("failed to write to buffer", "error", err)
+		}
 	}
-	_ = w.buffer.Flush()
+	if err := w.buffer.Flush(); err != nil {
+		w.log.Debug("failed to flush buffer", "error", err)
+	}
 }
 
 // writeSmooth - batched with time-based flushing
@@ -147,11 +164,17 @@ func (w *StreamWriter) writeTypewriter(token string) {
 	for _, r := range token {
 		if w.rawOutput {
 			escaped := escapeRawOutputRune(r)
-			fmt.Fprint(w.buffer, escaped)
+			if _, err := fmt.Fprint(w.buffer, escaped); err != nil {
+				w.log.Debug("failed to write to buffer", "error", err)
+			}
 		} else {
-			fmt.Fprintf(w.buffer, "%c", r)
+			if _, err := fmt.Fprintf(w.buffer, "%c", r); err != nil {
+				w.log.Debug("failed to write to buffer", "error", err)
+			}
 		}
-		_ = w.buffer.Flush()
+		if err := w.buffer.Flush(); err != nil {
+			w.log.Debug("failed to flush buffer", "error", err)
+		}
 	}
 }
 
@@ -171,11 +194,17 @@ func (w *StreamWriter) flushBatch() {
 	text := w.batch.String()
 	if w.rawOutput {
 		escaped := escapeRawOutput(text)
-		_, _ = w.buffer.WriteString(escaped)
+		if _, err := w.buffer.WriteString(escaped); err != nil {
+			w.log.Debug("failed to write to buffer", "error", err)
+		}
 	} else {
-		_, _ = w.buffer.WriteString(text)
+		if _, err := w.buffer.WriteString(text); err != nil {
+			w.log.Debug("failed to write to buffer", "error", err)
+		}
 	}
-	_ = w.buffer.Flush()
+	if err := w.buffer.Flush(); err != nil {
+		w.log.Debug("failed to flush buffer", "error", err)
+	}
 
 	w.batch.Reset()
 	w.lastFlush = time.Now()

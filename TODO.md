@@ -29,7 +29,7 @@
     - [ ] investigate alternate modelfile binary formats, how do they differ from mcf?
 
 - [ ] Quantisation
-  - [ ] Improve inference on quantised models
+  - [X] Improve inference on quantised models
   - [ ] investigate whether quant methods are reliable/safe
   - [ ] ensure MCF docs and spec is updated for quantisation
 

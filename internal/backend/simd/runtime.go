@@ -3,6 +3,7 @@ package simd
 import (
 	"fmt"
 	"math"
+	"strings"
 )
 
 // ForwardTokens processes multiple tokens in batch using GEMM for the projections.
@@ -71,23 +72,24 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 	ffnUp := NewMat(seqLen, m.Config.Config.FFNLength)
 	ffnGate := NewMat(seqLen, m.Config.Config.FFNLength)
 	ffnAct := NewMat(seqLen, m.Config.Config.FFNLength)
+	// X_norm holds the normalized input for projections, preserving X for residual
+	X_norm := NewMat(seqLen, embd)
 
 	// Process through layers
 	for layerIdx := range m.Layers {
 		layer := &m.Layers[layerIdx]
 
-		// RMSNorm each row
+		// RMSNorm each row: X -> X_norm
 		for i := range seqLen {
 			rowOff := i * X.Stride
-			RMSNorm(m.Scratch.Tmp, X.Data[rowOff:rowOff+embd], layer.AttnNorm, m.RMSEpsilon)
-			copy(X.Data[rowOff:rowOff+embd], m.Scratch.Tmp)
+			RMSNorm(X_norm.Data[rowOff:rowOff+embd], X.Data[rowOff:rowOff+embd], layer.AttnNorm, m.RMSEpsilon)
 		}
 
-		// QKV projections using GEMM: X @ W^T
+		// QKV projections using GEMM: X_norm @ W^T
 		cfg := SelectGemmConfigWithTiling(seqLen, embd, nHead*headDim, tiling)
-		GemmPar(cfg, &Q, &X, layer.Wq, 1.0, 0.0, 0)
-		GemmPar(cfg, &K, &X, layer.Wk, 1.0, 0.0, 0)
-		GemmPar(cfg, &V, &X, layer.Wv, 1.0, 0.0, 0)
+		GemmPar(cfg, &Q, &X_norm, layer.Wq, 1.0, 0.0, 0)
+		GemmPar(cfg, &K, &X_norm, layer.Wk, 1.0, 0.0, 0)
+		GemmPar(cfg, &V, &X_norm, layer.Wv, 1.0, 0.0, 0)
 
 		// Attention for each position
 		for i := range seqLen {
@@ -106,6 +108,19 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 			copy(outRow, attnResult)
 		}
 
+		// Post-Attention Norm (if any) - applied to branch output before residual?
+		// Note: modelspec maps `post_attention_layernorm` to `PostAttnNorm`.
+		// In Sandwich Norm, this might be applied to the residual branch?
+		// Standard Pre-Norm doesn't use this. Gemma 2 doesn't.
+		// If Gemma 3 uses this as "Sandwich", we apply it to `attnOut`.
+		if len(layer.PostAttnNorm) > 0 {
+			for i := range seqLen {
+				rowOff := i * attnOut.Stride
+				RMSNorm(m.Scratch.Tmp, attnOut.Data[rowOff:rowOff+embd], layer.PostAttnNorm, m.RMSEpsilon)
+				copy(attnOut.Data[rowOff:rowOff+embd], m.Scratch.Tmp)
+			}
+		}
+
 		// Residual: X = X + attnOut
 		for i := range seqLen {
 			xRow := X.Data[i*X.Stride : i*X.Stride+embd]
@@ -114,30 +129,43 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 		}
 
 		// FFN block
-		// RMSNorm each row
+		// RMSNorm each row: X -> X_norm
 		for i := range seqLen {
 			rowOff := i * X.Stride
-			RMSNorm(m.Scratch.Tmp, X.Data[rowOff:rowOff+embd], layer.FfnNorm, m.RMSEpsilon)
-			copy(X.Data[rowOff:rowOff+embd], m.Scratch.Tmp)
+			RMSNorm(X_norm.Data[rowOff:rowOff+embd], X.Data[rowOff:rowOff+embd], layer.FfnNorm, m.RMSEpsilon)
 		}
 
-		// FFN projections using GEMM
+		// FFN projections using GEMM: X_norm @ W^T
 		cfg = SelectGemmConfigWithTiling(seqLen, embd, m.Config.Config.FFNLength, tiling)
-		GemmPar(cfg, &ffnUp, &X, layer.FfnUp, 1.0, 0.0, 0)
-		GemmPar(cfg, &ffnGate, &X, layer.FfnGate, 1.0, 0.0, 0)
+		GemmPar(cfg, &ffnUp, &X_norm, layer.FfnUp, 1.0, 0.0, 0)
+		GemmPar(cfg, &ffnGate, &X_norm, layer.FfnGate, 1.0, 0.0, 0)
 
-		// SiLU activation: ffnAct = silu(ffnGate) * ffnUp
+		// Gated activation: ffnAct = activation(ffnGate) * ffnUp
+		useGelu := strings.Contains(m.Config.Config.HiddenAct, "gelu")
 		for i := range seqLen {
 			upRow := ffnUp.Data[i*ffnUp.Stride : i*ffnUp.Stride+m.Config.Config.FFNLength]
 			gateRow := ffnGate.Data[i*ffnGate.Stride : i*ffnGate.Stride+m.Config.Config.FFNLength]
 			actRow := ffnAct.Data[i*ffnAct.Stride : i*ffnAct.Stride+m.Config.Config.FFNLength]
-			FusedSiluAct(actRow, gateRow, upRow)
+			if useGelu {
+				FusedGeluAct(actRow, gateRow, upRow)
+			} else {
+				FusedSiluAct(actRow, gateRow, upRow)
+			}
 		}
 
 		// Down projection: ffnOut = ffnAct @ FfnDown
 		ffnOut := NewMat(seqLen, embd)
 		cfg = SelectGemmConfigWithTiling(seqLen, m.Config.Config.FFNLength, embd, tiling)
 		GemmPar(cfg, &ffnOut, &ffnAct, layer.FfnDown, 1.0, 0.0, 0)
+
+		// Post-FFN Norm (Sandwich Norm)
+		if len(layer.PostFfnNorm) > 0 {
+			for i := range seqLen {
+				rowOff := i * ffnOut.Stride
+				RMSNorm(m.Scratch.Tmp, ffnOut.Data[rowOff:rowOff+embd], layer.PostFfnNorm, m.RMSEpsilon)
+				copy(ffnOut.Data[rowOff:rowOff+embd], m.Scratch.Tmp)
+			}
+		}
 
 		// Residual: X = X + ffnOut
 		for i := range seqLen {

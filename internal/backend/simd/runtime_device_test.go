@@ -45,6 +45,10 @@ func (m *mockDeviceStateOps) DeviceArgMaxLastResult() (int, bool) {
 	return 0, false
 }
 
+func (m *mockDeviceStateOps) DeviceLogitSoftcap(data []float32, softcap float32) bool {
+	return false
+}
+
 func TestAddResidualDeviceSuccessSkipsHostDirty(t *testing.T) {
 	ds := &mockDeviceStateOps{addOK: true}
 	dst := []float32{1, 2, 3}

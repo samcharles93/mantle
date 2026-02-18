@@ -148,6 +148,27 @@ func fastSiluVec(x archsimd.Float32x8) archsimd.Float32x8 {
 	return x.Mul(fastSigmoidVec(x))
 }
 
+// fastTanhVec computes tanh for a Float32x8 vector.
+// tanh(x) = 2*sigmoid(2x) - 1
+func fastTanhVec(x archsimd.Float32x8) archsimd.Float32x8 {
+	two := archsimd.BroadcastFloat32x8(2.0)
+	one := archsimd.BroadcastFloat32x8(1.0)
+	return fastSigmoidVec(x.Mul(two)).Mul(two).Sub(one)
+}
+
+// fastGeluVec computes GELU using the tanh approximation for a Float32x8 vector.
+// 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+func fastGeluVec(x archsimd.Float32x8) archsimd.Float32x8 {
+	sqrt2OverPi := archsimd.BroadcastFloat32x8(0.7978845608028654)
+	coeff := archsimd.BroadcastFloat32x8(0.044715)
+	half := archsimd.BroadcastFloat32x8(0.5)
+	one := archsimd.BroadcastFloat32x8(1.0)
+
+	x3 := x.Mul(x).Mul(x)
+	inner := sqrt2OverPi.Mul(x.Add(coeff.Mul(x3)))
+	return half.Mul(x).Mul(one.Add(fastTanhVec(inner)))
+}
+
 func siluAndMulSIMD(dst, x []float32) {
 	d := len(x) / 2
 	i := 0

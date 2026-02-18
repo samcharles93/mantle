@@ -148,6 +148,11 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		start = max(pos-layer.AttnWindow+1, 0)
 	}
 
+	var softcap float32
+	if m.Config != nil {
+		softcap = m.Config.Config.AttnLogitSoftcap
+	}
+
 	flashAttentionEnabled := m.Config != nil && m.Config.Config.FlashAttention
 
 	// FlashAttention fast path (multi-head version) - only if enabled in config
@@ -157,16 +162,16 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		// leverage parts of it for improved performance
 
 		// First, check if we have a full sequence FlashAttention implementation available
-		if fp, ok := ops.(flashAttentionMultiHeadFastPath); ok && fp.FlashAttentionMultiHead(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.Config.Config.AttnLogitSoftcap) {
+		if fp, ok := ops.(flashAttentionMultiHeadFastPath); ok && fp.FlashAttentionMultiHead(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap) {
 			return m.Scratch.AttnProj
 		}
 
 		// FlashAttention fast path (single-head version)
-		if fp, ok := ops.(flashAttentionFastPath); ok && fp.FlashAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.Config.Config.AttnLogitSoftcap) {
+		if fp, ok := ops.(flashAttentionFastPath); ok && fp.FlashAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap) {
 			// If FlashAttention handles the computation, skip the traditional path
 			if layer.AttnGate != nil {
 				gate := m.Scratch.AttnGate[:nHead*headDim]
-				if dm, ok := ops.(deviceMatVecFastPath); !(ok && dm.DeviceMatVec(gate, layer.AttnGate, x)) {
+				if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
 					// x may still be device-backed from fast-path norm/projections.
 					// Ensure host visibility before CPU gate matvec fallback.
 					syncDeviceSlice(ops, x)
@@ -200,11 +205,11 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	// This is where we can add custom optimized implementations for the incremental attention
 
 	// Check for incremental attention fast path
-	if fp, ok := ops.(incrementalAttentionFastPath); ok && fp.IncrementalAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.Config.Config.AttnLogitSoftcap) {
+	if fp, ok := ops.(incrementalAttentionFastPath); ok && fp.IncrementalAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap) {
 		// If incremental attention handles the computation, skip the traditional path
 		if layer.AttnGate != nil {
 			gate := m.Scratch.AttnGate[:nHead*headDim]
-			if dm, ok := ops.(deviceMatVecFastPath); !(ok && dm.DeviceMatVec(gate, layer.AttnGate, x)) {
+			if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
 				// x may still be device-backed from fast-path norm/projections.
 				// Ensure host visibility before CPU gate matvec fallback.
 				syncDeviceSlice(ops, x)
@@ -235,13 +240,13 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 
 	// Combined attention inner + projection fast path (no gate)
 	if layer.AttnGate == nil {
-		if fp, ok := ops.(attentionInnerProjectionFastPath); ok && fp.AttentionInnerProjection(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.RMSEpsilon, m.Config.Config.AttnLogitSoftcap) {
+		if fp, ok := ops.(attentionInnerProjectionFastPath); ok && fp.AttentionInnerProjection(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.RMSEpsilon, softcap) {
 			return m.Scratch.AttnProj
 		}
 	}
 
 	usedInnerFastPath := false
-	if fp, ok := ops.(attentionInnerFastPath); ok && fp.AttentionInner(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.Config.Config.AttnLogitSoftcap) {
+	if fp, ok := ops.(attentionInnerFastPath); ok && fp.AttentionInner(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap) {
 		usedInnerFastPath = true
 	}
 
@@ -277,7 +282,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			NHead:     nHead,
 			KvHeads:   kvHeads,
 			Scale:     scale,
-			Softcap:   m.Config.Config.AttnLogitSoftcap,
+			Softcap:   softcap,
 			CacheLen:  layer.AttnCache.CacheLen,
 			Ops:       ops,
 		}
@@ -313,7 +318,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 
 	if layer.AttnGate != nil {
 		gate := m.Scratch.AttnGate[:nHead*headDim]
-		if dm, ok := ops.(deviceMatVecFastPath); !(ok && dm.DeviceMatVec(gate, layer.AttnGate, x)) {
+		if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
 			// x may still be device-backed from fast-path norm/projections.
 			// Ensure host visibility before CPU gate matvec fallback.
 			syncDeviceSlice(ops, x)

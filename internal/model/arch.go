@@ -44,6 +44,7 @@ type HFConfig struct {
 	VocabSize         int     `json:"vocab_size"`
 	RopeTheta         float64 `json:"rope_theta"`
 	RopeLocalBaseFreq float64 `json:"rope_local_base_freq"`
+	HiddenActivation  string  `json:"hidden_activation"`
 
 	AttnLogitSoftcapping  float64 `json:"attn_logit_softcapping"`
 	FinalLogitSoftcapping float64 `json:"final_logit_softcapping"`
