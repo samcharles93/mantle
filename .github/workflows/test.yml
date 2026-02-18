@@ -36,13 +36,18 @@ jobs:
         GOEXPERIMENT: simd
       run: go test -v ./...
 
+    - name: Install golangci-lint
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin
+
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v6
-      with:
-        version: latest
-        args: --timeout=5m
       env:
         GOEXPERIMENT: simd
+      run: |
+        GOROOT=$(go env GOROOT)
+        export GOROOT
+        export PATH="$(go env GOPATH)/bin:$GOROOT/bin:$PATH"
+        golangci-lint run --timeout=5m
 
   build:
     name: Build
@@ -63,4 +68,6 @@ jobs:
       run: go build -o bin/mantle ./cmd/mantle
 
     - name: Build logdiff tool
+      env:
+        GOEXPERIMENT: simd
       run: go build -o bin/logdiff ./cmd/logdiff
