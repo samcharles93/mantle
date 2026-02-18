@@ -204,36 +204,6 @@ func (sf *SafetensorsFile) TensorReader(name string) (*io.SectionReader, Safeten
 	return io.NewSectionReader(sf.f, ti.Start, ti.End-ti.Start), ti, nil
 }
 
-// CopyTensorTo streams the raw tensor bytes into dst.
-func (sf *SafetensorsFile) CopyTensorTo(dst io.Writer, name string) (int64, SafetensorsTensorInfo, error) {
-	r, ti, err := sf.TensorReader(name)
-	if err != nil {
-		return 0, SafetensorsTensorInfo{}, err
-	}
-	n, err := io.Copy(dst, r)
-	if err != nil {
-		return n, SafetensorsTensorInfo{}, fmt.Errorf("safetensors: copy tensor %q: %w", name, err)
-	}
-	return n, ti, nil
-}
-
-// CopyTensorToBuffer streams the raw tensor bytes into dst using the provided buffer.
-// If buf is nil, it behaves like CopyTensorTo.
-func (sf *SafetensorsFile) CopyTensorToBuffer(dst io.Writer, name string, buf []byte) (int64, SafetensorsTensorInfo, error) {
-	r, ti, err := sf.TensorReader(name)
-	if err != nil {
-		return 0, SafetensorsTensorInfo{}, err
-	}
-	if buf == nil {
-		return sf.CopyTensorTo(dst, name)
-	}
-	n, err := io.CopyBuffer(dst, r, buf)
-	if err != nil {
-		return n, SafetensorsTensorInfo{}, fmt.Errorf("safetensors: copy tensor %q: %w", name, err)
-	}
-	return n, ti, nil
-}
-
 // ReadTensor reads the raw tensor bytes into memory.
 func (sf *SafetensorsFile) ReadTensor(name string) ([]byte, SafetensorsTensorInfo, error) {
 	r, ti, err := sf.TensorReader(name)

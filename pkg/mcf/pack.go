@@ -203,7 +203,7 @@ func Pack(opts PackOptions) error {
 	recs := make([]TensorIndexRecord, 0, len(names))
 	total := len(names)
 
-	logf("pack: tensors=%d cast=%s quant_embed=%s dedup=%t align=%d", total, opts.Cast, opts.QuantEmbed, opts.Dedup, align)
+	// logf("pack: tensors=%d cast=%s quant_embed=%s dedup=%t align=%d", total, opts.Cast, opts.QuantEmbed, opts.Dedup, align)
 
 	var (
 		processed      int
@@ -274,12 +274,12 @@ func Pack(opts PackOptions) error {
 		if quantEmbed {
 			switch opts.QuantEmbed {
 			case "int8":
-				outDT, written, err = quantizeToInt8(dst, r, ref.Info.DType, nElem, copyBuf, outBuf)
+				outDT, written, err = quantizeToInt8(dst, r, ref.Info.DType, nElem)
 				if err != nil {
 					return fmt.Errorf("mcf: tensor %q: quantize int8: %w", name, err)
 				}
 			case "int4":
-				outDT, written, err = quantizeToInt4(dst, r, ref.Info.DType, nElem, copyBuf, outBuf)
+				outDT, written, err = quantizeToInt4(dst, r, ref.Info.DType, nElem)
 				if err != nil {
 					return fmt.Errorf("mcf: tensor %q: quantize int4: %w", name, err)
 				}
@@ -999,7 +999,7 @@ func isEmbeddingTensor(name string) bool {
 }
 
 // quantizeToInt8 quantizes F32/BF16/F16 data to Int8 symmetric quantization.
-func quantizeToInt8(dst io.Writer, src io.Reader, srcDType string, nElem uint64, copyBuf, workBuf []byte) (TensorDType, uint64, error) {
+func quantizeToInt8(dst io.Writer, src io.Reader, srcDType string, nElem uint64) (TensorDType, uint64, error) {
 	elemSize := int64(4)
 	switch srcDType {
 	case "BF16", "F16":
@@ -1016,16 +1016,17 @@ func quantizeToInt8(dst io.Writer, src io.Reader, srcDType string, nElem uint64,
 
 	// Convert to F32
 	f32Vals := make([]float32, nElem)
-	if srcDType == "F32" {
+	switch srcDType {
+	case "F32":
 		for i := range nElem {
 			f32Vals[i] = math.Float32frombits(binary.LittleEndian.Uint32(srcBytes[i*4:]))
 		}
-	} else if srcDType == "BF16" {
+	case "BF16":
 		for i := range nElem {
 			u16 := binary.LittleEndian.Uint16(srcBytes[i*2:])
 			f32Vals[i] = bf16ToF32(u16)
 		}
-	} else {
+	default:
 		// F16 - use simple conversion (same as bf16 for now, proper implementation would use float16 package)
 		for i := range nElem {
 			u16 := binary.LittleEndian.Uint16(srcBytes[i*2:])
@@ -1033,15 +1034,16 @@ func quantizeToInt8(dst io.Writer, src io.Reader, srcDType string, nElem uint64,
 			sign := float32((-1) ^ int(u16>>15))
 			exp := (u16 >> 10) & 0x1F
 			mant := u16 & 0x3FF
-			if exp == 0 {
+			switch exp {
+			case 0:
 				if mant == 0 {
 					f32Vals[i] = 0
 				} else {
 					f32Vals[i] = sign * math.SmallestNonzeroFloat32
 				}
-			} else if exp == 31 {
+			case 31:
 				f32Vals[i] = float32(math.Inf(int(sign)))
-			} else {
+			default:
 				f32Vals[i] = sign * float32(math.Ldexp(1.0+float64(mant)/1024.0, int(exp)-15))
 			}
 		}
@@ -1091,7 +1093,7 @@ func quantizeToInt8(dst io.Writer, src io.Reader, srcDType string, nElem uint64,
 }
 
 // quantizeToInt4 quantizes F32/BF16/F16 data to Int4 symmetric quantization.
-func quantizeToInt4(dst io.Writer, src io.Reader, srcDType string, nElem uint64, copyBuf, workBuf []byte) (TensorDType, uint64, error) {
+func quantizeToInt4(dst io.Writer, src io.Reader, srcDType string, nElem uint64) (TensorDType, uint64, error) {
 	elemSize := int64(4)
 	switch srcDType {
 	case "BF16", "F16":
@@ -1108,31 +1110,33 @@ func quantizeToInt4(dst io.Writer, src io.Reader, srcDType string, nElem uint64,
 
 	// Convert to F32
 	f32Vals := make([]float32, nElem)
-	if srcDType == "F32" {
+	switch srcDType {
+	case "F32":
 		for i := range nElem {
 			f32Vals[i] = math.Float32frombits(binary.LittleEndian.Uint32(srcBytes[i*4:]))
 		}
-	} else if srcDType == "BF16" {
+	case "BF16":
 		for i := range nElem {
 			u16 := binary.LittleEndian.Uint16(srcBytes[i*2:])
 			f32Vals[i] = bf16ToF32(u16)
 		}
-	} else {
+	default:
 		// F16 conversion
 		for i := range nElem {
 			u16 := binary.LittleEndian.Uint16(srcBytes[i*2:])
 			sign := float32((-1) ^ int(u16>>15))
 			exp := (u16 >> 10) & 0x1F
 			mant := u16 & 0x3FF
-			if exp == 0 {
+			switch exp {
+			case 0:
 				if mant == 0 {
 					f32Vals[i] = 0
 				} else {
 					f32Vals[i] = sign * math.SmallestNonzeroFloat32
 				}
-			} else if exp == 31 {
+			case 31:
 				f32Vals[i] = float32(math.Inf(int(sign)))
-			} else {
+			default:
 				f32Vals[i] = sign * float32(math.Ldexp(1.0+float64(mant)/1024.0, int(exp)-15))
 			}
 		}

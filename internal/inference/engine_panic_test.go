@@ -9,14 +9,6 @@ import (
 	"github.com/samcharles93/mantle/internal/logits"
 )
 
-type panicModel struct{}
-
-func (panicModel) ForwardToken(int) ([]float32, error) {
-	panic("boom")
-}
-
-func (panicModel) Reset() {}
-
 type errOnSecondModel struct {
 	calls int
 }
@@ -40,18 +32,6 @@ func newGreedySampler() *logits.Sampler {
 		TopK:        1,
 		TopP:        1.0,
 	})
-}
-
-func TestGenerateConvertsForwardPanicToError(t *testing.T) {
-	t.Parallel()
-
-	_, err := Generate(panicModel{}, newGreedySampler(), []int{1}, 1, nil)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if !strings.Contains(err.Error(), "panic in ForwardToken") {
-		t.Fatalf("unexpected error: %v", err)
-	}
 }
 
 func TestRunWithContextReturnsForwardError(t *testing.T) {

@@ -828,17 +828,6 @@ func dotInt8Int16SIMD(q []int8, x []int16, n int) int32 {
 	return sum
 }
 
-func quantizeVecBlocks(x []float32, blocks int) ([]int8, []int16, []float32) {
-	if blocks <= 0 {
-		return nil, nil, nil
-	}
-	qx := make([]int8, blocks*32)
-	qx16 := make([]int16, blocks*32)
-	scales := make([]float32, blocks)
-	quantizeVecBlocksInto(x, blocks, qx, qx16, scales)
-	return qx, qx16, scales
-}
-
 func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, scales []float32) {
 	if blocks <= 0 {
 		return

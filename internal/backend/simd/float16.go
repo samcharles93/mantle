@@ -16,14 +16,10 @@ func Float32ToFloat16(f float32) uint16 {
 	switch exp {
 	case 0:
 		// Subnormal or zero
-		// We treat subnormals as zero for speed/simplicity in this context if acceptable,
-		// or implement proper handling. Llama.cpp usually flushes subnormals.
-		// For zero:
 		if mant == 0 {
 			return sign << 15
 		}
-		// Denormal float32 to... zero? Let's just return 0 for now to keep it simple and safe.
-		// Proper conversion is complex. By standard:
+		// Denormal float32 to... zero?		
 		return sign << 15
 	case 0xFF:
 		// Inf or NaN
@@ -80,11 +76,5 @@ func Float16ToFloat32(h uint16) float32 {
 func Float32ToFloat16Slice(src []float32, dst []uint16) {
 	for i, v := range src {
 		dst[i] = Float32ToFloat16(v)
-	}
-}
-
-func Float16ToFloat32Slice(src []uint16, dst []float32) {
-	for i, v := range src {
-		dst[i] = Float16ToFloat32(v)
 	}
 }

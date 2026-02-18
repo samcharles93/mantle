@@ -67,63 +67,6 @@ func bf16ToF32Table(u uint16) float32 {
 	return bf16Table[u]
 }
 
-func bf16FromF32Bits(u uint32) uint16 {
-	// Round-to-nearest-even on the truncated 16 bits.
-	rnd := uint32(0x7FFF + ((u >> 16) & 1))
-	return uint16((u + rnd) >> 16)
-}
-
-// float32ToFP16Bits implements IEEE 754 binary16 rounding (nearest-even).
-func float32ToFP16Bits(f float32) uint16 {
-	u := math.Float32bits(f)
-	sign := (u >> 31) & 0x1
-	exp := int((u >> 23) & 0xFF)
-	frac := u & 0x7FFFFF
-
-	if exp == 0xFF {
-		// Inf/NaN
-		if frac != 0 {
-			return uint16((sign << 15) | 0x7C00 | (frac >> 13) | 1)
-		}
-		return uint16((sign << 15) | 0x7C00)
-	}
-
-	// unbiased exponent
-	e := exp - 127
-	if e > 15 {
-		// overflow -> inf
-		return uint16((sign << 15) | 0x7C00)
-	}
-	if e < -14 {
-		// subnormal or zero
-		if e < -24 {
-			return uint16(sign << 15)
-		}
-		// add implicit leading 1 then shift into subnormal range
-		frac |= 0x800000
-		shift := uint32(-14 - e)
-		// round-to-nearest-even
-		rnd := uint32(1<<(shift-1)) - 1 + ((frac >> shift) & 1)
-		frac = (frac + rnd) >> shift
-		return uint16((sign << 15) | (frac >> 13))
-	}
-
-	// normal
-	exp16 := uint32(e + 15)
-	// round-to-nearest-even on frac>>13
-	rnd := uint32(0xFFF + ((frac >> 13) & 1))
-	frac = frac + rnd
-	if (frac & 0x800000) != 0 {
-		// carry into exponent
-		exp16++
-		frac = 0
-		if exp16 >= 0x1F {
-			return uint16((sign << 15) | 0x7C00)
-		}
-	}
-	return uint16((sign << 15) | (exp16 << 10) | (frac >> 13))
-}
-
 func fp16ToF32(h uint16) float32 {
 	sign := uint32(h>>15) & 0x1
 	exp := uint32(h>>10) & 0x1F
@@ -153,24 +96,4 @@ func fp16ToF32(h uint16) float32 {
 
 func fp16ToF32Table(u uint16) float32 {
 	return fp16Table[u]
-}
-
-func encodeBF16Raw(data []float32) []byte {
-	raw := make([]byte, len(data)*2)
-	for i, v := range data {
-		u := bf16FromF32Bits(math.Float32bits(v))
-		raw[i*2] = byte(u)
-		raw[i*2+1] = byte(u >> 8)
-	}
-	return raw
-}
-
-func encodeFP16Raw(data []float32) []byte {
-	raw := make([]byte, len(data)*2)
-	for i, v := range data {
-		u := float32ToFP16Bits(v)
-		raw[i*2] = byte(u)
-		raw[i*2+1] = byte(u >> 8)
-	}
-	return raw
 }

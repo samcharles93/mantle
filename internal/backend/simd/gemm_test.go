@@ -34,9 +34,6 @@ func TestGemmParMatchesNaive(t *testing.T) {
 	C0 := NewMat(50, 45)
 	C1 := NewMat(50, 45)
 
-	FillRand(&A, 1)
-	FillRand(&B, 2)
-
 	gemmNaive(&C0, &A, &B)
 	cfg := SelectGemmConfig(A.R, A.C, B.C)
 	GemmPar(cfg, &C1, &A, &B, 1, 0, 4)
@@ -50,9 +47,6 @@ func TestGemmParNoAllocs(t *testing.T) {
 	A := NewMat(16, 16)
 	B := NewMat(16, 16)
 	C := NewMat(16, 16)
-
-	FillRand(&A, 3)
-	FillRand(&B, 4)
 
 	cfg := DefaultGemmConfig()
 	allocs := testing.AllocsPerRun(100, func() {

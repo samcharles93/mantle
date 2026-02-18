@@ -1,8 +1,6 @@
 package simd
 
 import (
-	"math/rand"
-
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
@@ -150,20 +148,6 @@ func (m *Mat) RowTo(dst []float32, i int) {
 		}
 	default:
 		panic("unsupported dtype for row decode")
-	}
-}
-
-// FillRand fills the matrix with reproducible pseudo‑random values.  A small
-// range around zero is used to avoid overflow in accumulations.  The seed
-// controls the random sequence; multiple calls with the same seed produce
-// identical matrices.
-func FillRand(m *Mat, seed int64) {
-	rng := rand.New(rand.NewSource(seed))
-	if m.Raw != nil && m.DType != mcf.DTypeF32 {
-		panic("FillRand only supports f32 mats")
-	}
-	for i := range m.Data {
-		m.Data[i] = (rng.Float32() - 0.5) * 0.02 // roughly in (-0.01,0.01)
 	}
 }
 

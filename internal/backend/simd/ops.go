@@ -105,40 +105,6 @@ func Softmax(x []float32) {
 	}
 }
 
-// OnlineSoftmax applies online softmax to x using provided m and l statistics.
-// This is used for FlashAttention where m is the maximum value and l is the sum of exponentials.
-func OnlineSoftmax(x []float32, m, l float32) {
-	if len(x) == 0 {
-		return
-	}
-
-	// Find max in x
-	maxv := x[0]
-	for i := 1; i < len(x); i++ {
-		if x[i] > maxv {
-			maxv = x[i]
-		}
-	}
-
-	// Compute exp and update sum
-	rowSum := float32(0.0)
-	expVals := make([]float32, len(x))
-	for i := range x {
-		expVals[i] = fastExp(x[i] - maxv)
-		rowSum += expVals[i]
-	}
-
-	// Update statistics with online softmax formula
-	alpha := fastExp(m - maxv)
-	newL := alpha*l + rowSum
-
-	// Normalize
-	invNewL := float32(1.0) / newL
-	for i := range x {
-		x[i] = expVals[i] * invNewL
-	}
-}
-
 // fastExp computes an approximation of exp(x) using polynomial approximation.
 // Accurate for x in [-10, 10] with relative error < 0.1%.
 // For neural network inference, this is sufficient.
@@ -245,33 +211,6 @@ func RMSNormGated(dst, src, gate, weight []float32, eps float32, normBeforeGate 
 	RMSNorm(dst, dst, weight, eps)
 }
 
-// SiluAndMul computes dst[i] = Silu(x[i]) * x[d+i] where d = len(x)/2.
-// dst must have length d and x must have even length.
-func SiluAndMul(dst, x []float32) {
-	if len(x)%2 != 0 {
-		panic("SiluAndMul requires even-length input")
-	}
-	d := len(x) / 2
-	if len(dst) < d {
-		panic("SiluAndMul dst too small")
-	}
-	if cpu.HasAVX512 && d >= 16 {
-		siluAndMulAVX512(dst, x)
-		return
-	} else if cpu.HasAVX2 && d >= 8 {
-		siluAndMulSIMD(dst, x)
-		return
-	}
-	siluAndMulScalar(dst, x)
-}
-
-func siluAndMulScalar(dst, x []float32) {
-	d := len(x) / 2
-	for i := range d {
-		dst[i] = Silu(x[i]) * x[d+i]
-	}
-}
-
 // DotQ8 computes the dot product of float32 vector a and quantized int8 vector b,
 // scaled by the per-position scale factor.
 func DotQ8(a []float32, b []int8, scale float32) float32 {
@@ -300,40 +239,6 @@ func ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentio
 		return
 	}
 	applyRoPEScalar(x, nHead, headDim, pos, invFreq, attentionFactor, half)
-}
-
-// ApplyRoPEWithTables applies Rotary Positional Embeddings using precomputed cosine and sine tables.
-func ApplyRoPEWithTables(x []float32, nHead, headDim, pos int, cosTable, sinTable []float32) {
-	if headDim%2 != 0 {
-		panic("headDim must be even for RoPE")
-	}
-	half := headDim / 2
-	if cpu.HasAVX512 && half >= 16 {
-		applyRoPEWithTablesAVX512(x, nHead, headDim, pos, cosTable, sinTable, half)
-		return
-	} else if cpu.HasAVX2 && half >= 8 {
-		applyRoPESIMDWithTables(x, nHead, headDim, pos, cosTable, sinTable, half)
-		return
-	}
-	applyRoPEScalarWithTables(x, nHead, headDim, pos, cosTable, sinTable, half)
-}
-
-// applyRoPEScalarWithTables applies Rotary Positional Embeddings using precomputed cosine and sine values.
-func applyRoPEScalarWithTables(x []float32, nHead, headDim, pos int, cosTable, sinTable []float32, half int) {
-	for h := range nHead {
-		base := h * headDim
-		tableOffset := pos * half
-		for i := range half {
-			cosVal := cosTable[tableOffset+i]
-			sinVal := sinTable[tableOffset+i]
-			i0 := base + i
-			i1 := base + i + half
-			x0 := x[i0]
-			x1 := x[i1]
-			x[i0] = x0*cosVal - x1*sinVal
-			x[i1] = x0*sinVal + x1*cosVal
-		}
-	}
 }
 
 func applyRoPEScalar(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32, half int) {

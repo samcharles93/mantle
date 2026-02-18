@@ -7,8 +7,6 @@ import (
 	"github.com/samcharles93/mantle/internal/backend/simd"
 )
 
-const cudaEnabled = true
-
 func newCPU() (Backend, error) {
 	return simd.New(), nil
 }

@@ -183,110 +183,6 @@ func BenchmarkRMSNormAVX512(b *testing.B) {
 	}
 }
 
-// Benchmark RoPE operations
-func BenchmarkApplyRoPEScalar(b *testing.B) {
-	nHead := 8
-	headDim := 64
-	size := nHead * headDim
-	x := make([]float32, size)
-	invFreq := make([]float64, headDim/2)
-	attentionFactor := float32(1.0)
-	pos := 10
-
-	for i := range x {
-		x[i] = float32(i%20) * 0.1
-	}
-	for i := range invFreq {
-		invFreq[i] = float64(i+1) * 0.01
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		applyRoPEScalar(x, nHead, headDim, pos, invFreq, attentionFactor, headDim/2)
-	}
-}
-
-func BenchmarkApplyRoPEAVX2(b *testing.B) {
-	if !cpu.HasAVX2 {
-		b.Skip("AVX2 not available")
-	}
-
-	nHead := 8
-	headDim := 64
-	size := nHead * headDim
-	x := make([]float32, size)
-	invFreq := make([]float64, headDim/2)
-	attentionFactor := float32(1.0)
-	pos := 10
-
-	for i := range x {
-		x[i] = float32(i%20) * 0.1
-	}
-	for i := range invFreq {
-		invFreq[i] = float64(i+1) * 0.01
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		applyRoPESIMD(x, nHead, headDim, pos, invFreq, attentionFactor, headDim/2)
-	}
-}
-
-func BenchmarkApplyRoPEAVX512(b *testing.B) {
-	if !archsimd.X86.AVX512() {
-		b.Skip("AVX-512 not available")
-	}
-
-	nHead := 8
-	headDim := 64
-	size := nHead * headDim
-	x := make([]float32, size)
-	invFreq := make([]float64, headDim/2)
-	attentionFactor := float32(1.0)
-	pos := 10
-
-	for i := range x {
-		x[i] = float32(i%20) * 0.1
-	}
-	for i := range invFreq {
-		invFreq[i] = float64(i+1) * 0.01
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		applyRoPEAVX512(x, nHead, headDim, pos, invFreq, attentionFactor, headDim/2)
-	}
-}
-
-// Benchmark RoPE with precomputed tables
-func BenchmarkApplyRoPEWithTablesScalar(b *testing.B) {
-	nHead := 8
-	headDim := 64
-	size := nHead * headDim
-	x := make([]float32, size)
-	cosTable := make([]float32, 100*headDim/2) // Precomputed for 100 positions
-	sinTable := make([]float32, 100*headDim/2)
-	pos := 10
-
-	for i := range x {
-		x[i] = float32(i%20) * 0.1
-	}
-
-	// Precompute tables
-	for p := range 100 {
-		for i := 0; i < headDim/2; i++ {
-			angle := float64(p) * float64(i+1) * 0.01
-			cosTable[p*(headDim/2)+i] = float32(math.Cos(angle))
-			sinTable[p*(headDim/2)+i] = float32(math.Sin(angle))
-		}
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		applyRoPEScalarWithTables(x, nHead, headDim, pos, cosTable, sinTable, headDim/2)
-	}
-}
-
 func BenchmarkApplyRoPEWithTablesAVX2(b *testing.B) {
 	if !cpu.HasAVX2 {
 		b.Skip("AVX2 not available")
@@ -319,54 +215,6 @@ func BenchmarkApplyRoPEWithTablesAVX2(b *testing.B) {
 	}
 }
 
-func BenchmarkApplyRoPEWithTablesAVX512(b *testing.B) {
-	if !archsimd.X86.AVX512() {
-		b.Skip("AVX-512 not available")
-	}
-
-	nHead := 8
-	headDim := 64
-	size := nHead * headDim
-	x := make([]float32, size)
-	cosTable := make([]float32, 100*headDim/2) // Precomputed for 100 positions
-	sinTable := make([]float32, 100*headDim/2)
-	pos := 10
-
-	for i := range x {
-		x[i] = float32(i%20) * 0.1
-	}
-
-	// Precompute tables
-	for p := range 100 {
-		for i := 0; i < headDim/2; i++ {
-			angle := float64(p) * float64(i+1) * 0.01
-			cosTable[p*(headDim/2)+i] = float32(math.Cos(angle))
-			sinTable[p*(headDim/2)+i] = float32(math.Sin(angle))
-		}
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		applyRoPEWithTablesAVX512(x, nHead, headDim, pos, cosTable, sinTable, headDim/2)
-	}
-}
-
-// Benchmark SiluAndMul operations
-func BenchmarkSiluAndMulScalar(b *testing.B) {
-	size := 512
-	dst := make([]float32, size)
-	x := make([]float32, size*2)
-
-	for i := range x {
-		x[i] = float32(i%20) * 0.1
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		siluAndMulScalar(dst, x)
-	}
-}
-
 func BenchmarkSiluAndMulAVX2(b *testing.B) {
 	if !cpu.HasAVX2 {
 		b.Skip("AVX2 not available")
@@ -383,24 +231,5 @@ func BenchmarkSiluAndMulAVX2(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		siluAndMulSIMD(dst, x)
-	}
-}
-
-func BenchmarkSiluAndMulAVX512(b *testing.B) {
-	if !archsimd.X86.AVX512() {
-		b.Skip("AVX-512 not available")
-	}
-
-	size := 512
-	dst := make([]float32, size)
-	x := make([]float32, size*2)
-
-	for i := range x {
-		x[i] = float32(i%20) * 0.1
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		siluAndMulAVX512(dst, x)
 	}
 }

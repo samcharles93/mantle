@@ -114,11 +114,3 @@ func storeQ8(src []float32, dst []int8, scales []float32, pos int) {
 		dst[i] = int8(q)
 	}
 }
-
-// EnsureOps returns the provided ops or the default implementation.
-func EnsureOps(current Ops) Ops {
-	if current == nil {
-		return DefaultOps{}
-	}
-	return current
-}
