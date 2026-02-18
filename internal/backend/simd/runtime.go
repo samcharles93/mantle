@@ -158,6 +158,12 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 	outCfg := SelectGemmConfigWithTiling(seqLen, embd, m.Config.Config.VocabSize, tiling)
 	GemmPar(outCfg, &logits, &X, m.Output, 1.0, 0.0, 0)
 
+	if softcap := m.Config.Config.FinalLogitSoftcap; softcap > 0 {
+		for i := range logits.Data {
+			logits.Data[i] = fastTanh(logits.Data[i]/softcap) * softcap
+		}
+	}
+
 	// Collect logits
 	outputs := make([][]float32, seqLen)
 	for i := range seqLen {
@@ -353,6 +359,15 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 		s := float32(scale)
 		for i := range m.Scratch.Logits {
 			m.Scratch.Logits[i] *= s
+		}
+	}
+	if softcap := m.Config.Config.FinalLogitSoftcap; softcap > 0 {
+		if ds != nil && ds.DeviceLogitSoftcap(m.Scratch.Logits, softcap) {
+			// Done on device
+		} else {
+			for i := range m.Scratch.Logits {
+				m.Scratch.Logits[i] = fastTanh(m.Scratch.Logits[i]/softcap) * softcap
+			}
 		}
 	}
 

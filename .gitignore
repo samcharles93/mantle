@@ -20,3 +20,5 @@ profiles/*
 *.pprof
 *.test
 .vscode/
+
+gha-creds-*.json

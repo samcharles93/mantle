@@ -20,6 +20,7 @@ type AttnContext struct {
 	KvStride, HeadDim int
 	NHead, KvHeads    int
 	Scale             float32
+	Softcap           float32
 	CacheLen          int
 }
 
@@ -105,6 +106,9 @@ func RunAttnHeads(ctx *AttnContext, scoresBuf []float32, rs, re int) {
 			} else {
 				kv := ctx.CacheK[koff : koff+ctx.HeadDim]
 				scores[t-ctx.Start] = Dot(qh, kv) * ctx.Scale
+			}
+			if ctx.Softcap > 0 {
+				scores[t-ctx.Start] = fastTanh(scores[t-ctx.Start]/ctx.Softcap) * ctx.Softcap
 			}
 		}
 		if ctx.Ops != nil {
