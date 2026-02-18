@@ -35,7 +35,7 @@ type HFConfig struct {
 	MuPEnabled           bool                       `json:"mup_enabled"`
 
 	HiddenSize        int     `json:"hidden_size"`
-	IntermediateSize  int     `json:"intermediate_size"`
+	IntermediateSize  FlexInt `json:"intermediate_size"`
 	FeedForwardLength []int   `json:"feed_forward_length"`
 	NumHiddenLayers   int     `json:"num_hidden_layers"`
 	HeadDim           int     `json:"head_dim"`
@@ -85,6 +85,33 @@ type HFConfig struct {
 type SlidingWindowPatternConfig struct {
 	EveryN  int
 	Pattern []bool
+}
+
+// FlexInt unmarshals from either a JSON number or a JSON array of numbers.
+// When given an array, it stores the maximum value.
+type FlexInt int
+
+func (f *FlexInt) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	var n int
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = FlexInt(n)
+		return nil
+	}
+	var arr []int
+	if err := json.Unmarshal(data, &arr); err == nil {
+		maxVal := 0
+		for _, v := range arr {
+			if v > maxVal {
+				maxVal = v
+			}
+		}
+		*f = FlexInt(maxVal)
+		return nil
+	}
+	return fmt.Errorf("intermediate_size must be int or int array, got %s", string(data))
 }
 
 func (c *SlidingWindowPatternConfig) UnmarshalJSON(data []byte) error {

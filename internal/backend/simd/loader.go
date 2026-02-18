@@ -154,7 +154,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		return nil, fmt.Errorf("head kv array length mismatch: %d != %d", len(headKVArr), blockCount)
 	}
 
-	ffnLength := cfg.IntermediateSize
+	ffnLength := int(cfg.IntermediateSize)
 	if len(cfg.FeedForwardLength) > 0 {
 		for _, n := range cfg.FeedForwardLength {
 			if n > ffnLength {
