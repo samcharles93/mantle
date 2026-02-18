@@ -47,6 +47,9 @@ type DeviceStateOps interface {
 	// DeviceArgMaxLastResult returns argmax index from the last device-resident
 	// no-copy result. ok=false when unavailable.
 	DeviceArgMaxLastResult() (idx int, ok bool)
+
+	// DeviceLogitSoftcap applies logit softcapping on device.
+	DeviceLogitSoftcap(data []float32, softcap float32) bool
 }
 
 // deviceSliceSyncer is an optional extension used by host fallback paths to

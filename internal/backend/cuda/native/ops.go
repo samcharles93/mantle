@@ -9,7 +9,7 @@ typedef int cudaError_t;
 
 extern const char* cudaGetErrorString(cudaError_t err);
 
-extern int mantleCudaSoftmaxRowsF32(float* data, int rows, int cols, cudaStream_t stream);
+
 extern int mantleCudaSiluMulF32(
 	const float* gate,
 	const float* up,
@@ -26,6 +26,11 @@ extern int mantleCudaConvertF32ToF16(
 	unsigned short* out,
 	int n,
 	cudaStream_t stream);
+extern int mantleCudaConvertF32ToBF16(
+	const float* in,
+	unsigned short* out,
+	int n,
+	cudaStream_t stream);
 extern int mantleCudaShortConvDepthwise(
 	const float* proj,
 	const float* conv_w,
@@ -35,9 +40,7 @@ extern int mantleCudaShortConvDepthwise(
 	int klen,
 	cudaStream_t stream);
 
-static int mantleCudaSoftmaxRowsF32Wrapper(float* data, int rows, int cols, cudaStream_t stream) {
-	return mantleCudaSoftmaxRowsF32(data, rows, cols, stream);
-}
+
 
 static int mantleCudaSiluMulF32Wrapper(
 	const float* gate,
@@ -62,6 +65,14 @@ static int mantleCudaConvertF32ToF16Wrapper(
 	int n,
 	cudaStream_t stream) {
 	return mantleCudaConvertF32ToF16(in, out, n, stream);
+}
+
+static int mantleCudaConvertF32ToBF16Wrapper(
+	const float* in,
+	unsigned short* out,
+	int n,
+	cudaStream_t stream) {
+	return mantleCudaConvertF32ToBF16(in, out, n, stream);
 }
 
 static int mantleCudaShortConvDepthwiseWrapper(
@@ -89,24 +100,6 @@ func checkedPositiveCInt(name string, v int) (C.int, error) {
 		return 0, fmt.Errorf("%s exceeds int32 max: %d", name, v)
 	}
 	return C.int(v), nil
-}
-
-func SoftmaxRowsF32(buf DeviceBuffer, rows, cols int, stream Stream) error {
-	if buf.ptr == nil {
-		return fmt.Errorf("native.SoftmaxRowsF32: buffer is nil")
-	}
-	rowsC, err := checkedPositiveCInt("rows", rows)
-	if err != nil {
-		return fmt.Errorf("native.SoftmaxRowsF32: %w", err)
-	}
-	colsC, err := checkedPositiveCInt("cols", cols)
-	if err != nil {
-		return fmt.Errorf("native.SoftmaxRowsF32: %w", err)
-	}
-	if err := cudaErr(C.mantleCudaSoftmaxRowsF32Wrapper((*C.float)(buf.ptr), rowsC, colsC, stream.ptr)); err != nil {
-		return fmt.Errorf("native.SoftmaxRowsF32(rows=%d, cols=%d): %w", rows, cols, err)
-	}
-	return nil
 }
 
 func SiluMulF32(gate, up, out DeviceBuffer, n int, stream Stream) error {
@@ -189,6 +182,25 @@ func ConvertF32ToF16(in, out DeviceBuffer, n int, stream Stream) error {
 		stream.ptr,
 	)); err != nil {
 		return fmt.Errorf("native.ConvertF32ToF16(n=%d): %w", n, err)
+	}
+	return nil
+}
+
+func ConvertF32ToBF16(in, out DeviceBuffer, n int, stream Stream) error {
+	if in.ptr == nil || out.ptr == nil {
+		return fmt.Errorf("native.ConvertF32ToBF16: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.ConvertF32ToBF16: %w", err)
+	}
+	if err := cudaErr(C.mantleCudaConvertF32ToBF16Wrapper(
+		(*C.float)(in.ptr),
+		(*C.ushort)(out.ptr),
+		nC,
+		stream.ptr,
+	)); err != nil {
+		return fmt.Errorf("native.ConvertF32ToBF16(n=%d): %w", n, err)
 	}
 	return nil
 }
