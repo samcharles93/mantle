@@ -1,3 +1,5 @@
+# TODO
+
 - [X] Structured logging
   - [X] use log/slog for structured logs
   - [X] create a common log interface
@@ -6,15 +8,9 @@
   - [X] add log levels
   - [testing] add package, file, timestamps to log outputs
 
-- [ ] CPU Kernels
-
-- [ ] CUDA Kernels
-
-- [ ] Optimisations
-
-- [ ] Test coverage
-  - [ ] Runtime tests
-  - [ ] Kernel tests
+- [X] Test coverage
+  - [X] Runtime tests
+  - [X] Kernel tests
 
 - [ ] Utilities
   - [ ] ensure tools are still useful, deprecate others

@@ -40,19 +40,7 @@ type ChatMessage struct {
 	Role       string         `json:"role"`
 	Content    any            `json:"content"`
 	Name       string         `json:"name,omitempty"`
-	ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
-}
-
-type ChatToolCall struct {
-	ID       string           `json:"id"`
-	Type     string           `json:"type"`
-	Function ChatFunctionCall `json:"function"`
-}
-
-type ChatFunctionCall struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
 }
 
 type ChatTool struct {
@@ -340,30 +328,6 @@ func chatMessagesToTokenizerMessages(msgs []ChatMessage) ([]tokenizer.Message, e
 				return nil, fmt.Errorf("message content: unsupported type")
 			}
 			msg.Content = string(b)
-		}
-
-		// Convert tool calls
-		if len(m.ToolCalls) > 0 {
-			tcs := make([]tokenizer.ToolCall, 0, len(m.ToolCalls))
-			for _, tc := range m.ToolCalls {
-				// Parse arguments string to any for the tokenizer
-				var args any = tc.Function.Arguments
-				if tc.Function.Arguments != "" {
-					var parsed map[string]any
-					if json.Unmarshal([]byte(tc.Function.Arguments), &parsed) == nil {
-						args = parsed
-					}
-				}
-				tcs = append(tcs, tokenizer.ToolCall{
-					ID:   tc.ID,
-					Type: tc.Type,
-					Function: tokenizer.ToolCallFunction{
-						Name:      tc.Function.Name,
-						Arguments: args,
-					},
-				})
-			}
-			msg.ToolCalls = tcs
 		}
 
 		out = append(out, msg)

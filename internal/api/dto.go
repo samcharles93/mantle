@@ -11,13 +11,6 @@ type DeleteResponseResp struct {
 	Deleted bool   `json:"deleted"`
 }
 
-type GetResponseParams struct {
-	Include            []string `json:"include,omitempty"`
-	IncludeObfuscation bool     `json:"include_obfuscation,omitempty"`
-	StartingAfter      string   `json:"starting_after,omitempty"`
-	Stream             bool     `json:"stream,omitempty"`
-}
-
 type CompactResponseReq struct {
 	Model string      `json:"model"`
 	Input *InputValue `json:"input,omitempty"`
