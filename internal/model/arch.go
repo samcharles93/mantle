@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -43,6 +44,9 @@ type HFConfig struct {
 	VocabSize         int     `json:"vocab_size"`
 	RopeTheta         float64 `json:"rope_theta"`
 	RopeLocalBaseFreq float64 `json:"rope_local_base_freq"`
+
+	AttnLogitSoftcapping  float64 `json:"attn_logit_softcapping"`
+	FinalLogitSoftcapping float64 `json:"final_logit_softcapping"`
 
 	EmbeddingMultiplier    float64   `json:"embedding_multiplier"`
 	LMHeadMultiplier       float64   `json:"lm_head_multiplier"`
@@ -308,6 +312,13 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 		dst.RopeLocalBaseFreq = textCfg.RopeLocalBaseFreq
 	}
 
+	if dst.AttnLogitSoftcapping == 0 && textCfg.AttnLogitSoftcapping > 0 {
+		dst.AttnLogitSoftcapping = textCfg.AttnLogitSoftcapping
+	}
+	if dst.FinalLogitSoftcapping == 0 && textCfg.FinalLogitSoftcapping > 0 {
+		dst.FinalLogitSoftcapping = textCfg.FinalLogitSoftcapping
+	}
+
 	if dst.MoEIntermediateSize == 0 && textCfg.MoEIntermediateSize > 0 {
 		dst.MoEIntermediateSize = textCfg.MoEIntermediateSize
 	}
@@ -405,8 +416,14 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 	case hasArch("afmoe"):
 		return afmoeSpec(), nil
 	case hasArch("gemma3"):
+		if cfg.EmbeddingMultiplier == 0 && cfg.HiddenSize > 0 {
+			cfg.EmbeddingMultiplier = math.Sqrt(float64(cfg.HiddenSize))
+		}
 		return gemma3Spec(), nil
 	case hasArch("gemma"):
+		if cfg.EmbeddingMultiplier == 0 && cfg.HiddenSize > 0 {
+			cfg.EmbeddingMultiplier = math.Sqrt(float64(cfg.HiddenSize))
+		}
 		return gemmaSpec(), nil
 	case hasArch("granite"):
 		return graniteSpec(), nil

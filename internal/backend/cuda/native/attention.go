@@ -20,6 +20,7 @@ extern int mantleCudaAttentionInnerF16CacheF32(
 	int kvHeads,
 	int cacheLen,
 	float scale,
+	float softcap,
 	cudaStream_t stream);
 extern int mantleCudaAttentionInnerMixedCacheF32(
 	const float* q,
@@ -40,6 +41,7 @@ extern int mantleCudaAttentionInnerMixedCacheF32(
 	int kvHeads,
 	int cacheLen,
 	float scale,
+	float softcap,
 	cudaStream_t stream);
 
 static int mantleCudaAttentionInnerF16CacheF32Wrapper(
@@ -55,8 +57,9 @@ static int mantleCudaAttentionInnerF16CacheF32Wrapper(
 	int kvHeads,
 	int cacheLen,
 	float scale,
+	float softcap,
 	cudaStream_t stream) {
-	return mantleCudaAttentionInnerF16CacheF32(q, cacheK, cacheV, out, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen, scale, stream);
+	return mantleCudaAttentionInnerF16CacheF32(q, cacheK, cacheV, out, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen, scale, softcap, stream);
 }
 
 static int mantleCudaAttentionInnerMixedCacheF32Wrapper(
@@ -78,6 +81,7 @@ static int mantleCudaAttentionInnerMixedCacheF32Wrapper(
 	int kvHeads,
 	int cacheLen,
 	float scale,
+	float softcap,
 	cudaStream_t stream) {
 	return mantleCudaAttentionInnerMixedCacheF32(
 		q,
@@ -98,6 +102,7 @@ static int mantleCudaAttentionInnerMixedCacheF32Wrapper(
 		kvHeads,
 		cacheLen,
 		scale,
+		softcap,
 		stream);
 }
 */
@@ -107,7 +112,7 @@ import (
 	"fmt"
 )
 
-func AttentionInnerF16CacheF32(q, cacheK, cacheV, out DeviceBuffer, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen int, scale float32, stream Stream) error {
+func AttentionInnerF16CacheF32(q, cacheK, cacheV, out DeviceBuffer, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen int, scale, softcap float32, stream Stream) error {
 	if q.ptr == nil || cacheK.ptr == nil || cacheV.ptr == nil || out.ptr == nil {
 		return fmt.Errorf("attention inner buffer is nil")
 	}
@@ -130,6 +135,7 @@ func AttentionInnerF16CacheF32(q, cacheK, cacheV, out DeviceBuffer, pos, start, 
 		C.int(kvHeads),
 		C.int(cacheLen),
 		C.float(scale),
+		C.float(softcap),
 		stream.ptr,
 	))
 }
@@ -146,7 +152,7 @@ func AttentionInnerMixedCacheF32(
 	useQ8K bool,
 	useQ8V bool,
 	pos, start, kvStride, headDim, nHead, kvHeads, cacheLen int,
-	scale float32,
+	scale, softcap float32,
 	stream Stream,
 ) error {
 	if q.ptr == nil || out.ptr == nil {
@@ -199,6 +205,7 @@ func AttentionInnerMixedCacheF32(
 		C.int(kvHeads),
 		C.int(cacheLen),
 		C.float(scale),
+		C.float(softcap),
 		stream.ptr,
 	))
 }

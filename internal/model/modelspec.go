@@ -533,19 +533,14 @@ func gemma3Spec() *ArchSpec {
 					fmt.Sprintf("model.layers.%d.input_layernorm.weight", layer),
 				}
 			},
-			PostAttnNormCandidates: func(layer int) []string {
-				return []string{
-					fmt.Sprintf("model.layers.%d.post_attention_layernorm.weight", layer),
-				}
-			},
 			FfnNormCandidates: func(layer int) []string {
+				// gemma 3 uses `pre_feedforward_layernorm` but some conversions might use `post_attention_layernorm`
+				// so we check both (preferring pre_feedforward_layernorm first via FfnNorm above).
 				return []string{
 					fmt.Sprintf("model.layers.%d.pre_feedforward_layernorm.weight", layer),
-				}
-			},
-			PostFfnNormCandidates: func(layer int) []string {
-				return []string{
-					fmt.Sprintf("model.layers.%d.post_feedforward_layernorm.weight", layer),
+					// Note: post_attention_layernorm is traditionally the name for Pre-FFN norm in Llama/Mistral,
+					// so we include it as a fallback candidate for FfnNorm, NOT as a PostAttnNorm sandwich layer.
+					fmt.Sprintf("model.layers.%d.post_attention_layernorm.weight", layer),
 				}
 			},
 			QNormCandidates: func(layer int) []string {

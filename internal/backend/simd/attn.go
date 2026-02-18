@@ -11,19 +11,19 @@ type attentionQKVFastPath interface {
 }
 
 type attentionInnerFastPath interface {
-	AttentionInner(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool
+	AttentionInner(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool
 }
 
 type attentionInnerProjectionFastPath interface {
-	AttentionInnerProjection(projOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon float32) bool
+	AttentionInnerProjection(projOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32) bool
 }
 
 type flashAttentionFastPath interface {
-	FlashAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool
+	FlashAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool
 }
 
 type flashAttentionMultiHeadFastPath interface {
-	FlashAttentionMultiHead(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool
+	FlashAttentionMultiHead(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool
 }
 
 type deviceMatVecFastPath interface {
@@ -31,7 +31,7 @@ type deviceMatVecFastPath interface {
 }
 
 type incrementalAttentionFastPath interface {
-	IncrementalAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool
+	IncrementalAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool
 }
 
 type batchedNormOps interface {
@@ -157,12 +157,12 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		// leverage parts of it for improved performance
 
 		// First, check if we have a full sequence FlashAttention implementation available
-		if fp, ok := ops.(flashAttentionMultiHeadFastPath); ok && fp.FlashAttentionMultiHead(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
+		if fp, ok := ops.(flashAttentionMultiHeadFastPath); ok && fp.FlashAttentionMultiHead(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.Config.Config.AttnLogitSoftcap) {
 			return m.Scratch.AttnProj
 		}
 
 		// FlashAttention fast path (single-head version)
-		if fp, ok := ops.(flashAttentionFastPath); ok && fp.FlashAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
+		if fp, ok := ops.(flashAttentionFastPath); ok && fp.FlashAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.Config.Config.AttnLogitSoftcap) {
 			// If FlashAttention handles the computation, skip the traditional path
 			if layer.AttnGate != nil {
 				gate := m.Scratch.AttnGate[:nHead*headDim]
@@ -200,7 +200,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	// This is where we can add custom optimized implementations for the incremental attention
 
 	// Check for incremental attention fast path
-	if fp, ok := ops.(incrementalAttentionFastPath); ok && fp.IncrementalAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
+	if fp, ok := ops.(incrementalAttentionFastPath); ok && fp.IncrementalAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.Config.Config.AttnLogitSoftcap) {
 		// If incremental attention handles the computation, skip the traditional path
 		if layer.AttnGate != nil {
 			gate := m.Scratch.AttnGate[:nHead*headDim]
@@ -235,13 +235,13 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 
 	// Combined attention inner + projection fast path (no gate)
 	if layer.AttnGate == nil {
-		if fp, ok := ops.(attentionInnerProjectionFastPath); ok && fp.AttentionInnerProjection(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.RMSEpsilon) {
+		if fp, ok := ops.(attentionInnerProjectionFastPath); ok && fp.AttentionInnerProjection(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.RMSEpsilon, m.Config.Config.AttnLogitSoftcap) {
 			return m.Scratch.AttnProj
 		}
 	}
 
 	usedInnerFastPath := false
-	if fp, ok := ops.(attentionInnerFastPath); ok && fp.AttentionInner(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale) {
+	if fp, ok := ops.(attentionInnerFastPath); ok && fp.AttentionInner(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.Config.Config.AttnLogitSoftcap) {
 		usedInnerFastPath = true
 	}
 
@@ -277,6 +277,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			NHead:     nHead,
 			KvHeads:   kvHeads,
 			Scale:     scale,
+			Softcap:   m.Config.Config.AttnLogitSoftcap,
 			CacheLen:  layer.AttnCache.CacheLen,
 			Ops:       ops,
 		}

@@ -24,6 +24,8 @@ type Config struct {
 	SSMInMultiplier        float64
 	SSMOutMultiplier       float64
 	SSMMultipliers         []float64
+	AttnLogitSoftcap       float32
+	FinalLogitSoftcap      float32
 
 	MambaInner          int
 	MambaHeadCount      int

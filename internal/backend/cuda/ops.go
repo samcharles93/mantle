@@ -572,9 +572,9 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 			offloadLayer = true
 		}
 		if offloadLayer {
-			if err := o.preloadLayerManaged(prefix, layer); err != nil {
-			o.markLayerOffloadedLocked(layer)
-			offloadedLayers++
+			if err := o.preloadLayerManaged(layer); err != nil {
+				o.markLayerOffloadedLocked(layer)
+				offloadedLayers++
 			} else {
 				managedLayers++
 			}
@@ -583,9 +583,9 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 
 		if err := uploadLayerMats(prefix, layer); err != nil {
 			if native.IsOOM(err) {
-				if merr := o.preloadLayerManaged(prefix, layer); merr != nil {
-				o.markLayerOffloadedLocked(layer)
-				offloadedLayers++
+				if merr := o.preloadLayerManaged(layer); merr != nil {
+					o.markLayerOffloadedLocked(layer)
+					offloadedLayers++
 				} else {
 					managedLayers++
 				}
@@ -613,7 +613,7 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 	return nil
 }
 
-func (o *Ops) preloadLayerManaged(prefix string, layer *simd.Layer) error {
+func (o *Ops) preloadLayerManaged(layer *simd.Layer) error {
 	for _, mat := range layerMats(layer) {
 		if err := o.ensureManagedMat(mat); err != nil {
 			return err
@@ -1039,31 +1039,12 @@ func (o *Ops) DeviceLogitSoftcap(data []float32, softcap float32) bool {
 		if err := native.LogitSoftcapF32(o.greedyResultDev, softcap, len(data), o.stream); err != nil {
 			o.recordFastPathErrorLocked(err)
 			return false
-	}
+		}
 		return true
 	}
 
 	// Fallback to host if data is not on device or not matching the last result
 	return false
-}
-
-func (o *Ops) ensureArgMaxIndexBuffer() error {
-	const bytes = int(unsafe.Sizeof(int32(0)))
-	if o.argmaxIdxDev.Ptr() != nil && o.argmaxIdxBytes >= bytes {
-		return nil
-	}
-	if o.argmaxIdxDev.Ptr() != nil {
-		_ = o.argmaxIdxDev.Free()
-		o.argmaxIdxDev = native.DeviceBuffer{}
-		o.argmaxIdxBytes = 0
-	}
-	buf, err := native.AllocDevice(int64(bytes))
-	if err != nil {
-		return err
-	}
-	o.argmaxIdxDev = buf
-	o.argmaxIdxBytes = bytes
-	return nil
 }
 
 func (o *Ops) Close() error {
@@ -2937,9 +2918,9 @@ func (o *Ops) RMSNormBatched(dst, src, weight []float32, eps float32, headDim, n
 	}
 
 	if !usedDeviceInput {
-	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), totalElems), src[:totalElems])
-	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), bytes, o.stream); err != nil {
-		return false
+		copy(unsafe.Slice((*float32)(o.xHost.Ptr()), totalElems), src[:totalElems])
+		if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), bytes, o.stream); err != nil {
+			return false
 		}
 		xInput = o.xDev
 	}
@@ -3630,27 +3611,6 @@ func (o *Ops) ensureQuantMatQ4Raw(w *simd.Mat) (deviceQuantMat, error) {
 		format:       quantMatFormatQ4Raw,
 		q:            qBuf,
 		scales:       sBuf,
-		rows:         w.R,
-		cols:         w.C,
-		blocksPerRow: v.blocksPerRow,
-	}, nil
-}
-
-func (o *Ops) ensureQuantMatK4Raw(w *simd.Mat) (deviceQuantMat, error) {
-	v, err := parseK4PayloadView(w)
-	if err != nil {
-		return deviceQuantMat{}, err
-	}
-	qBuf, superBuf, subBuf, err := o.uploadK4PayloadBuffers(v)
-	if err != nil {
-		return deviceQuantMat{}, err
-	}
-
-	return deviceQuantMat{
-		format:       quantMatFormatK4Raw,
-		q:            qBuf,
-		superScales:  superBuf,
-		subScales:    subBuf,
 		rows:         w.R,
 		cols:         w.C,
 		blocksPerRow: v.blocksPerRow,

@@ -31,6 +31,7 @@ extern cudaError_t cudaMemcpyAsync(void* dst, const void* src, unsigned long lon
 extern cudaError_t cudaMallocHost(void** ptr, unsigned long long size);
 extern cudaError_t cudaFreeHost(void* ptr);
 extern cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device);
+extern cudaError_t cudaMemAdvise(const void* devPtr, unsigned long long count, int advice, int device);
 
 #define MANTLE_CUDA_MEMCPY_HOST_TO_DEVICE 1
 #define MANTLE_CUDA_MEMCPY_DEVICE_TO_HOST 2
@@ -207,6 +208,10 @@ static int mantleCudaFreeHost(void* ptr) {
 static int mantleCudaDeviceGetAttribute(int* value, int attr, int device) {
 	cudaError_t err = cudaDeviceGetAttribute(value, attr, device);
 	return (int)err;
+}
+
+static int mantleCudaMemAdvise(const void* devPtr, unsigned long long count, int advice, int device) {
+	return (int)cudaMemAdvise(devPtr, count, advice, device);
 }
 
 static int mantleCublasCreate(cublasHandle_t* out) {
@@ -388,6 +393,11 @@ const (
 	DevAttrPageableMemoryAccessUsesHostPageTables DeviceAttribute = 100 // cudaDevAttrPageableMemoryAccessUsesHostPageTables
 )
 
+const (
+	MemAdviseSetReadMostly = 1 // cudaMemAdviseSetReadMostly
+	MemAdviseSetAccessedBy = 5 // cudaMemAdviseSetAccessedBy
+)
+
 func DeviceGetAttribute(attr DeviceAttribute, device int) (int, error) {
 	var val C.int
 	if err := cudaErr(C.mantleCudaDeviceGetAttribute(&val, C.int(attr), C.int(device))); err != nil {
@@ -498,6 +508,25 @@ func AllocDevice(bytes int64) (DeviceBuffer, error) {
 	}
 	recordDeviceAlloc(bytes, false)
 	return DeviceBuffer{ptr: ptr, managed: false}, nil
+}
+
+func AllocManaged(bytes int64) (DeviceBuffer, error) {
+	if bytes <= 0 {
+		return DeviceBuffer{}, fmt.Errorf("managed alloc size must be > 0")
+	}
+	var ptr unsafe.Pointer
+	if err := cudaErr(C.mantleCudaMallocManaged((*unsafe.Pointer)(&ptr), C.ulonglong(bytes))); err != nil {
+		return DeviceBuffer{}, err
+	}
+	recordDeviceAlloc(bytes, true)
+	return DeviceBuffer{ptr: ptr, managed: true}, nil
+}
+
+func MemAdvise(buf DeviceBuffer, bytes int64, advice int, device int) error {
+	if buf.ptr == nil {
+		return nil
+	}
+	return cudaErr(C.mantleCudaMemAdvise(buf.ptr, C.ulonglong(bytes), C.int(advice), C.int(device)))
 }
 
 func ResetManagedFallbackFlag() {

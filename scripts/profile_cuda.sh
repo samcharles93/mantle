@@ -10,6 +10,7 @@ PROMPT="${PROMPT:-Write a short story about rainbows}"
 SEED="${SEED:-123}"
 TEMP="${TEMP:-0}"
 STREAM_MODE="${STREAM_MODE:-quiet}"
+CUDA_WEIGHT_MODE="${CUDA_WEIGHT_MODE:-auto}"
 GRAPHS="${GRAPHS:-1}"
 NSYS_GRAPHS="${NSYS_GRAPHS:-0}"
 TRACE_SYNC="${TRACE_SYNC:-0}"
@@ -49,6 +50,15 @@ if [ ! -f "$MANTLE_BIN" ]; then
     exit 1
 fi
 
+CUDA_WEIGHT_MODE="$(echo "$CUDA_WEIGHT_MODE" | tr '[:upper:]' '[:lower:]')"
+case "$CUDA_WEIGHT_MODE" in
+    auto|quant|dequant) ;;
+    *)
+        echo "Error: invalid CUDA_WEIGHT_MODE '$CUDA_WEIGHT_MODE' (expected: auto, quant, dequant)"
+        exit 1
+        ;;
+esac
+
 PROFILE_DIR="${SCRIPT_DIR}/../profiles"
 mkdir -p "$PROFILE_DIR"
 
@@ -64,6 +74,7 @@ kv "Nsight Graphs" "$NSYS_GRAPHS (nsys capture)"
 kv "Graph trace" "$CUDA_GRAPH_TRACE (--cuda-graph-trace)"
 kv "Trace sync checks" "$TRACE_SYNC (MANTLE_CUDA_TRACE_SYNC)"
 kv "Stream mode" "$STREAM_MODE"
+kv "Weight mode" "$CUDA_WEIGHT_MODE (--cuda-weight-mode)"
 kv "Seed/Temp" "$SEED / $TEMP"
 kv "Output" "${REPORT_BASE}.*"
 echo ""
@@ -85,6 +96,7 @@ if command -v nsys &> /dev/null; then
         "$MANTLE_BIN" run --backend cuda \
         -m "$MODEL" \
         --steps "$STEPS" --ctv "$KV_TYPE" --ctk "$KV_TYPE" \
+        --cuda-weight-mode "$CUDA_WEIGHT_MODE" \
         --seed "$SEED" --temp "$TEMP" --stream-mode "$STREAM_MODE" \
         --prompt "$PROMPT"
 
@@ -116,6 +128,7 @@ elif command -v nvprof &> /dev/null; then
         "$MANTLE_BIN" run --backend cuda \
         -m "$MODEL" \
         --steps "$STEPS" --ctv "$KV_TYPE" --ctk "$KV_TYPE" \
+        --cuda-weight-mode "$CUDA_WEIGHT_MODE" \
         --seed "$SEED" --temp "$TEMP" --stream-mode "$STREAM_MODE" \
         --prompt "$PROMPT"
 
@@ -142,6 +155,7 @@ echo ""
 CUDA=1 MANTLE_CUDA_TRACE=1 MANTLE_CUDA_GRAPHS="$GRAPHS" MANTLE_CUDA_TRACE_SYNC="$TRACE_SYNC" "$MANTLE_BIN" run --backend cuda \
     -m "$MODEL" \
     --steps "$STEPS" --ctv "$KV_TYPE" --ctk "$KV_TYPE" \
+    --cuda-weight-mode "$CUDA_WEIGHT_MODE" \
     --seed "$SEED" --temp "$TEMP" --stream-mode "$STREAM_MODE" \
     --prompt "$PROMPT" \
     > "${REPORT_BASE}_internal.txt" 2>&1

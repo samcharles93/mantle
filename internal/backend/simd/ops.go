@@ -160,6 +160,19 @@ func fastSigmoid(x float32) float32 {
 	return 1.0 / (1.0 + fastExp(-x))
 }
 
+// fastTanh computes an approximation of tanh(x) using fastExp.
+func fastTanh(x float32) float32 {
+	if x > 10.0 {
+		return 1.0
+	}
+	if x < -10.0 {
+		return -1.0
+	}
+	// tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
+	e2x := fastExp(2.0 * x)
+	return (e2x - 1.0) / (e2x + 1.0)
+}
+
 // fastSilu computes silu(x) = x * sigmoid(x) using fast approximation.
 func fastSilu(x float32) float32 {
 	return x * fastSigmoid(x)

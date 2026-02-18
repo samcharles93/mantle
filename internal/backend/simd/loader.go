@@ -248,6 +248,8 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			LMHeadMultiplier:       cfg.LMHeadMultiplier,
 			AttentionInMultiplier:  cfg.AttentionInMultiplier,
 			AttentionOutMultiplier: cfg.AttentionOutMultiplier,
+			AttnLogitSoftcap:       float32(cfg.AttnLogitSoftcapping),
+			FinalLogitSoftcap:      float32(cfg.FinalLogitSoftcapping),
 			SSMInMultiplier:        cfg.SSMInMultiplier,
 			SSMOutMultiplier:       cfg.SSMOutMultiplier,
 			SSMMultipliers:         cfg.SSMMultipliers,
