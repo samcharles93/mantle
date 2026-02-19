@@ -443,6 +443,22 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 		return qwen3Spec(), nil
 	case hasArch("afmoe"):
 		return afmoeSpec(), nil
+	case hasArch("gemma3n"):
+		if cfg.EmbeddingMultiplier == 0 && cfg.HiddenSize > 0 {
+			cfg.EmbeddingMultiplier = math.Sqrt(float64(cfg.HiddenSize))
+		}
+		return gemma3nSpec(), nil
+	case hasArch("gemma3forconditionalgeneration"):
+		if cfg.EmbeddingMultiplier == 0 && cfg.HiddenSize > 0 {
+			cfg.EmbeddingMultiplier = math.Sqrt(float64(cfg.HiddenSize))
+		}
+		if cfg.MaxPosition == 0 {
+			cfg.MaxPosition = 131072 // Gemma 3 multimodal text decoder default
+		}
+		if cfg.RMSNormEps == 0 && cfg.LayerNormEps == 0 && cfg.NormEps == 0 {
+			cfg.RMSNormEps = 1e-6 // Gemma 3 text decoder default
+		}
+		return gemma3ConditionalSpec(), nil
 	case hasArch("gemma3"):
 		if cfg.EmbeddingMultiplier == 0 && cfg.HiddenSize > 0 {
 			cfg.EmbeddingMultiplier = math.Sqrt(float64(cfg.HiddenSize))

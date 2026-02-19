@@ -22,7 +22,7 @@ func renderByArchDefault(opts RenderOptions) (string, bool, error) {
 		return renderChatML(opts)
 	case "gemma":
 		return renderGemma3(opts)
-	case "gemma3_text", "gemma3":
+	case "gemma3_text", "gemma3", "gemma3n_text", "gemma3n":
 		return renderGemma3(opts)
 	case "qwen3":
 		return renderQwen3(opts)

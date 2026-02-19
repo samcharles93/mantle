@@ -68,14 +68,14 @@ func collectSpecials(tokens []string) []string {
 }
 
 func isSpecialToken(s string) bool {
-	if len(s) < 4 {
+	if len(s) < 3 {
 		return false
 	}
-	return strings.HasPrefix(s, "<|") && strings.HasSuffix(s, "|>")
+	return strings.HasPrefix(s, "<") && strings.HasSuffix(s, ">")
 }
 
 func splitSpecials(text string, specials []string) []textPart {
-	if len(specials) == 0 || !strings.Contains(text, "<|") {
+	if len(specials) == 0 {
 		return []textPart{{text: text, isSpecial: false}}
 	}
 	var parts []textPart

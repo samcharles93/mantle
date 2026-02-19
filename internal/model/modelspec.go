@@ -585,6 +585,157 @@ func gemma3Spec() *ArchSpec {
 	}
 }
 
+// Google Gemma3 multimodal (Gemma3ForConditionalGeneration).
+// Tensors use the language_model.model.* prefix rather than model.*.
+func gemma3ConditionalSpec() *ArchSpec {
+	const p = "language_model.model."
+	return &ArchSpec{
+		Name:          "gemma3_text",
+		HasQKNorm:     true,
+		UseLayerTypes: false,
+		RopeLocalOnly: false,
+		Names: ArchNames{
+			Embedding:  p + "embed_tokens.weight",
+			OutputNorm: p + "norm.weight",
+			OutputCandidates: func() []string {
+				return []string{
+					"language_model.lm_head.weight",
+					p + "embed_tokens.weight",
+				}
+			},
+			AttnNorm: func(layer int) string {
+				return fmt.Sprintf(p+"layers.%d.input_layernorm.weight", layer)
+			},
+			FfnNorm: func(layer int) string {
+				return fmt.Sprintf(p+"layers.%d.pre_feedforward_layernorm.weight", layer)
+			},
+			AttnNormCandidates: func(layer int) []string {
+				return []string{fmt.Sprintf(p+"layers.%d.input_layernorm.weight", layer)}
+			},
+			FfnNormCandidates: func(layer int) []string {
+				return []string{fmt.Sprintf(p+"layers.%d.pre_feedforward_layernorm.weight", layer)}
+			},
+			PostAttnNormCandidates: func(layer int) []string {
+				return []string{fmt.Sprintf(p+"layers.%d.post_attention_layernorm.weight", layer)}
+			},
+			PostFfnNormCandidates: func(layer int) []string {
+				return []string{fmt.Sprintf(p+"layers.%d.post_feedforward_layernorm.weight", layer)}
+			},
+			QNormCandidates: func(layer int) []string {
+				return []string{
+					fmt.Sprintf(p+"layers.%d.self_attn.q_norm.weight", layer),
+					fmt.Sprintf(p+"layers.%d.self_attn.q_layernorm.weight", layer),
+				}
+			},
+			KNormCandidates: func(layer int) []string {
+				return []string{
+					fmt.Sprintf(p+"layers.%d.self_attn.k_norm.weight", layer),
+					fmt.Sprintf(p+"layers.%d.self_attn.k_layernorm.weight", layer),
+				}
+			},
+			Wq: func(layer int) string {
+				return fmt.Sprintf(p+"layers.%d.self_attn.q_proj.weight", layer)
+			},
+			Wk: func(layer int) string {
+				return fmt.Sprintf(p+"layers.%d.self_attn.k_proj.weight", layer)
+			},
+			Wv: func(layer int) string {
+				return fmt.Sprintf(p+"layers.%d.self_attn.v_proj.weight", layer)
+			},
+			Wo: func(layer int) string {
+				return fmt.Sprintf(p+"layers.%d.self_attn.o_proj.weight", layer)
+			},
+			FfnUp: func(layer int) string {
+				return fmt.Sprintf(p+"layers.%d.mlp.up_proj.weight", layer)
+			},
+			FfnGate: func(layer int) string {
+				return fmt.Sprintf(p+"layers.%d.mlp.gate_proj.weight", layer)
+			},
+			FfnDown: func(layer int) string {
+				return fmt.Sprintf(p+"layers.%d.mlp.down_proj.weight", layer)
+			},
+		},
+	}
+}
+
+// Gemma 3n Models (multimodal - uses model.language_model.* prefix)
+func gemma3nSpec() *ArchSpec {
+	return &ArchSpec{
+		Name:          "gemma3n_text",
+		HasQKNorm:     true,
+		UseLayerTypes: false,
+		RopeLocalOnly: false,
+		Names: ArchNames{
+			Embedding:  "model.language_model.embed_tokens.weight",
+			OutputNorm: "model.language_model.norm.weight",
+			OutputCandidates: func() []string {
+				return []string{
+					"model.language_model.lm_head.weight",
+					"lm_head.weight",
+					"model.language_model.embed_tokens.weight",
+				}
+			},
+			AttnNorm: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.input_layernorm.weight", layer)
+			},
+			FfnNorm: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.pre_feedforward_layernorm.weight", layer)
+			},
+			AttnNormCandidates: func(layer int) []string {
+				return []string{
+					fmt.Sprintf("model.language_model.layers.%d.input_layernorm.weight", layer),
+				}
+			},
+			FfnNormCandidates: func(layer int) []string {
+				return []string{
+					fmt.Sprintf("model.language_model.layers.%d.pre_feedforward_layernorm.weight", layer),
+				}
+			},
+			PostAttnNormCandidates: func(layer int) []string {
+				return []string{
+					fmt.Sprintf("model.language_model.layers.%d.post_attention_layernorm.weight", layer),
+				}
+			},
+			PostFfnNormCandidates: func(layer int) []string {
+				return []string{
+					fmt.Sprintf("model.language_model.layers.%d.post_feedforward_layernorm.weight", layer),
+				}
+			},
+			QNormCandidates: func(layer int) []string {
+				return []string{
+					fmt.Sprintf("model.language_model.layers.%d.self_attn.q_norm.weight", layer),
+				}
+			},
+			KNormCandidates: func(layer int) []string {
+				return []string{
+					fmt.Sprintf("model.language_model.layers.%d.self_attn.k_norm.weight", layer),
+				}
+			},
+			Wq: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.self_attn.q_proj.weight", layer)
+			},
+			Wk: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.self_attn.k_proj.weight", layer)
+			},
+			Wv: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.self_attn.v_proj.weight", layer)
+			},
+			Wo: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.self_attn.o_proj.weight", layer)
+			},
+			FfnUp: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.mlp.up_proj.weight", layer)
+			},
+			FfnGate: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.mlp.gate_proj.weight", layer)
+			},
+			FfnDown: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.mlp.down_proj.weight", layer)
+			},
+		},
+	}
+}
+
 // afmoeSpec
 func afmoeSpec() *ArchSpec {
 	return &ArchSpec{
