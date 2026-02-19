@@ -37,3 +37,4 @@
   - [ ] Gemma3 support (currently broken)
   - [ ] Granite support
   - [ ] Improve ease of use for adding new architectures
+
