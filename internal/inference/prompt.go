@@ -22,10 +22,10 @@ func RenderPrompt(input PromptRenderInput) (string, error) {
 		return lastUserText(input.Messages)
 	}
 
+	// effectiveTemplate may be "" when the model has no embedded Jinja template.
+	// tplparser.Render handles that case via renderByArchDefault (gemma3, qwen3, etc.),
+	// so we always attempt rendering and only fall back to raw text if it returns ok=false.
 	effectiveTemplate, _ := ResolveChatTemplate(input.TemplateOverride, input.TokenizerConfig, input.Arch, input.HFConfigJSON)
-	if effectiveTemplate == "" {
-		return lastUserText(input.Messages)
-	}
 
 	bosToken := input.TokenizerConfig.TokenString(input.TokenizerConfig.BOSTokenID)
 	rendered, ok, err := tokenizer.RenderPromptTemplate(

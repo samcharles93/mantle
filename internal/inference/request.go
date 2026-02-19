@@ -44,6 +44,9 @@ func ResolveRequest(opts RequestOptions, defaults GenDefaults) Request {
 	if defaults.Temperature != nil && *defaults.Temperature > 0 {
 		req.Temperature = *defaults.Temperature
 	}
+	if defaults.DoSample != nil && !*defaults.DoSample {
+		req.Temperature = 0
+	}
 	if defaults.TopK != nil && *defaults.TopK > 0 {
 		req.TopK = *defaults.TopK
 	}

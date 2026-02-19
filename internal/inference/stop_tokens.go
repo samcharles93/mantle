@@ -2,17 +2,16 @@ package inference
 
 import (
 	"slices"
-	"strings"
 
 	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
-func BuildStopTokens(tok tokenizer.Tokenizer, cfg tokenizer.TokenizerConfig) []int {
-	stopTokens := []int{cfg.EOSTokenID}
-	if cfg.EOSTokenID < 0 {
-		stopTokens = stopTokens[:0]
-	}
-
+// BuildStopTokens returns the set of token IDs that should halt generation.
+// The primary source is cfg.EOSTokenID (from the tokenizer config).
+// extraIDs comes from generation_config.json's eos_token_id, which may list
+// additional turn-end tokens (e.g. Gemma's <end_of_turn>=106, Llama3's special ids).
+func BuildStopTokens(cfg tokenizer.TokenizerConfig, extraIDs []int) []int {
+	stopTokens := []int{}
 	addUnique := func(id int) {
 		if id < 0 {
 			return
@@ -22,31 +21,9 @@ func BuildStopTokens(tok tokenizer.Tokenizer, cfg tokenizer.TokenizerConfig) []i
 		}
 		stopTokens = append(stopTokens, id)
 	}
-
-	isKnownStopTokenString := func(s string) bool {
-		switch strings.ToLower(strings.TrimSpace(s)) {
-		case "<|im_end|>", "<|eot_id|>", "</s>":
-			return true
-		default:
-			return false
-		}
-	}
-
-	// Legacy fallback for tokenizers that don't expose a decoder table.
-	if isKnownStopTokenString(tok.TokenString(2)) {
-		addUnique(2)
-	}
-
-	for id, token := range cfg.Tokens {
-		if isKnownStopTokenString(token) {
-			addUnique(id)
-		}
-	}
-
-	for id, token := range tok.Decoder() {
-		if isKnownStopTokenString(token) {
-			addUnique(id)
-		}
+	addUnique(cfg.EOSTokenID)
+	for _, id := range extraIDs {
+		addUnique(id)
 	}
 	return stopTokens
 }

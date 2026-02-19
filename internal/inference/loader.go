@@ -42,6 +42,8 @@ type GenDefaults struct {
 	TopK              *int
 	TopP              *float64
 	RepetitionPenalty *float64
+	EOSTokenIDs       []int
+	DoSample          *bool
 }
 
 func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*LoadResult, error) {
@@ -165,7 +167,8 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 		log.Info("chat template resolved", "model_path", modelPath, "source", templateSource, "length", len(effectiveTemplate))
 	}
 
-	stopTokens := BuildStopTokens(hfTok, tokCfgParsed)
+	stopTokens := BuildStopTokens(tokCfgParsed, genDefaults.EOSTokenIDs)
+	log.Debug("stop tokens resolved", "stop_tokens", stopTokens, "gen_eos_ids", genDefaults.EOSTokenIDs, "tokenizer_eos", tokCfgParsed.EOSTokenID)
 
 	engine := &EngineImpl{
 		mcfFile:          mcfFile,
@@ -224,10 +227,12 @@ func (l Loader) loadTokenizerBytes(mcfFile *mcfstore.File) ([]byte, []byte, erro
 
 func parseHFGenerationDefaults(genBytes []byte) GenDefaults {
 	type hfGenerationConfig struct {
-		Temperature       *float64 `json:"temperature"`
-		TopK              *int     `json:"top_k"`
-		TopP              *float64 `json:"top_p"`
-		RepetitionPenalty *float64 `json:"repetition_penalty"`
+		Temperature       *float64        `json:"temperature"`
+		TopK              *int            `json:"top_k"`
+		TopP              *float64        `json:"top_p"`
+		RepetitionPenalty *float64        `json:"repetition_penalty"`
+		EOSTokenID        json.RawMessage `json:"eos_token_id"`
+		DoSample          *bool           `json:"do_sample"`
 	}
 	if len(genBytes) == 0 {
 		return GenDefaults{}
@@ -236,7 +241,25 @@ func parseHFGenerationDefaults(genBytes []byte) GenDefaults {
 	if err := json.Unmarshal(genBytes, &cfg); err != nil {
 		return GenDefaults{}
 	}
-	return GenDefaults(cfg)
+	result := GenDefaults{
+		Temperature:       cfg.Temperature,
+		TopK:              cfg.TopK,
+		TopP:              cfg.TopP,
+		RepetitionPenalty: cfg.RepetitionPenalty,
+		DoSample:          cfg.DoSample,
+	}
+	if len(cfg.EOSTokenID) > 0 {
+		var ids []int
+		if err := json.Unmarshal(cfg.EOSTokenID, &ids); err == nil {
+			result.EOSTokenIDs = ids
+		} else {
+			var id int
+			if err := json.Unmarshal(cfg.EOSTokenID, &id); err == nil {
+				result.EOSTokenIDs = []int{id}
+			}
+		}
+	}
+	return result
 }
 
 func disableSWAConfig(cfgBytes []byte) ([]byte, error) {
