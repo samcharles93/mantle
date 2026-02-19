@@ -125,13 +125,46 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 
 	headCount := cfg.NumAttentionHeads
 	if headCount <= 0 {
-		return nil, fmt.Errorf("num_attention_heads must be set")
+		// Config omits num_attention_heads (e.g. Gemma3ForConditionalGeneration).
+		// Infer from first-layer projection shapes via the shape-only index.
+		headDimHint := cfg.HeadDim
+		if headDimHint <= 0 && names.QNormCandidates != nil {
+			for _, n := range names.QNormCandidates(0) {
+				if s, ok := src.TensorShape(n); ok && len(s) == 1 && s[0] > 0 {
+					headDimHint = s[0]
+					break
+				}
+			}
+		}
+		if headDimHint > 0 && names.Wq != nil {
+			if s, ok := src.TensorShape(names.Wq(0)); ok && len(s) == 2 && s[0]%headDimHint == 0 {
+				headCount = s[0] / headDimHint
+				if cfg.HeadDim == 0 {
+					cfg.HeadDim = headDimHint
+				}
+				if cfg.NumKeyValueHeads == 0 && names.Wk != nil {
+					if ks, ok := src.TensorShape(names.Wk(0)); ok && len(ks) == 2 && ks[0]%headDimHint == 0 {
+						cfg.NumKeyValueHeads = ks[0] / headDimHint
+					}
+				}
+			}
+		}
+		if headCount <= 0 {
+			return nil, fmt.Errorf("num_attention_heads must be set")
+		}
+		cfg.NumAttentionHeads = headCount
 	}
 	if cfg.HiddenSize <= 0 {
 		return nil, fmt.Errorf("hidden_size must be set")
 	}
 	if cfg.MaxPosition <= 0 {
 		return nil, fmt.Errorf("max_position_embeddings must be set")
+	}
+	if cfg.VocabSize <= 0 {
+		// Infer vocab_size from embedding tensor shape (rows = vocab size).
+		if s, ok := src.TensorShape(names.Embedding); ok && len(s) >= 1 && s[0] > 0 {
+			cfg.VocabSize = s[0]
+		}
 	}
 	if cfg.VocabSize <= 0 {
 		return nil, fmt.Errorf("vocab_size must be set")

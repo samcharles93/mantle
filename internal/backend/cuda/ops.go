@@ -249,6 +249,16 @@ func (o *Ops) flushLastResult() error {
 	return nil
 }
 
+// flushIfPending flushes a pending device result to host if the given buffer
+// is the one currently holding it. Must be called with o.mu held.
+func (o *Ops) flushIfPending(buf native.DeviceBuffer) error {
+	if o.lastResultValid && o.lastResultDev.Ptr() == buf.Ptr() {
+		native.RecordFlushIfPending()
+		return o.flushLastResult()
+	}
+	return nil
+}
+
 // setLastResult records a device result mapped to a host destination slice.
 // Must be called with o.mu held.
 func (o *Ops) setLastResult(dev native.DeviceBuffer, host []float32, n int) {
@@ -3715,6 +3725,9 @@ func (o *Ops) ensureDeviceVecs(xBytes, yBytes int) error {
 		o.xDevBytes = xBytes
 	}
 	if yBytes > o.yDevBytes {
+		if err := o.flushIfPending(o.yDev); err != nil {
+			return err
+		}
 		if err := o.yDev.Free(); err != nil {
 			return err
 		}
@@ -3730,6 +3743,9 @@ func (o *Ops) ensureDeviceVecs(xBytes, yBytes int) error {
 
 func (o *Ops) ensureNormTmp(bytes int) error {
 	if bytes > o.zDevBytes {
+		if err := o.flushIfPending(o.zDev); err != nil {
+			return err
+		}
 		if err := o.zDev.Free(); err != nil {
 			return err
 		}
@@ -3760,6 +3776,9 @@ func (o *Ops) ensureNormDeviceVec(bytes int) error {
 
 func (o *Ops) ensureActTmp(bytes int) error {
 	if bytes > o.aDevBytes {
+		if err := o.flushIfPending(o.aDev); err != nil {
+			return err
+		}
 		if err := o.aDev.Free(); err != nil {
 			return err
 		}

@@ -18,6 +18,7 @@ type PerfCounters struct {
 	GraphCaptures          int64
 	GraphLaunches          int64
 	GraphFailures          int64
+	FlushIfPendingCalls    int64
 	H2DBytes               int64
 	D2HBytes               int64
 	ManagedAllocs          int64
@@ -41,6 +42,7 @@ func GetPerfCounters() PerfCounters {
 		GraphCaptures:          globalPerfCounters.GraphCaptures,
 		GraphLaunches:          globalPerfCounters.GraphLaunches,
 		GraphFailures:          globalPerfCounters.GraphFailures,
+		FlushIfPendingCalls:    globalPerfCounters.FlushIfPendingCalls,
 		H2DBytes:               globalPerfCounters.H2DBytes,
 		D2HBytes:               globalPerfCounters.D2HBytes,
 		ManagedAllocs:          globalPerfCounters.ManagedAllocs,
@@ -111,6 +113,12 @@ func recordGraphFailure() {
 	}
 }
 
+func recordFlushIfPending() {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.FlushIfPendingCalls, 1)
+	}
+}
+
 func recordH2D(bytes int64) {
 	if perfEnabled() {
 		atomic.AddInt64(&globalPerfCounters.H2DBytes, bytes)
@@ -156,3 +164,6 @@ func RecordGraphLaunch() { recordGraphLaunch() }
 
 // RecordGraphFailure records a CUDA Graph capture/launch failure.
 func RecordGraphFailure() { recordGraphFailure() }
+
+// RecordFlushIfPending records a forced D2H flush triggered by buffer reuse.
+func RecordFlushIfPending() { recordFlushIfPending() }
