@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package ux
 
 import (
 	"bufio"
@@ -14,7 +14,8 @@ import (
 
 var interactiveHistory []string
 
-func readInteractiveLine(prompt string) (string, error) {
+// ReadInteractiveLine reads one line from stdin with interactive editing on Linux TTYs.
+func ReadInteractiveLine(prompt string) (string, error) {
 	if !stdinIsTTY() {
 		r := bufio.NewReader(os.Stdin)
 		s, err := r.ReadString('\n')

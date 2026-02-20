@@ -1,4 +1,4 @@
-package main
+package paths
 
 import (
 	"bufio"
@@ -13,14 +13,16 @@ import (
 )
 
 const (
-	envMantlePackOutDir = "MANTLE_PACK_OUT_DIR"
-	envMantleModelsDir  = "MANTLE_MODELS_DIR"
+	// EnvMantlePackOutDir controls the default output directory used by pack.
+	EnvMantlePackOutDir = "MANTLE_PACK_OUT_DIR"
+	// EnvMantleModelsDir points to the directory that stores .mcf model files.
+	EnvMantleModelsDir = "MANTLE_MODELS_DIR"
 )
 
 // stdinIsTTY is a small seam for tests.
 var stdinIsTTY = isTTY
 
-func resolvePackOut(inDir, outFlag string) (string, bool, error) {
+func ResolvePackOut(inDir, outFlag string) (string, bool, error) {
 	outFlag = strings.TrimSpace(outFlag)
 	if outFlag != "" {
 		outPath := filepath.Clean(outFlag)
@@ -35,7 +37,7 @@ func resolvePackOut(inDir, outFlag string) (string, bool, error) {
 		return "", true, fmt.Errorf("invalid input directory: %q", inDir)
 	}
 
-	outDir := strings.TrimSpace(os.Getenv(envMantlePackOutDir))
+	outDir := strings.TrimSpace(os.Getenv(EnvMantlePackOutDir))
 	if outDir == "" {
 		outDir = filepath.Join(".", "out")
 	}
@@ -47,7 +49,8 @@ func resolvePackOut(inDir, outFlag string) (string, bool, error) {
 	return outPath, true, nil
 }
 
-func resolveRunModelPath(modelFlag string, modelsPath string, stdin io.Reader, stderr io.Writer) (string, error) {
+// ResolveRunModelPath selects the model path from flags, env, or interactive choice.
+func ResolveRunModelPath(modelFlag string, modelsPath string, stdin io.Reader, stderr io.Writer) (string, error) {
 	modelFlag = strings.TrimSpace(modelFlag)
 	if modelFlag != "" {
 		return filepath.Clean(modelFlag), nil
@@ -55,13 +58,13 @@ func resolveRunModelPath(modelFlag string, modelsPath string, stdin io.Reader, s
 
 	modelsDir := strings.TrimSpace(modelsPath)
 	if modelsDir == "" {
-		modelsDir = strings.TrimSpace(os.Getenv(envMantleModelsDir))
+		modelsDir = strings.TrimSpace(os.Getenv(EnvMantleModelsDir))
 	}
 	if modelsDir == "" {
-		return "", fmt.Errorf("--model or --models-path is required unless %s is set", envMantleModelsDir)
+		return "", fmt.Errorf("--model or --models-path is required unless %s is set", EnvMantleModelsDir)
 	}
 
-	models, err := discoverMCFModels(modelsDir)
+	models, err := DiscoverMCFModels(modelsDir)
 	if err != nil {
 		return "", err
 	}
@@ -82,7 +85,8 @@ func resolveRunModelPath(modelFlag string, modelsPath string, stdin io.Reader, s
 	}
 }
 
-func discoverMCFModels(dir string) ([]string, error) {
+// DiscoverMCFModels returns sorted .mcf model paths under dir.
+func DiscoverMCFModels(dir string) ([]string, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, errors.New("models directory is empty")
 	}

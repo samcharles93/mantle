@@ -1,6 +1,6 @@
 //go:build !linux
 
-package main
+package ux
 
 import (
 	"bufio"
@@ -8,7 +8,8 @@ import (
 	"os"
 )
 
-func readInteractiveLine(_ string) (string, error) {
+// ReadInteractiveLine reads one line from stdin on non-Linux platforms.
+func ReadInteractiveLine(_ string) (string, error) {
 	r := bufio.NewReader(os.Stdin)
 	s, err := r.ReadString('\n')
 	if err != nil && err != io.EOF {

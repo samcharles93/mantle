@@ -7,6 +7,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	clipaths "github.com/samcharles93/mantle/internal/cli/paths"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
@@ -73,7 +74,7 @@ func packCmd() *cli.Command {
 			log := logger.FromContext(ctx)
 
 			inDir := cmd.String("input")
-			outPath, defaulted, err := resolvePackOut(inDir, cmd.String("output"))
+			outPath, defaulted, err := clipaths.ResolvePackOut(inDir, cmd.String("output"))
 			if err != nil {
 				return fmt.Errorf("pack: resolve output: %w", err)
 			}

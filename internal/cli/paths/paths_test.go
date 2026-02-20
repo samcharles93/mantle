@@ -1,4 +1,4 @@
-package main
+package paths
 
 import (
 	"bytes"
@@ -13,9 +13,9 @@ func TestResolvePackOut(t *testing.T) {
 		inDir := t.TempDir()
 		outPath := filepath.Join(t.TempDir(), "nested", "model.mcf")
 
-		got, defaulted, err := resolvePackOut(inDir, outPath)
+		got, defaulted, err := ResolvePackOut(inDir, outPath)
 		if err != nil {
-			t.Fatalf("resolvePackOut returned error: %v", err)
+			t.Fatalf("ResolvePackOut returned error: %v", err)
 		}
 		if defaulted {
 			t.Fatalf("expected explicit output to not be defaulted")
@@ -30,12 +30,12 @@ func TestResolvePackOut(t *testing.T) {
 
 	t.Run("env output dir overrides default", func(t *testing.T) {
 		envDir := filepath.Join(t.TempDir(), "pack-out")
-		t.Setenv(envMantlePackOutDir, envDir)
+		t.Setenv(EnvMantlePackOutDir, envDir)
 
 		inDir := filepath.Join(t.TempDir(), "ModelA")
-		got, defaulted, err := resolvePackOut(inDir, "")
+		got, defaulted, err := ResolvePackOut(inDir, "")
 		if err != nil {
-			t.Fatalf("resolvePackOut returned error: %v", err)
+			t.Fatalf("ResolvePackOut returned error: %v", err)
 		}
 		if !defaulted {
 			t.Fatalf("expected output to be defaulted")
@@ -58,12 +58,12 @@ func TestResolvePackOut(t *testing.T) {
 		defer func() {
 			_ = os.Chdir(wd)
 		}()
-		t.Setenv(envMantlePackOutDir, "")
+		t.Setenv(EnvMantlePackOutDir, "")
 
 		inDir := filepath.Join(tmp, "ModelB")
-		got, defaulted, err := resolvePackOut(inDir, "")
+		got, defaulted, err := ResolvePackOut(inDir, "")
 		if err != nil {
-			t.Fatalf("resolvePackOut returned error: %v", err)
+			t.Fatalf("ResolvePackOut returned error: %v", err)
 		}
 		if !defaulted {
 			t.Fatalf("expected output to be defaulted")
@@ -85,9 +85,9 @@ func TestDiscoverMCFModelsSorted(t *testing.T) {
 		}
 	}
 
-	got, err := discoverMCFModels(dir)
+	got, err := DiscoverMCFModels(dir)
 	if err != nil {
-		t.Fatalf("discoverMCFModels returned error: %v", err)
+		t.Fatalf("DiscoverMCFModels returned error: %v", err)
 	}
 	want := []string{
 		filepath.Join(dir, "a.mcf"),
@@ -105,10 +105,10 @@ func TestDiscoverMCFModelsSorted(t *testing.T) {
 
 func TestResolveRunModelPath(t *testing.T) {
 	t.Run("model flag bypasses env", func(t *testing.T) {
-		t.Setenv(envMantleModelsDir, "")
-		got, err := resolveRunModelPath("/tmp/model.mcf", "", bytes.NewBuffer(nil), io.Discard)
+		t.Setenv(EnvMantleModelsDir, "")
+		got, err := ResolveRunModelPath("/tmp/model.mcf", "", bytes.NewBuffer(nil), io.Discard)
 		if err != nil {
-			t.Fatalf("resolveRunModelPath returned error: %v", err)
+			t.Fatalf("ResolveRunModelPath returned error: %v", err)
 		}
 		if got != filepath.Clean("/tmp/model.mcf") {
 			t.Fatalf("unexpected model path: got %q", got)
@@ -121,15 +121,15 @@ func TestResolveRunModelPath(t *testing.T) {
 		if err := os.WriteFile(only, []byte("x"), 0o644); err != nil {
 			t.Fatalf("write model: %v", err)
 		}
-		t.Setenv(envMantleModelsDir, dir)
+		t.Setenv(EnvMantleModelsDir, dir)
 
 		prevTTY := stdinIsTTY
 		stdinIsTTY = func() bool { return false }
 		defer func() { stdinIsTTY = prevTTY }()
 
-		got, err := resolveRunModelPath("", "", bytes.NewBuffer(nil), io.Discard)
+		got, err := ResolveRunModelPath("", "", bytes.NewBuffer(nil), io.Discard)
 		if err != nil {
-			t.Fatalf("resolveRunModelPath returned error: %v", err)
+			t.Fatalf("ResolveRunModelPath returned error: %v", err)
 		}
 		if got != only {
 			t.Fatalf("unexpected model path: got %q want %q", got, only)
@@ -143,13 +143,13 @@ func TestResolveRunModelPath(t *testing.T) {
 				t.Fatalf("write model %s: %v", name, err)
 			}
 		}
-		t.Setenv(envMantleModelsDir, dir)
+		t.Setenv(EnvMantleModelsDir, dir)
 
 		prevTTY := stdinIsTTY
 		stdinIsTTY = func() bool { return false }
 		defer func() { stdinIsTTY = prevTTY }()
 
-		if _, err := resolveRunModelPath("", "", bytes.NewBuffer(nil), io.Discard); err == nil {
+		if _, err := ResolveRunModelPath("", "", bytes.NewBuffer(nil), io.Discard); err == nil {
 			t.Fatalf("expected error when multiple models and stdin is not a tty")
 		}
 	})
@@ -164,15 +164,15 @@ func TestResolveRunModelPath(t *testing.T) {
 		if err := os.WriteFile(a, []byte("x"), 0o644); err != nil {
 			t.Fatalf("write model a: %v", err)
 		}
-		t.Setenv(envMantleModelsDir, dir)
+		t.Setenv(EnvMantleModelsDir, dir)
 
 		prevTTY := stdinIsTTY
 		stdinIsTTY = func() bool { return true }
 		defer func() { stdinIsTTY = prevTTY }()
 
-		got, err := resolveRunModelPath("", "", bytes.NewBufferString("2\n"), io.Discard)
+		got, err := ResolveRunModelPath("", "", bytes.NewBufferString("2\n"), io.Discard)
 		if err != nil {
-			t.Fatalf("resolveRunModelPath returned error: %v", err)
+			t.Fatalf("ResolveRunModelPath returned error: %v", err)
 		}
 		if got != b {
 			t.Fatalf("unexpected model selection: got %q want %q", got, b)

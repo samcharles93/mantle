@@ -9,6 +9,8 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	clipaths "github.com/samcharles93/mantle/internal/cli/paths"
+	cliux "github.com/samcharles93/mantle/internal/cli/ux"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
@@ -31,13 +33,13 @@ func listModelsCmd() *cli.Command {
 
 			dir := strings.TrimSpace(modelsPath)
 			if dir == "" {
-				dir = strings.TrimSpace(os.Getenv(envMantleModelsDir))
+				dir = strings.TrimSpace(os.Getenv(clipaths.EnvMantleModelsDir))
 			}
 			if dir == "" {
 				return cli.Exit("error: --models-path is required unless MANTLE_MODELS_DIR is set", 1)
 			}
 
-			models, err := discoverMCFModels(dir)
+			models, err := clipaths.DiscoverMCFModels(dir)
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: %v", err), 1)
 			}
@@ -54,7 +56,7 @@ func listModelsCmd() *cli.Command {
 					fmt.Printf("  %s\n", name)
 					continue
 				}
-				size := formatModelSize(info.Size())
+				size := cliux.FormatModelSize(info.Size())
 
 				// Try to get model info from MCF header
 				arch := ""
@@ -78,23 +80,5 @@ func listModelsCmd() *cli.Command {
 			fmt.Printf("\n%d model(s) found\n", len(models))
 			return nil
 		},
-	}
-}
-
-func formatModelSize(bytes int64) string {
-	const (
-		kb = 1024
-		mb = 1024 * kb
-		gb = 1024 * mb
-	)
-	switch {
-	case bytes >= gb:
-		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(gb))
-	case bytes >= mb:
-		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(mb))
-	case bytes >= kb:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(kb))
-	default:
-		return fmt.Sprintf("%d B", bytes)
 	}
 }

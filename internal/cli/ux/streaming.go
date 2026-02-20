@@ -1,4 +1,4 @@
-package main
+package ux
 
 import (
 	"bufio"
@@ -22,6 +22,17 @@ const (
 	StreamTypewriter StreamMode = "typewriter"
 	StreamQuiet      StreamMode = "quiet"
 )
+
+// NormalizeStreamMode parses a user-provided stream mode.
+func NormalizeStreamMode(v string) (StreamMode, bool) {
+	mode := StreamMode(strings.ToLower(strings.TrimSpace(v)))
+	switch mode {
+	case StreamInstant, StreamSmooth, StreamTypewriter, StreamQuiet:
+		return mode, true
+	default:
+		return StreamSmooth, false
+	}
+}
 
 // StreamWriter handles buffered token streaming with configurable modes
 type StreamWriter struct {

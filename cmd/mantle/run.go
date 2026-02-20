@@ -13,6 +13,8 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/samcharles93/mantle/internal/backend/simd"
+	clipaths "github.com/samcharles93/mantle/internal/cli/paths"
+	cliux "github.com/samcharles93/mantle/internal/cli/ux"
 	"github.com/samcharles93/mantle/internal/hostcaps"
 	"github.com/samcharles93/mantle/internal/inference"
 	"github.com/samcharles93/mantle/internal/logger"
@@ -371,7 +373,7 @@ func runCmd() *cli.Command {
 				}()
 			}
 
-			resolvedModelPath, err := resolveRunModelPath(modelPath, modelsPath, os.Stdin, os.Stderr)
+			resolvedModelPath, err := clipaths.ResolveRunModelPath(modelPath, modelsPath, os.Stdin, os.Stderr)
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: resolve model: %v", err), 1)
 			}
@@ -652,7 +654,7 @@ func runCmd() *cli.Command {
 			for {
 				// If we need input
 				if interactive && (len(msgs) == 0 || msgs[len(msgs)-1].Role != "user") {
-					input, err := readInteractiveLine("> ")
+					input, err := cliux.ReadInteractiveLine("> ")
 					if err != nil {
 						break
 					}
@@ -728,10 +730,9 @@ func runCmd() *cli.Command {
 				req := inference.ResolveRequest(opts, genDefaults)
 
 				// Create streaming writer based on mode
-				mode := StreamMode(streamMode)
-				if mode != StreamInstant && mode != StreamSmooth && mode != StreamTypewriter && mode != StreamQuiet {
+				mode, ok := cliux.NormalizeStreamMode(streamMode)
+				if !ok {
 					log.Warn("invalid stream-mode, using 'smooth'", "provided", streamMode)
-					mode = StreamSmooth
 				}
 
 				if showConfig {
@@ -739,7 +740,7 @@ func runCmd() *cli.Command {
 					log.Info("reasoning mode", "format", reasoningFmt, "budget", reasoningBgt)
 				}
 
-				writer := NewStreamWriter(log, mode, rawOutput)
+				writer := cliux.NewStreamWriter(log, mode, rawOutput)
 				var split reasoning.Splitter
 				reasoningOpen := false
 				assistantStarted := false

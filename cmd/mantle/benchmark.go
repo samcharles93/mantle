@@ -10,6 +10,7 @@ import (
 
 	"github.com/urfave/cli/v3"
 
+	clipaths "github.com/samcharles93/mantle/internal/cli/paths"
 	"github.com/samcharles93/mantle/internal/inference"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/tokenizer"
@@ -60,7 +61,7 @@ func benchmarkCmd() *cli.Command {
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			log := logger.FromContext(ctx)
 
-			resolvedModelPath, err := resolveRunModelPath(modelPath, modelsPath, os.Stdin, os.Stderr)
+			resolvedModelPath, err := clipaths.ResolveRunModelPath(modelPath, modelsPath, os.Stdin, os.Stderr)
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: resolve model: %v", err), 1)
 			}
