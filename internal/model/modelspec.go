@@ -63,6 +63,48 @@ func mistralSpec() *ArchSpec {
 	}
 }
 
+func smolLM3Spec() *ArchSpec {
+	return &ArchSpec{
+		Name:          "smollm3",
+		HasQKNorm:     false,
+		UseLayerTypes: false,
+		Names: ArchNames{
+			Embedding:  "model.embed_tokens.weight",
+			OutputNorm: "model.norm.weight",
+			OutputCandidates: func() []string {
+				return []string{
+					"lm_head.weight",
+					"model.lm_head.weight",
+					"output.weight",
+					"model.output.weight",
+					"model.embed_tokens.weight", // tied embeddings fallback
+				}
+			},
+			AttnNorm: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.input_layernorm.weight", layer)
+			},
+			FfnNorm: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.post_attention_layernorm.weight", layer)
+			},
+			AttnNormCandidates: func(layer int) []string {
+				return []string{fmt.Sprintf("model.layers.%d.input_layernorm.weight", layer)}
+			},
+			FfnNormCandidates: func(layer int) []string {
+				return []string{fmt.Sprintf("model.layers.%d.post_attention_layernorm.weight", layer)}
+			},
+			QNormCandidates: func(layer int) []string { return nil },
+			KNormCandidates: func(layer int) []string { return nil },
+			Wq:              func(layer int) string { return fmt.Sprintf("model.layers.%d.self_attn.q_proj.weight", layer) },
+			Wk:              func(layer int) string { return fmt.Sprintf("model.layers.%d.self_attn.k_proj.weight", layer) },
+			Wv:              func(layer int) string { return fmt.Sprintf("model.layers.%d.self_attn.v_proj.weight", layer) },
+			Wo:              func(layer int) string { return fmt.Sprintf("model.layers.%d.self_attn.o_proj.weight", layer) },
+			FfnUp:           func(layer int) string { return fmt.Sprintf("model.layers.%d.mlp.up_proj.weight", layer) },
+			FfnGate:         func(layer int) string { return fmt.Sprintf("model.layers.%d.mlp.gate_proj.weight", layer) },
+			FfnDown:         func(layer int) string { return fmt.Sprintf("model.layers.%d.mlp.down_proj.weight", layer) },
+		},
+	}
+}
+
 // Mistral3
 // mistral3Spec describes the text model tensors inside Mistral3 multimodal
 // checkpoints. The runtime is text-only, so we intentionally map only the

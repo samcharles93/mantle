@@ -911,6 +911,8 @@ func loadModelInfoFromHFConfig(dir string) (*ModelInfo, error) {
 			mi.Arch = ArchQwen
 		case strings.Contains(strings.ToLower(mt), "gemma"):
 			mi.Arch = ArchGemma
+		case strings.Contains(strings.ToLower(mt), "smollm3"):
+			mi.Arch = ArchSmollM3
 		default:
 			mi.Arch = ArchUnknown
 		}

@@ -317,6 +317,10 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		layer.HeadKV = headKVArr[i]
 		layer.IsRecurrent = layer.HeadKV == 0
 		layer.AttnType = "full_attention"
+		if cfg.NoRopeLayerInterval > 0 && (i+1)%cfg.NoRopeLayerInterval == 0 {
+			layer.NoRoPE = true
+		}
+
 		if len(layerTypes) == blockCount && layerTypes[i] != "" {
 			layer.AttnType = layerTypes[i]
 		}

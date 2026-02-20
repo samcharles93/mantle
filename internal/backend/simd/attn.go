@@ -132,7 +132,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		}
 	}
 
-	applyRoPE := !m.RopeLocalOnly || layer.AttnType != "full_attention"
+	applyRoPE := !layer.NoRoPE && (!m.RopeLocalOnly || layer.AttnType != "full_attention")
 	if applyRoPE {
 		invFreq := m.RopeInvFreq
 		attnScale := m.RopeAttnScale

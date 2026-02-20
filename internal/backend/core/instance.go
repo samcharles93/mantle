@@ -47,6 +47,7 @@ type Layer struct {
 	HeadKV      int
 	AttnType    string
 	AttnWindow  int
+	NoRoPE      bool // skip RoPE positional encoding for this layer
 
 	AttnNorm     []float32
 	PostAttnNorm []float32

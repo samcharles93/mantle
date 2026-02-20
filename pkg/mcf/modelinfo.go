@@ -45,6 +45,7 @@ const (
 	ArchQwen
 	ArchGemma
 	ArchGranite
+	ArchSmollM3
 )
 
 type RopeType uint32

@@ -11,15 +11,16 @@ type HFConfig struct {
 	ModelType     string   `json:"model_type"`
 	Architectures []string `json:"architectures"`
 
-	BlockDim          int          `json:"block_dim"`
-	ConvLCache        int          `json:"conv_L_cache"`
-	LayerTypes        []string     `json:"layer_types"`
-	NormEps           float64      `json:"norm_eps"`
-	MaxPosition       int          `json:"max_position_embeddings"`
-	NumAttentionHeads int          `json:"num_attention_heads"`
-	NumKeyValueHeads  int          `json:"num_key_value_heads"`
-	RopeScaling       *ropeScaling `json:"rope_scaling"`
-	RopeParameters    *ropeParams  `json:"rope_parameters"`
+	BlockDim            int          `json:"block_dim"`
+	ConvLCache          int          `json:"conv_L_cache"`
+	LayerTypes          []string     `json:"layer_types"`
+	NormEps             float64      `json:"norm_eps"`
+	MaxPosition         int          `json:"max_position_embeddings"`
+	NumAttentionHeads   int          `json:"num_attention_heads"`
+	NumKeyValueHeads    int          `json:"num_key_value_heads"`
+	RopeScaling         *ropeScaling `json:"rope_scaling"`
+	RopeParameters      *ropeParams  `json:"rope_parameters"`
+	NoRopeLayerInterval int          `json:"no_rope_layer_interval"`
 
 	// MoE specific fields.
 	MoEIntermediateSize  int                        `json:"moe_intermediate_size"`
@@ -475,6 +476,8 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 		return mistral3Spec(), nil
 	case hasArch("mistral"):
 		return mistralSpec(), nil
+	case hasArch("smollm3"):
+		return smolLM3Spec(), nil
 	case hasArch("llama"):
 		return llamaSpec(), nil
 	default:
