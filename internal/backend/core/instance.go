@@ -35,8 +35,10 @@ type Instance struct {
 	Scratch ScratchBuffers
 	ops     Ops
 
-	hostCaps    *hostcaps.Snapshot
-	opsBindOnce sync.Once
+	hostCaps *hostcaps.Snapshot
+
+	// effectiveContextLen constrains KV cache allocation to this length (0 = use model max)
+	effectiveContextLen int
 }
 
 // Layer represents a single transformer layer with all its parameters.
@@ -225,4 +227,29 @@ func (m *Instance) initAttnPool() {
 	m.attnPoolOnce.Do(func() {
 		m.attnPool = NewAttnPool(AttnWorkersFor(m.HeadCount), m.MaxContext)
 	})
+}
+
+// SetEffectiveContextLength constrains KV cache allocation to this length.
+// This is used at inference time to prevent allocating cache for the model's
+// full maximum context window when fewer tokens will be generated.
+// Set to 0 to use the model's MaxContext (default).
+func (m *Instance) SetEffectiveContextLength(ctxLen int) {
+	if m == nil {
+		return
+	}
+	m.effectiveContextLen = ctxLen
+
+	// Propagate to ops backend if available
+	if opsWithContext, ok := m.ops.(interface{ SetEffectiveContextLength(int) }); ok {
+		opsWithContext.SetEffectiveContextLength(ctxLen)
+	}
+}
+
+// GetEffectiveContextLength returns the constrained context length for KV cache allocation.
+// Returns 0 if no constraint is set (use model max).
+func (m *Instance) GetEffectiveContextLength() int {
+	if m == nil {
+		return 0
+	}
+	return m.effectiveContextLen
 }

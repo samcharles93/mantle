@@ -13,6 +13,14 @@ type InferenceService struct {
 	provider               EngineProvider
 	defaultReasoningFormat string
 	defaultReasoningBudget int
+
+	defaultTemperature *float64
+	defaultTopP        *float64
+	defaultTopK        *int
+	defaultRepeat      *float64
+	defaultMaxContext  *int64
+	defaultSteps       *int64
+	defaultSeed        *int64
 }
 
 func NewInferenceService(provider EngineProvider) *InferenceService {
@@ -20,6 +28,30 @@ func NewInferenceService(provider EngineProvider) *InferenceService {
 		provider:               provider,
 		defaultReasoningFormat: "auto",
 		defaultReasoningBudget: -1,
+	}
+}
+
+func (s *InferenceService) SetSamplingDefaults(temp *float64, topP *float64, topK *int, repeatPenalty *float64, maxContext *int64, steps *int64, seed *int64) {
+	if temp != nil {
+		s.defaultTemperature = temp
+	}
+	if topP != nil {
+		s.defaultTopP = topP
+	}
+	if topK != nil {
+		s.defaultTopK = topK
+	}
+	if repeatPenalty != nil {
+		s.defaultRepeat = repeatPenalty
+	}
+	if maxContext != nil {
+		s.defaultMaxContext = maxContext
+	}
+	if steps != nil {
+		s.defaultSteps = steps
+	}
+	if seed != nil {
+		s.defaultSeed = seed
 	}
 }
 
@@ -86,7 +118,8 @@ func (s *InferenceService) CreateResponse(ctx context.Context, req *ResponsesReq
 	}
 
 	err = s.provider.WithEngine(ctx, req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
-		reqOpts := toInferenceRequest(req, msgs, defaults, s.defaultReasoningFormat, s.defaultReasoningBudget)
+		reqOpts := toInferenceRequest(req, msgs, defaults, s.defaultReasoningFormat, s.defaultReasoningBudget,
+			s.defaultTemperature, s.defaultTopP, s.defaultTopK, s.defaultRepeat, s.defaultMaxContext, s.defaultSteps, s.defaultSeed)
 		result, genErr := engine.Generate(ctx, &reqOpts, func(tok string) {
 			if stream != nil {
 				_ = stream.EmitToken(tok)
@@ -145,7 +178,8 @@ var timeNow = func() time.Time {
 	return time.Now()
 }
 
-func toInferenceRequest(req *ResponsesRequest, msgs []tokenizer.Message, defaults inference.GenDefaults, defaultReasoningFormat string, defaultReasoningBudget int) inference.Request {
+func toInferenceRequest(req *ResponsesRequest, msgs []tokenizer.Message, defaults inference.GenDefaults, defaultReasoningFormat string, defaultReasoningBudget int,
+	srvDefaultTemp *float64, srvDefaultTopP *float64, srvDefaultTopK *int, srvDefaultRepeat *float64, srvDefaultMaxContext *int64, srvDefaultSteps *int64, srvDefaultSeed *int64) inference.Request {
 	var opts inference.RequestOptions
 	opts.Messages = msgs
 	opts.Tools = toolsToAny(req.Tools)
@@ -156,15 +190,46 @@ func toInferenceRequest(req *ResponsesRequest, msgs []tokenizer.Message, default
 	opts.ReasoningFormat = &defaultReasoningFormat
 	opts.ReasoningBudget = &defaultReasoningBudget
 
+	// Apply request values, falling back to service config defaults
 	if req.MaxOutputTokens != nil {
 		steps := int(*req.MaxOutputTokens)
+		opts.Steps = &steps
+	} else if srvDefaultSteps != nil {
+		steps := int(*srvDefaultSteps)
 		opts.Steps = &steps
 	}
 	if req.Temperature != nil {
 		opts.Temperature = req.Temperature
+	} else if srvDefaultTemp != nil {
+		opts.Temperature = srvDefaultTemp
 	}
 	if req.TopP != nil {
 		opts.TopP = req.TopP
+	} else if srvDefaultTopP != nil {
+		opts.TopP = srvDefaultTopP
+	}
+	if req.TopK != nil {
+		opts.TopK = req.TopK
+	} else if srvDefaultTopK != nil {
+		opts.TopK = srvDefaultTopK
+	}
+	if req.MaxContext != nil {
+		opts.MaxContext = req.MaxContext
+	} else if srvDefaultMaxContext != nil {
+		opts.MaxContext = srvDefaultMaxContext
+	}
+	if req.RepeatPenalty != nil {
+		opts.RepeatPenalty = req.RepeatPenalty
+	} else if srvDefaultRepeat != nil {
+		opts.RepeatPenalty = srvDefaultRepeat
+	}
+
+	// Apply service defaults for parameters not in Responses API request schema
+	if srvDefaultRepeat != nil {
+		opts.RepeatPenalty = srvDefaultRepeat
+	}
+	if srvDefaultSeed != nil {
+		opts.Seed = srvDefaultSeed
 	}
 	if req.TopLogprobs != nil {
 		_ = req.TopLogprobs

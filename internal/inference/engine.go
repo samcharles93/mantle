@@ -72,6 +72,18 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 		g.ContextTokens = g.ContextTokens[:0]
 	}
 
+	// Set effective context length for dynamic KV cache bounding.
+	// This prevents allocating cache for the model's full max context window
+	// when we only need space for prompt + requested generation steps.
+	effectiveCtx := len(allTokens) + steps
+	if steps <= 0 {
+		// If steps is infinite (-1) or zero, use a reasonable default upper bound
+		effectiveCtx = len(allTokens) + 1_000_000
+	}
+	if setter, ok := g.Model.(interface{ SetEffectiveContextLength(int) }); ok {
+		setter.SetEffectiveContextLength(effectiveCtx)
+	}
+
 	newInTokens := allTokens[len(g.ContextTokens):]
 
 	var logitsVec []float32

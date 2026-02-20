@@ -38,6 +38,9 @@ type Ops struct {
 	quantGraphs    map[quantGraphKey]native.GraphExec // Cached CUDA Graph executables for quant kernels
 	ffnQuantGraphs map[ffnQuantGraphKey]native.GraphExec
 
+	// Dynamic KV cache bounding: effective context length for allocation (0 = use layer max)
+	effectiveContextLen int
+
 	xHost native.HostBuffer
 	yHost native.HostBuffer
 	xDev  native.DeviceBuffer
@@ -218,6 +221,21 @@ func (o *Ops) ConsumeFastPathError() error {
 	err := o.fastPathErr
 	o.fastPathErr = nil
 	return err
+}
+
+// SetEffectiveContextLength constrains KV cache allocation to this length.
+// Set to 0 to use the layer's default cache length (model max context).
+func (o *Ops) SetEffectiveContextLength(len int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.effectiveContextLen = len
+}
+
+// GetEffectiveContextLength returns the current effective context constraint.
+func (o *Ops) GetEffectiveContextLength() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.effectiveContextLen
 }
 
 // FlushBlockResult flushes a pending device-resident block output to host.
@@ -2435,11 +2453,17 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []fl
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	cache, err := o.ensureAttnCache(layer, kvStride, cacheLen)
+	// Apply effective context constraint if set (dynamic KV cache bounding)
+	actualCacheLen := cacheLen
+	if o.effectiveContextLen > 0 && actualCacheLen > o.effectiveContextLen {
+		actualCacheLen = o.effectiveContextLen
+	}
+
+	cache, err := o.ensureAttnCache(layer, kvStride, actualCacheLen)
 	if err != nil {
 		return false
 	}
-	if cache.kvStride != kvStride || cache.cacheLen != cacheLen {
+	if cache.kvStride != kvStride || cache.cacheLen != actualCacheLen {
 		return false
 	}
 
@@ -2540,7 +2564,7 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []fl
 			headDim,
 			nHead,
 			kvHeads,
-			cacheLen,
+			actualCacheLen,
 			scale,
 			softcap,
 			o.stream,
@@ -2548,7 +2572,7 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []fl
 			return false
 		}
 	} else {
-		if err := native.AttentionInnerF16CacheF32(o.xDev, cache.kF16, cache.vF16, o.yDev, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen, scale, softcap, o.stream); err != nil {
+		if err := native.AttentionInnerF16CacheF32(o.xDev, cache.kF16, cache.vF16, o.yDev, pos, start, kvStride, headDim, nHead, kvHeads, actualCacheLen, scale, softcap, o.stream); err != nil {
 			return false
 		}
 	}
@@ -2580,11 +2604,17 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *instance.Layer,
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	cache, err := o.ensureAttnCache(layer, kvStride, cacheLen)
+	// Apply effective context constraint if set (dynamic KV cache bounding)
+	actualCacheLen := cacheLen
+	if o.effectiveContextLen > 0 && actualCacheLen > o.effectiveContextLen {
+		actualCacheLen = o.effectiveContextLen
+	}
+
+	cache, err := o.ensureAttnCache(layer, kvStride, actualCacheLen)
 	if err != nil {
 		return false
 	}
-	if cache.kvStride != kvStride || cache.cacheLen != cacheLen {
+	if cache.kvStride != kvStride || cache.cacheLen != actualCacheLen {
 		return false
 	}
 
@@ -2690,7 +2720,7 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *instance.Layer,
 			headDim,
 			nHead,
 			kvHeads,
-			cacheLen,
+			actualCacheLen,
 			scale,
 			softcap,
 			o.stream,
@@ -2698,7 +2728,7 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *instance.Layer,
 			return false
 		}
 	} else {
-		if err := native.AttentionInnerF16CacheF32(o.xDev, cache.kF16, cache.vF16, o.yDev, pos, start, kvStride, headDim, nHead, kvHeads, cacheLen, scale, softcap, o.stream); err != nil {
+		if err := native.AttentionInnerF16CacheF32(o.xDev, cache.kF16, cache.vF16, o.yDev, pos, start, kvStride, headDim, nHead, kvHeads, actualCacheLen, scale, softcap, o.stream); err != nil {
 			return false
 		}
 	}

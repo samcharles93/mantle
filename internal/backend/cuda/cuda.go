@@ -231,6 +231,22 @@ func (r *cudaRuntime) UpdateRoPE() {
 	r.model.UpdateRoPE()
 }
 
+// SetEffectiveContextLength constrains KV cache allocation to this length.
+// Propagates to both the underlying model and the CUDA ops backend.
+func (r *cudaRuntime) SetEffectiveContextLength(ctxLen int) {
+	if r.model == nil {
+		return
+	}
+	// Try to set on model if it supports it
+	if setter, ok := r.model.(interface{ SetEffectiveContextLength(int) }); ok {
+		setter.SetEffectiveContextLength(ctxLen)
+	}
+	// Also set on ops if available
+	if r.ops != nil {
+		r.ops.SetEffectiveContextLength(ctxLen)
+	}
+}
+
 func (r *cudaRuntime) Close() error {
 	var errs []error
 	if r.ops != nil {
