@@ -69,9 +69,21 @@ func serveCmd() *cli.Command {
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			log := logger.FromContext(ctx)
 
-			// Apply config file defaults for flags not explicitly set
+			// Load config file for applying defaults later (after service creation)
 			cfg := LoadConfig()
-			applyServeConfig(cmd, cfg, &addr)
+			// Apply non-service config defaults (backend, models path, server address)
+			if cfg.ModelsDir != "" && !cmd.IsSet("models-path") {
+				modelsPath = cfg.ModelsDir
+			}
+			if cfg.Backend != "" && !cmd.IsSet("backend") {
+				backend = cfg.Backend
+			}
+			if cfg.MaxContext != nil && !cmd.IsSet("max-context") {
+				maxContext = *cfg.MaxContext
+			}
+			if cfg.ServerAddress != "" && !cmd.IsSet("addr") {
+				addr = cfg.ServerAddress
+			}
 			if reasoningBgt != -1 && reasoningBgt != 0 {
 				return cli.Exit("error: --reasoning-budget must be -1 or 0", 1)
 			}
@@ -107,6 +119,8 @@ func serveCmd() *cli.Command {
 			})
 			service := api.NewInferenceService(provider)
 			service.SetReasoningDefaults(reasoningFmt, int(reasoningBgt))
+			// Apply sampling parameter defaults from config file
+			applyServeConfig(cmd, cfg, service, &addr)
 			server := api.NewServer(store, service)
 			e := echo.New()
 			e.Use(middleware.RequestLogger())

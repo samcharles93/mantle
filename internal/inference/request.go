@@ -15,6 +15,7 @@ type RequestOptions struct {
 	MinP          *float64
 	RepeatPenalty *float64
 	RepeatLastN   *int
+	MaxContext    *int64
 
 	NoTemplate *bool
 	EchoPrompt *bool

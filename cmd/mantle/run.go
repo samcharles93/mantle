@@ -27,7 +27,7 @@ func runCmd() *cli.Command {
 		system        string
 		steps         int64
 		temp          float64
-		topK          int64
+		topK          int
 		topP          float64
 		repeatPenalty float64
 		repeatLastN   int64
@@ -101,7 +101,7 @@ func runCmd() *cli.Command {
 			Value:       0.8,
 			Destination: &temp,
 		},
-		&cli.Int64Flag{
+		&cli.IntFlag{
 			Name:        "top-k",
 			Category:    "Sampling",
 			Aliases:     []string{"top_k", "topk"},
@@ -535,7 +535,7 @@ func runCmd() *cli.Command {
 
 			previewReq := inference.ResolveRequest(baseOpts, genDefaults)
 			temp = previewReq.Temperature
-			topK = int64(previewReq.TopK)
+			topK = int(previewReq.TopK)
 			topP = previewReq.TopP
 			repeatPenalty = previewReq.RepeatPenalty
 
@@ -564,6 +564,7 @@ func runCmd() *cli.Command {
 				} else {
 					log.Info("rope config", "base", genConfig.RopeFreqBase, "scaling", "none")
 				}
+
 				if genConfig.RopeFreqBaseLocal != 0 && genConfig.RopeFreqBaseLocal != genConfig.RopeFreqBase {
 					log.Info("rope local config", "base", genConfig.RopeFreqBaseLocal)
 				}

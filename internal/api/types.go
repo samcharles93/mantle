@@ -31,6 +31,9 @@ type ResponsesRequest struct {
 	Tools                []ResponseTool     `json:"tools,omitempty"`
 	TopLogprobs          *int               `json:"top_logprobs,omitempty"`
 	TopP                 *float64           `json:"top_p,omitempty"`
+	TopK                 *int               `json:"top_k,omitempty"`
+	RepeatPenalty        *float64           `json:"repeat_penalty,omitempty"`
+	MaxContext           *int64             `json:"max_context,omitempty"`
 	Truncation           string             `json:"truncation,omitempty"`
 }
 

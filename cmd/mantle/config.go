@@ -6,6 +6,8 @@ import (
 
 	"github.com/urfave/cli/v3"
 	"gopkg.in/yaml.v3"
+
+	"github.com/samcharles93/mantle/internal/api"
 )
 
 // Config represents the mantle configuration file (~/.config/mantle/config.yaml).
@@ -15,7 +17,7 @@ type Config struct {
 
 	// Sampling defaults
 	Temperature   *float64 `yaml:"temperature"`
-	TopK          *int64   `yaml:"top_k"`
+	TopK          *int     `yaml:"top_k"`
 	TopP          *float64 `yaml:"top_p"`
 	MinP          *float64 `yaml:"min_p"`
 	RepeatPenalty *float64 `yaml:"repeat_penalty"`
@@ -46,7 +48,7 @@ func configPath() string {
 // applyRunConfig applies config file defaults to run command variables
 // when the corresponding CLI flag was not explicitly set.
 func applyRunConfig(c *cli.Command, cfg Config,
-	modelsPath *string, temp *float64, topK *int64, topP *float64,
+	modelsPath *string, temp *float64, topK *int, topP *float64,
 	repeatPenalty *float64, steps *int64, seed *int64, streamMode *string,
 ) {
 	if cfg.ModelsDir != "" && !c.IsSet("models-path") {
@@ -82,18 +84,24 @@ func applyRunConfig(c *cli.Command, cfg Config,
 }
 
 // applyServeConfig applies config file defaults to serve command variables.
-func applyServeConfig(c *cli.Command, cfg Config, addr *string) {
+func applyServeConfig(c *cli.Command, cfg Config, service *api.InferenceService, addr *string) {
 	if cfg.ModelsDir != "" && !c.IsSet("models-path") {
 		modelsPath = cfg.ModelsDir
 	}
 	if cfg.Backend != "" && !c.IsSet("backend") {
 		backend = cfg.Backend
 	}
+
 	if cfg.MaxContext != nil && !c.IsSet("max-context") {
 		maxContext = *cfg.MaxContext
 	}
 	if cfg.ServerAddress != "" && !c.IsSet("addr") {
 		*addr = cfg.ServerAddress
+	}
+
+	// Apply sampling parameter defaults to service if available
+	if service != nil {
+		service.SetSamplingDefaults(cfg.Temperature, cfg.TopP, cfg.TopK, cfg.RepeatPenalty, cfg.MaxContext, cfg.Steps, cfg.Seed)
 	}
 }
 
