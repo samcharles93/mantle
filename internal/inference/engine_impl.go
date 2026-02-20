@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/samcharles93/mantle/internal/backend/simd"
+	core "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/logits"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/reasoning"
@@ -15,7 +15,7 @@ import (
 
 type EngineImpl struct {
 	mcfFile          *mcfstore.File
-	model            simd.Model
+	model            core.Model
 	tokenizer        tokenizer.Tokenizer
 	tokenizerConfig  tokenizer.TokenizerConfig
 	arch             string

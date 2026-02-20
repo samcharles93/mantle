@@ -7,6 +7,7 @@ import (
 
 	"simd/archsimd"
 
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
@@ -27,12 +28,7 @@ type quantLayout struct {
 	dataBytes int
 }
 
-type QuantVec struct {
-	q      []int8
-	q16    []int16
-	scales []float32
-	Blocks int
-}
+type QuantVec = instance.QuantVec
 
 type quantDecodeScratch struct {
 	qbuf   []int8
@@ -54,9 +50,9 @@ var quantDecodeScratchPool = sync.Pool{
 func getQuantVec(blocks int) *QuantVec {
 	qx := quantVecPool.Get().(*QuantVec)
 	qx.Blocks = blocks
-	qx.q = ensureInt8Slice(qx.q, blocks*32)
-	qx.q16 = ensureInt16Slice(qx.q16, blocks*32)
-	qx.scales = ensureFloat32Slice(qx.scales, blocks)
+	qx.Q = ensureInt8Slice(qx.Q, blocks*32)
+	qx.Q16 = ensureInt16Slice(qx.Q16, blocks*32)
+	qx.Scales = ensureFloat32Slice(qx.Scales, blocks)
 	return qx
 }
 
@@ -230,7 +226,7 @@ func quantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (quantLay
 }
 
 func matVecRangeQuantWithWorker(dst []float32, w *Mat, x []float32, rs, re int, qx *QuantVec, worker *matVecWorker) bool {
-	if w.Quant != nil && w.Quant.validFor(w) {
+	if w.Quant != nil && w.Quant.ValidFor(w) {
 		matVecRangeQuantCached(dst, w, x, rs, re, qx)
 		return true
 	}
@@ -261,7 +257,7 @@ func matVecRangeQuantWithWorker(dst []float32, w *Mat, x []float32, rs, re int, 
 func matVecRangeQuantCached(dst []float32, w *Mat, x []float32, rs, re int, qx *QuantVec) {
 	qc := w.Quant
 	blocksPerRow := qc.BlocksPerRow
-	useInt8 := qx != nil && len(qx.q) >= blocksPerRow*32 && len(qx.q16) >= blocksPerRow*32 && len(qx.scales) >= blocksPerRow
+	useInt8 := qx != nil && len(qx.Q) >= blocksPerRow*32 && len(qx.Q16) >= blocksPerRow*32 && len(qx.Scales) >= blocksPerRow
 
 	for r := rs; r < re; r++ {
 		blockBase := r * blocksPerRow
@@ -286,11 +282,11 @@ func matVecRangeQuantCached(dst []float32, w *Mat, x []float32, rs, re int, qx *
 			off := b * 32
 			qBlock := qRow[off : off+32]
 			if useInt8 {
-				xScale := qx.scales[b]
+				xScale := qx.Scales[b]
 				if xScale == 0 {
 					continue
 				}
-				xBlock := qx.q16[off : off+32]
+				xBlock := qx.Q16[off : off+32]
 				dot := dotInt8Int16(qBlock, xBlock, 32)
 				sum += float32(dot) * (scale * xScale)
 			} else {
@@ -307,7 +303,7 @@ func matVecRangeQWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 		panic(err)
 	}
 
-	useInt8 := qx != nil && len(qx.q) >= layout.blocksPerRow*32 && len(qx.q16) >= layout.blocksPerRow*32 && len(qx.scales) >= layout.blocksPerRow
+	useInt8 := qx != nil && len(qx.Q) >= layout.blocksPerRow*32 && len(qx.Q16) >= layout.blocksPerRow*32 && len(qx.Scales) >= layout.blocksPerRow
 
 	scalesRaw := w.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
 	data := w.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
@@ -381,11 +377,11 @@ func matVecRangeQWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 				}
 				off := (rowIdx*layout.blocksPerRow + b) * 32
 				if useInt8 {
-					xScale := qx.scales[b]
+					xScale := qx.Scales[b]
 					if xScale == 0 {
 						continue
 					}
-					xBlock := qx.q16[b*32 : b*32+32]
+					xBlock := qx.Q16[b*32 : b*32+32]
 					dot := dotInt8Int16(qbuf[off:off+32], xBlock, 32)
 					sum += float32(dot) * (scale * xScale)
 				} else {
@@ -403,7 +399,7 @@ func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 		panic(err)
 	}
 
-	useInt8 := qx != nil && len(qx.q) >= layout.blocksPerRow*32 && len(qx.q16) >= layout.blocksPerRow*32 && len(qx.scales) >= layout.blocksPerRow
+	useInt8 := qx != nil && len(qx.Q) >= layout.blocksPerRow*32 && len(qx.Q16) >= layout.blocksPerRow*32 && len(qx.Scales) >= layout.blocksPerRow
 
 	superRaw := w.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
 	subRaw := w.Raw[layout.subScaleOff : layout.subScaleOff+layout.subScaleCount]
@@ -489,11 +485,11 @@ func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 				}
 				off := (rowIdx*layout.blocksPerRow + b) * 32
 				if useInt8 {
-					xScale := qx.scales[b]
+					xScale := qx.Scales[b]
 					if xScale == 0 {
 						continue
 					}
-					xBlock := qx.q16[b*32 : b*32+32]
+					xBlock := qx.Q16[b*32 : b*32+32]
 					dot := dotInt8Int16(qbuf[off:off+32], xBlock, 32)
 					sum += float32(dot) * (scale * xScale)
 				} else {
@@ -503,86 +499,6 @@ func matVecRangeKWithWorker(dst []float32, w *Mat, x []float32, rs, re, bits int
 			dst[r] = sum
 		}
 	}
-}
-
-func rowToQuant(dst []float32, m *Mat, row int) error {
-	layout, err := quantLayoutForMat(m.R, m.C, m.DType, len(m.Raw))
-	if err != nil {
-		return err
-	}
-	if row < 0 || row >= m.R {
-		return errors.New("row out of range")
-	}
-
-	if layout.family == 'q' {
-		scalesRaw := m.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
-		data := m.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
-		var qbuf [32]int8
-
-		blockBase := row * layout.blocksPerRow
-		for b := 0; b < layout.blocksPerRow; b++ {
-			col := b * 32
-			n := m.C - col
-			if n <= 0 {
-				break
-			}
-			if n > 32 {
-				n = 32
-			}
-			blockIdx := blockBase + b
-			scale := scaleAtRawLE(scalesRaw, blockIdx)
-			dataOff := blockIdx * layout.blockDataBytes
-			block := data[dataOff : dataOff+layout.blockDataBytes]
-			if scale == 0 {
-				for i := 0; i < n; i++ {
-					dst[col+i] = 0
-				}
-				continue
-			}
-			decodeBlock(&qbuf, block, layout.bits)
-			for i := 0; i < n; i++ {
-				dst[col+i] = float32(qbuf[i]) * scale
-			}
-		}
-		return nil
-	}
-
-	superRaw := m.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
-	subRaw := m.Raw[layout.subScaleOff : layout.subScaleOff+layout.subScaleCount]
-	data := m.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
-	var qbuf [32]int8
-
-	blockBase := row * layout.blocksPerRow
-	superBase := row * layout.superBlocksPerRow
-	for b := 0; b < layout.blocksPerRow; b++ {
-		col := b * 32
-		n := m.C - col
-		if n <= 0 {
-			break
-		}
-		if n > 32 {
-			n = 32
-		}
-		blockIdx := blockBase + b
-		superIdx := superBase + (b / 8)
-		superScale := scaleAtRawLE(superRaw, superIdx)
-		u6 := subRaw[blockIdx] & 0x3F
-		if superScale == 0 || u6 == 0 {
-			for i := 0; i < n; i++ {
-				dst[col+i] = 0
-			}
-			continue
-		}
-		scale := superScale * (float32(u6) / 32.0)
-
-		dataOff := blockIdx * layout.blockDataBytes
-		block := data[dataOff : dataOff+layout.blockDataBytes]
-		decodeBlock(&qbuf, block, layout.bits)
-		for i := 0; i < n; i++ {
-			dst[col+i] = float32(qbuf[i]) * scale
-		}
-	}
-	return nil
 }
 
 func scaleAtRawLE(raw []byte, idx int) float32 {

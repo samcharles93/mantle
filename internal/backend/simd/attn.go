@@ -4,10 +4,12 @@ import (
 	"math"
 
 	"simd/archsimd"
+
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 )
 
 type attentionQKVFastPath interface {
-	MatVecQKV(q, k, v []float32, wq, wk, wv *Mat, x []float32) bool
+	MatVecQKV(q, k, v []float32, wq, wk, wv *instance.Mat, x []float32) bool
 }
 
 type attentionInnerFastPath interface {
@@ -27,7 +29,7 @@ type flashAttentionMultiHeadFastPath interface {
 }
 
 type deviceMatVecFastPath interface {
-	DeviceMatVec(dst []float32, w *Mat, x []float32) bool
+	DeviceMatVec(dst []float32, w *instance.Mat, x []float32) bool
 }
 
 type incrementalAttentionFastPath interface {
@@ -77,13 +79,13 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		if d, ok := ops.(deviceMatVecFastPath); ok {
 			dm = d
 		}
-		ensureQX := func(w *Mat) {
+		ensureQX := func(w *instance.Mat) {
 			syncOnce()
 			if qx == nil && CanUseQuantVec(w) {
 				qx = PrepareQuantVec(x)
 			}
 		}
-		project := func(dst []float32, w *Mat) {
+		project := func(dst []float32, w *instance.Mat) {
 			if dm != nil && dm.DeviceMatVec(dst, w, x) {
 				return
 			}
@@ -287,33 +289,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			Ops:       ops,
 		}
 
-		pool := m.GetAttnPool()
-		workers := pool.Size
-		if workers <= 1 {
-			RunAttnHeads(&ctx, m.Scratch.Scores, 0, nHead)
-		} else {
-			chunk := (nHead + workers - 1) / workers
-			done := <-pool.DoneSlots
-			activeWorkers := 0
-			for i := range workers {
-				rs := i * chunk
-				re := min(rs+chunk, nHead)
-				if rs >= re {
-					break
-				}
-				activeWorkers++
-				pool.Tasks <- AttnTask{
-					Ctx:  &ctx,
-					Rs:   rs,
-					Re:   re,
-					Done: done,
-				}
-			}
-			for i := 0; i < activeWorkers; i++ {
-				<-done
-			}
-			pool.DoneSlots <- done
-		}
+		RunAttnHeads(&ctx, m.Scratch.Scores, 0, nHead)
 	}
 
 	if layer.AttnGate != nil {

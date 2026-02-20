@@ -2,5 +2,4 @@ package simd
 
 import core "github.com/samcharles93/mantle/internal/backend/core"
 
-type Model = core.Model
-type Runtime = core.Runtime
+type LoadModelOptions = core.LoadModelOptions

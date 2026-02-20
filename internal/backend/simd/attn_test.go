@@ -3,6 +3,8 @@ package simd
 import (
 	"math"
 	"testing"
+
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 )
 
 func TestRunAttnHeadsMatchesReferenceFull(t *testing.T) {
@@ -311,7 +313,7 @@ type attentionFastPathOps struct {
 	innerProjectionFastPathFill float32
 }
 
-func (o *attentionFastPathOps) MatVecQKV(q, k, v []float32, _ *Mat, _ *Mat, _ *Mat, _ []float32) bool {
+func (o *attentionFastPathOps) MatVecQKV(q, k, v []float32, _ *instance.Mat, _ *instance.Mat, _ *instance.Mat, _ []float32) bool {
 	if !o.useQKVFastPath {
 		return false
 	}
@@ -359,7 +361,7 @@ func (o *attentionFastPathOps) StoreKV(layerIndex, pos, kvStride int, kDst, vDst
 }
 
 func newAttentionFastPathFixture(ops Ops) (*Instance, *Layer) {
-	wo := NewMatFromData(2, 2, []float32{
+	wo := instance.NewMatFromData(2, 2, []float32{
 		1, 0,
 		0, 1,
 	})

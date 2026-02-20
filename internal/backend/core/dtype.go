@@ -1,4 +1,4 @@
-package simd
+package core
 
 import (
 	"math"
@@ -59,8 +59,18 @@ func rawUint16LE(raw []byte) ([]uint16, bool) {
 	return unsafe.Slice((*uint16)(unsafe.Pointer(&raw[0])), len(raw)/2), true
 }
 
+// RawUint16LE provides a fast unsafe view over little-endian uint16 values.
+func RawUint16LE(raw []byte) ([]uint16, bool) {
+	return rawUint16LE(raw)
+}
+
 func bf16ToF32(u uint16) float32 {
 	return math.Float32frombits(uint32(u) << 16)
+}
+
+// BF16ToFloat32 converts a bf16 value to float32.
+func BF16ToFloat32(u uint16) float32 {
+	return bf16ToF32(u)
 }
 
 func bf16ToF32Table(u uint16) float32 {
@@ -92,6 +102,11 @@ func fp16ToF32(h uint16) float32 {
 		f = (sign << 31) | (e << 23) | (frac << 13)
 	}
 	return math.Float32frombits(f)
+}
+
+// FP16ToFloat32 converts an fp16 value to float32.
+func FP16ToFloat32(h uint16) float32 {
+	return fp16ToF32(h)
 }
 
 func fp16ToF32Table(u uint16) float32 {

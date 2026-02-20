@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/samcharles93/mantle/internal/backend/simd"
+	core "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 )
 
@@ -16,7 +16,7 @@ const (
 
 type Backend interface {
 	Name() string
-	LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int, opts simd.LoadModelOptions) (simd.Runtime, error)
+	LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int, opts core.LoadModelOptions) (core.Runtime, error)
 }
 
 func New(name string) (Backend, error) {

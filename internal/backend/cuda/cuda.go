@@ -9,8 +9,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/samcharles93/mantle/internal/backend/bootstrap"
+	"github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/backend/cuda/native"
-	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 )
 
@@ -34,7 +35,7 @@ func (b *Backend) Name() string {
 	return "cuda"
 }
 
-func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int, opts simd.LoadModelOptions) (simd.Runtime, error) {
+func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int, opts core.LoadModelOptions) (core.Runtime, error) {
 	native.ResetManagedFallbackFlag()
 	native.ResetPerfCounters()
 	stream, err := native.NewStream()
@@ -47,11 +48,7 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 		return nil, fmt.Errorf("cublas init failed: %w", err)
 	}
 
-	restoreQuantCache := simd.SetQuantCacheBuildEnabledForLoad(false)
-	m, err := func() (*simd.Instance, error) {
-		defer restoreQuantCache()
-		return simd.LoadModelMCF(mcfFile, cfgBytes, maxContext, opts)
-	}()
+	runtimeModel, coreInst, err := bootstrap.LoadSIMDRuntime(mcfFile, cfgBytes, maxContext, opts, true)
 	if err != nil {
 		_ = blas.Destroy()
 		_ = stream.Destroy()
@@ -64,9 +61,16 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 	} else {
 		ops.gpuLayers = opts.GpuLayers
 	}
-	m.SetOps(ops)
+	binder, ok := runtimeModel.(interface{ SetOps(core.Ops) })
+	if !ok {
+		_ = ops.Close()
+		_ = blas.Destroy()
+		_ = stream.Destroy()
+		return nil, fmt.Errorf("loaded runtime does not support ops binding")
+	}
+	binder.SetOps(ops)
 	mode := currentCUDAWeightMode()
-	estimatedWeights := estimateModelWeightBytes(m, mode)
+	estimatedWeights := estimateModelWeightBytes(coreInst, mode)
 	if os.Getenv("MANTLE_CUDA_TRACE") != "" {
 		graphEnv, hasGraphEnv := os.LookupEnv("MANTLE_CUDA_GRAPHS")
 		graphEnvVal := "<default>"
@@ -104,7 +108,7 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 		}
 	}
 	preloadStart := time.Now()
-	if err := ops.PreloadModelWeights(m); err != nil {
+	if err := ops.PreloadModelWeights(coreInst); err != nil {
 		_ = ops.Close()
 		_ = blas.Destroy()
 		_ = stream.Destroy()
@@ -124,7 +128,7 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 	native.ResetPerfCounters()
 
 	return &cudaRuntime{
-		model:              m,
+		model:              runtimeModel,
 		ops:                ops,
 		stream:             stream,
 		blas:               blas,
@@ -134,7 +138,7 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 }
 
 type cudaRuntime struct {
-	model              *simd.Instance
+	model              core.Runtime
 	ops                *Ops
 	stream             native.Stream
 	blas               native.BlasHandle
@@ -168,12 +172,18 @@ func (r *cudaRuntime) ForwardTokenGreedy(id int) (next int, err error) {
 	if r.model == nil {
 		return 0, fmt.Errorf("cuda runtime is closed")
 	}
+	g, ok := r.model.(interface {
+		ForwardTokenGreedy(id int) (next int, err error)
+	})
+	if !ok {
+		return 0, fmt.Errorf("runtime does not support device greedy stepping")
+	}
 	defer func() {
 		if rec := recover(); rec != nil {
 			err = cudaExecutionError(rec)
 		}
 	}()
-	next, err = r.model.ForwardTokenGreedy(id)
+	next, err = g.ForwardTokenGreedy(id)
 	if err != nil {
 		return 0, err
 	}
@@ -213,7 +223,7 @@ func (r *cudaRuntime) Reset() {
 	r.model.Reset()
 }
 
-func (r *cudaRuntime) ModelConfig() *simd.ModelConfig {
+func (r *cudaRuntime) ModelConfig() *core.ModelConfig {
 	return r.model.ModelConfig()
 }
 

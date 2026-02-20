@@ -5,6 +5,7 @@ import (
 	"simd/archsimd"
 	"sync"
 
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
@@ -162,11 +163,11 @@ func matVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec) {
 	useQuant := w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType) && cpu.HasAVX2
 	if useQuant {
 		blocks := (w.C + 31) / 32
-		if qx != nil && qx.Blocks == blocks && len(qx.q) >= blocks*32 && len(qx.q16) >= blocks*32 && len(qx.scales) >= blocks {
+		if qx != nil && qx.Blocks == blocks && len(qx.Q) >= blocks*32 && len(qx.Q16) >= blocks*32 && len(qx.Scales) >= blocks {
 			localQx = qx
 		} else {
 			localQx = getQuantVec(blocks)
-			quantizeVecBlocksInto(x, blocks, localQx.q, localQx.q16, localQx.scales)
+			quantizeVecBlocksInto(x, blocks, localQx.Q, localQx.Q16, localQx.Scales)
 			defer putQuantVec(localQx)
 		}
 	}
@@ -418,7 +419,7 @@ func matVecRangeBF16(dst []float32, w *Mat, x []float32, rs, re int) {
 // matVecRangeBF16Scalar computes matvec for BF16 using scalar operations.
 func matVecRangeBF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 	raw := w.Raw
-	if u16raw, ok := rawUint16LE(raw); ok {
+	if u16raw, ok := instance.RawUint16LE(raw); ok {
 		for i := rs; i < re; i++ {
 			rowBase := i * w.Stride
 			row := u16raw[rowBase : rowBase+w.Stride]
@@ -488,7 +489,7 @@ func matVecRangeBF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 // Uses a single accumulator to minimize register pressure.
 func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 	raw := w.Raw
-	if u16raw, ok := rawUint16LE(raw); ok {
+	if u16raw, ok := instance.RawUint16LE(raw); ok {
 		c := w.C
 		i := rs
 
@@ -713,7 +714,7 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 // Uses multiple accumulators to better utilize FMA units.
 func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 	raw := w.Raw
-	if u16raw, ok := rawUint16LE(raw); ok {
+	if u16raw, ok := instance.RawUint16LE(raw); ok {
 		c := w.C
 		i := rs
 
@@ -980,7 +981,7 @@ func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 // matVecRangeF16Scalar computes matvec for F16 using scalar operations.
 func matVecRangeF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 	raw := w.Raw
-	if u16raw, ok := rawUint16LE(raw); ok {
+	if u16raw, ok := instance.RawUint16LE(raw); ok {
 		for i := rs; i < re; i++ {
 			rowBase := i * w.Stride
 			row := u16raw[rowBase : rowBase+w.Stride]

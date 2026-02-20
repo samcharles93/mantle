@@ -1,4 +1,4 @@
-package simd
+package core
 
 import (
 	"github.com/samcharles93/mantle/pkg/mcf"
@@ -129,7 +129,7 @@ func (m *Mat) RowTo(dst []float32, i int) {
 		off := i * rowBytes
 		for j := 0; j < m.C; j++ {
 			u := u16le(m.Raw, off+j*2)
-			dst[j] = bf16ToF32(u)
+			dst[j] = bf16ToF32Table(u)
 		}
 	case mcf.DTypeF16:
 		elemSize, ok := dtypeElemSize(m.DType)
@@ -140,7 +140,7 @@ func (m *Mat) RowTo(dst []float32, i int) {
 		off := i * rowBytes
 		for j := 0; j < m.C; j++ {
 			u := u16le(m.Raw, off+j*2)
-			dst[j] = fp16ToF32(u)
+			dst[j] = fp16ToF32Table(u)
 		}
 	case mcf.DTypeQ8, mcf.DTypeQ4, mcf.DTypeK6, mcf.DTypeK4, mcf.DTypeK3, mcf.DTypeK2:
 		if err := rowToQuant(dst, m, i); err != nil {

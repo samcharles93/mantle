@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/samcharles93/mantle/internal/backend"
+	"github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/hostcaps"
 	"github.com/samcharles93/mantle/internal/logger"
@@ -23,13 +24,13 @@ type Loader struct {
 	HFConfigPath        string
 	Backend             string
 	DisableSWA          bool
-	LoadOptions         simd.LoadModelOptions
+	LoadOptions         core.LoadModelOptions
 	TilingConfig        simd.TilingConfig
 }
 
 type LoadResult struct {
 	Engine             Engine
-	Runtime            simd.Runtime
+	Runtime            core.Runtime
 	Tokenizer          tokenizer.Tokenizer
 	TokenizerConfig    tokenizer.TokenizerConfig
 	HFConfigJSON       []byte
@@ -58,7 +59,11 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	}
 	// Apply tiling configuration
 	if l.TilingConfig.TileM != 0 || l.TilingConfig.TileN != 0 || l.TilingConfig.TileK != 0 {
-		opts.TilingConfig = l.TilingConfig
+		opts.TilingConfig = core.TilingConfig{
+			TileM: l.TilingConfig.TileM,
+			TileN: l.TilingConfig.TileN,
+			TileK: l.TilingConfig.TileK,
+		}
 	}
 
 	if strings.TrimSpace(modelPath) == "" {

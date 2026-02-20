@@ -7,19 +7,11 @@ import (
 	"math"
 	"strings"
 
-	"github.com/samcharles93/mantle/internal/hostcaps"
+	"github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
-
-type LoadModelOptions struct {
-	CacheTypeK   string
-	CacheTypeV   string
-	HostCaps     *hostcaps.Snapshot
-	TilingConfig TilingConfig
-	GpuLayers    int // -1 auto, 0 all layers on CPU, N first N layers on GPU
-}
 
 type tensorPayload struct {
 	DType mcf.TensorDType
@@ -261,9 +253,9 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		}
 	}
 
-	modelCfg := &ModelConfig{
+	modelCfg := &core.ModelConfig{
 		Arch: spec.Name,
-		Config: Config{
+		Config: core.Config{
 			BlockCount:             blockCount,
 			EmbeddingLength:        cfg.HiddenSize,
 			FFNLength:              ffnLength,
@@ -319,7 +311,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		}
 	}
 
-	layers := make([]Layer, blockCount)
+	layers := make([]core.Layer, blockCount)
 	for i := range blockCount {
 		layer := &layers[i]
 		layer.HeadKV = headKVArr[i]
@@ -443,7 +435,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			if kernelLen < 1 {
 				return nil, fmt.Errorf("invalid shortconv kernel length for layer %d", i)
 			}
-			layer.ShortConvState = ShortConvState{
+			layer.ShortConvState = core.ShortConvState{
 				Buf:       make([]float32, (kernelLen-1)*cfg.HiddenSize),
 				KernelLen: kernelLen,
 			}
@@ -553,17 +545,17 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 					cacheLen = layer.AttnWindow
 				}
 			}
-			cache := AttnCache{KvStride: kvStride, CacheLen: cacheLen}
+			cache := core.AttnCache{KvStride: kvStride, CacheLen: cacheLen}
 
 			// Key cache type — backing slices are lazily allocated via EnsurePos.
 			kt := modelCfg.Config.CacheTypeK
 			if kt == "" {
-				kt = CacheTypeF32
+				kt = core.CacheTypeF32
 			}
 			switch kt {
-			case CacheTypeF16:
+			case core.CacheTypeF16:
 				cache.K16 = make([]uint16, 0)
-			case CacheTypeQ8_0:
+			case core.CacheTypeQ8_0:
 				cache.KQ8 = make([]int8, 0)
 				cache.KQ8S = make([]float32, 0)
 			default:
@@ -573,12 +565,12 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			// Value cache type
 			vt := modelCfg.Config.CacheTypeV
 			if vt == "" {
-				vt = CacheTypeF32
+				vt = core.CacheTypeF32
 			}
 			switch vt {
-			case CacheTypeF16:
+			case core.CacheTypeF16:
 				cache.V16 = make([]uint16, 0)
-			case CacheTypeQ8_0:
+			case core.CacheTypeQ8_0:
 				cache.VQ8 = make([]int8, 0)
 				cache.VQ8S = make([]float32, 0)
 			default:
@@ -594,7 +586,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		muPScale = float32(math.Sqrt(float64(modelCfg.Config.EmbeddingLength)))
 	}
 
-	m := &Instance{
+	coreInst := &core.Instance{
 		Config:        modelCfg,
 		Embeddings:    emb,
 		OutputNorm:    outNorm,
@@ -608,10 +600,11 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		MaxHeadKV:     maxHeadKV,
 		MuPScale:      muPScale,
 		RopeLocalOnly: spec.RopeLocalOnly,
-		TilingConfig:  opts.TilingConfig,
+		TilingConfig:  core.TilingConfig(opts.TilingConfig),
 	}
-	m.setHostCapabilities(opts.HostCaps)
-	m.bindDefaultOps()
+	m := (*Instance)(coreInst)
+	m.SetHostCapabilities(opts.HostCaps)
+	m.BindDefaultOps()
 	initInstanceScratch(m)
 	updateInstanceRoPE(m)
 	adjustGemmaNorms(m, cfg)
@@ -652,7 +645,7 @@ func decodeTensorF32(p tensorPayload) ([]float32, error) {
 		out := make([]float32, n)
 		for i := range n {
 			u := binary.LittleEndian.Uint16(p.Raw[i*2:])
-			out[i] = bf16ToF32(u)
+			out[i] = core.BF16ToFloat32(u)
 		}
 		return out, nil
 	case mcf.DTypeF16:
@@ -662,7 +655,7 @@ func decodeTensorF32(p tensorPayload) ([]float32, error) {
 		out := make([]float32, n)
 		for i := range n {
 			u := binary.LittleEndian.Uint16(p.Raw[i*2:])
-			out[i] = fp16ToF32(u)
+			out[i] = core.FP16ToFloat32(u)
 		}
 		return out, nil
 	default:
@@ -690,7 +683,7 @@ func numElementsModel(shape []int) (int, error) {
 
 // bf16ToF32 and fp16ToF32 are defined in dtype.go.
 
-func loadMat(src tensorSource, name string) (*Mat, error) {
+func loadMat(src tensorSource, name string) (*core.Mat, error) {
 	payload, err := src.ReadTensor(name)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
@@ -713,10 +706,10 @@ func loadMat(src tensorSource, name string) (*Mat, error) {
 		if r*c != len(data) {
 			return nil, fmt.Errorf("%s: size mismatch", name)
 		}
-		m := NewMatFromData(r, c, data)
+		m := core.NewMatFromData(r, c, data)
 		return &m, nil
 	case mcf.DTypeBF16, mcf.DTypeF16:
-		m, err := NewMatFromRaw(r, c, payload.DType, payload.Raw)
+		m, err := core.NewMatFromRaw(r, c, payload.DType, payload.Raw)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
@@ -734,7 +727,7 @@ func loadMat(src tensorSource, name string) (*Mat, error) {
 			if uint64(len(payload.Raw)) != want {
 				return nil, fmt.Errorf("%s: quant payload size mismatch", name)
 			}
-			m := Mat{R: r, C: c, Stride: c, DType: payload.DType, Raw: payload.Raw}
+			m := core.Mat{R: r, C: c, Stride: c, DType: payload.DType, Raw: payload.Raw}
 			if quantCacheBuildEnabledForLoad() {
 				cache, err := BuildQuantCache(&m)
 				if err != nil {
@@ -751,7 +744,7 @@ func loadMat(src tensorSource, name string) (*Mat, error) {
 		if r*c != len(data) {
 			return nil, fmt.Errorf("%s: size mismatch", name)
 		}
-		m := NewMatFromData(r, c, data)
+		m := core.NewMatFromData(r, c, data)
 		return &m, nil
 	}
 }
@@ -767,7 +760,7 @@ func loadVec(src tensorSource, name string) ([]float32, error) {
 	return data, nil
 }
 
-func loadConvKernel(src tensorSource, name string) (*Mat, error) {
+func loadConvKernel(src tensorSource, name string) (*core.Mat, error) {
 	data, shape, err := readTensorF32(src, name)
 	if err != nil {
 		return nil, err
@@ -784,10 +777,10 @@ func loadConvKernel(src tensorSource, name string) (*Mat, error) {
 	if out*k != len(data) {
 		return nil, fmt.Errorf("%s: size mismatch", name)
 	}
-	return &Mat{R: out, C: k, Stride: k, Data: data}, nil
+	return &core.Mat{R: out, C: k, Stride: k, Data: data}, nil
 }
 
-func loadMatCandidates(src tensorSource, candidates []string) (*Mat, string, error) {
+func loadMatCandidates(src tensorSource, candidates []string) (*core.Mat, string, error) {
 	for _, name := range candidates {
 		if name == "" {
 			continue
@@ -821,7 +814,7 @@ func loadVecCandidates(src tensorSource, candidates []string) ([]float32, string
 	return nil, "", nil
 }
 
-func loadMoELayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, layer int) (*MoELayer, error) {
+func loadMoELayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, layer int) (*core.MoELayer, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("layer %d: nil config for moe", layer)
 	}
@@ -910,7 +903,7 @@ func loadMoELayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, 
 		)
 	}
 
-	experts := make([]MoEExpert, numExperts)
+	experts := make([]core.MoEExpert, numExperts)
 	for expert := range numExperts {
 		up, err := loadMat(src, names.MoEExpertUp(layer, expert))
 		if err != nil {
@@ -942,7 +935,7 @@ func loadMoELayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, 
 				layer, expert, down.R, down.C, hidden, cfg.MoEIntermediateSize,
 			)
 		}
-		experts[expert] = MoEExpert{Up: up, Gate: gate, Down: down}
+		experts[expert] = core.MoEExpert{Up: up, Gate: gate, Down: down}
 	}
 
 	routeScale := float32(cfg.RouteScale)
@@ -950,10 +943,10 @@ func loadMoELayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, 
 		routeScale = 1
 	}
 
-	return &MoELayer{
+	return &core.MoELayer{
 		Router:     router,
 		ExpertBias: expertBias,
-		Shared: MoEShared{
+		Shared: core.MoEShared{
 			Up:           sharedUp,
 			Gate:         sharedGate,
 			Down:         sharedDown,
@@ -965,7 +958,7 @@ func loadMoELayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, 
 	}, nil
 }
 
-func loadMambaLayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, layer int, modelCfg *ModelConfig) (*MambaLayer, error) {
+func loadMambaLayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, layer int, modelCfg *core.ModelConfig) (*core.MambaLayer, error) {
 	if names.MambaInProj == nil || names.MambaOutProj == nil || names.MambaConv == nil || names.MambaALog == nil || names.MambaD == nil || names.MambaDTBias == nil {
 		return nil, nil
 	}
@@ -1105,7 +1098,7 @@ func loadMambaLayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames
 	convState := make([]float32, (kernelLen-1)*convChannels)
 	ssmState := make([]float32, headCount*headDim*dState)
 
-	return &MambaLayer{
+	return &core.MambaLayer{
 		InProj:       inProj,
 		OutProj:      outProj,
 		Conv:         conv,
@@ -1265,7 +1258,7 @@ func initInstanceScratch(m *Instance) {
 		m.Scratch.MambaY = make([]float32, inner)
 		m.Scratch.MambaOut = make([]float32, embd)
 	}
-	m.initAttnPool()
+	_ = m.GetAttnPool()
 }
 
 func updateInstanceRoPE(m *Instance) {

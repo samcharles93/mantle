@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 )
 
 // ForwardTokens processes multiple tokens in batch using GEMM for the projections.
@@ -33,7 +35,7 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 	}
 
 	// Get tiling configuration
-	tiling := m.TilingConfig
+	tiling := TilingConfig(m.TilingConfig)
 	if tiling.TileM == 0 {
 		tiling = DefaultTilingConfig()
 	}
@@ -45,7 +47,7 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 	kvHeads := m.Layers[0].HeadKV
 
 	// Build input matrix X: [seqLen x embd]
-	X := NewMat(seqLen, embd)
+	X := instance.NewMat(seqLen, embd)
 	for i, tok := range tokens {
 		if tok < 0 || tok >= m.Config.Config.VocabSize {
 			return nil, fmt.Errorf("token id out of range: %d", tok)
@@ -65,15 +67,15 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 	}
 
 	// Temporary matrices for GEMM
-	Q := NewMat(seqLen, nHead*headDim)
-	K := NewMat(seqLen, kvHeads*headDim)
-	V := NewMat(seqLen, kvHeads*headDim)
-	attnOut := NewMat(seqLen, embd)
-	ffnUp := NewMat(seqLen, m.Config.Config.FFNLength)
-	ffnGate := NewMat(seqLen, m.Config.Config.FFNLength)
-	ffnAct := NewMat(seqLen, m.Config.Config.FFNLength)
+	Q := instance.NewMat(seqLen, nHead*headDim)
+	K := instance.NewMat(seqLen, kvHeads*headDim)
+	V := instance.NewMat(seqLen, kvHeads*headDim)
+	attnOut := instance.NewMat(seqLen, embd)
+	ffnUp := instance.NewMat(seqLen, m.Config.Config.FFNLength)
+	ffnGate := instance.NewMat(seqLen, m.Config.Config.FFNLength)
+	ffnAct := instance.NewMat(seqLen, m.Config.Config.FFNLength)
 	// X_norm holds the normalized input for projections, preserving X for residual
-	X_norm := NewMat(seqLen, embd)
+	X_norm := instance.NewMat(seqLen, embd)
 
 	// Process through layers
 	for layerIdx := range m.Layers {
@@ -154,7 +156,7 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 		}
 
 		// Down projection: ffnOut = ffnAct @ FfnDown
-		ffnOut := NewMat(seqLen, embd)
+		ffnOut := instance.NewMat(seqLen, embd)
 		cfg = SelectGemmConfigWithTiling(seqLen, m.Config.Config.FFNLength, embd, tiling)
 		GemmPar(cfg, &ffnOut, &ffnAct, layer.FfnDown, 1.0, 0.0, 0)
 
@@ -176,7 +178,7 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 	}
 
 	// Output norm and projection to logits
-	logits := NewMat(seqLen, m.Config.Config.VocabSize)
+	logits := instance.NewMat(seqLen, m.Config.Config.VocabSize)
 	for i := range seqLen {
 		rowOff := i * X.Stride
 		RMSNorm(m.Scratch.Tmp, X.Data[rowOff:rowOff+embd], m.OutputNorm, m.RMSEpsilon)

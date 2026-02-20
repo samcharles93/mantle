@@ -1,9 +1,8 @@
-package simd
+package core
 
 import "math"
 
-// Float32ToFloat16 converts a float32 to a float16 (uint16)
-// This is a simplified implementation.
+// Float32ToFloat16 converts a float32 to a float16 (uint16).
 func Float32ToFloat16(f float32) uint16 {
 	bits := math.Float32bits(f)
 	sign := uint16((bits >> 31) & 0x1)
@@ -15,26 +14,20 @@ func Float32ToFloat16(f float32) uint16 {
 
 	switch exp {
 	case 0:
-		// Subnormal or zero
 		if mant == 0 {
 			return sign << 15
 		}
-		// Denormal float32 to... zero?
 		return sign << 15
 	case 0xFF:
-		// Inf or NaN
 		outExp = 0x1F
 		if mant != 0 {
-			outMant = 0x200 // Some non-zero mantissa
+			outMant = 0x200
 		}
 	default:
-		// Normalized
 		newExp := exp - 127 + 15
 		if newExp >= 31 {
-			// Overflow to Inf
 			outExp = 0x1F
 		} else if newExp <= 0 {
-			// Underflow to zero (simplification)
 			outExp = 0
 		} else {
 			outExp = uint16(newExp)
@@ -45,7 +38,7 @@ func Float32ToFloat16(f float32) uint16 {
 	return (sign << 15) | (outExp << 10) | outMant
 }
 
-// Float16ToFloat32 converts a float16 (uint16) to float32
+// Float16ToFloat32 converts a float16 (uint16) to float32.
 func Float16ToFloat32(h uint16) float32 {
 	sign := uint32((h >> 15) & 0x1)
 	exp := uint32((h >> 10) & 0x1F)
@@ -55,16 +48,13 @@ func Float16ToFloat32(h uint16) float32 {
 
 	switch exp {
 	case 0:
-		// Subnormal or zero -> zero
 		outBits = sign << 31
 	case 0x1F:
-		// Inf or NaN
 		outBits = (sign << 31) | 0x7F800000
 		if mant != 0 {
-			outBits |= (mant << 13) // Map NaN payload
+			outBits |= (mant << 13)
 		}
 	default:
-		// Normalized
 		newExp := exp + 127 - 15
 		newMant := mant << 13
 		outBits = (sign << 31) | (newExp << 23) | newMant

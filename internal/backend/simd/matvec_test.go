@@ -56,7 +56,7 @@ func BenchmarkMatVecPoolSIMD(b *testing.B) {
 	w := NewMat(r, c)
 	x := make([]float32, c)
 	dst := make([]float32, r)
-	
+
 	b.ResetTimer()
 	for b.Loop() {
 		matVecRangeF32SIMD(dst, &w, x, 0, r)
@@ -68,7 +68,7 @@ func BenchmarkMatVecPoolScalar(b *testing.B) {
 	w := NewMat(r, c)
 	x := make([]float32, c)
 	dst := make([]float32, r)
-	
+
 	b.ResetTimer()
 	for b.Loop() {
 		matVecRangeF32Scalar(dst, &w, x, 0, r)

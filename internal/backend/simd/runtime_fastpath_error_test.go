@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 )
 
 type failingFastPathOps struct {
@@ -24,7 +26,7 @@ func (o *failingFastPathOps) MatVec(dst []float32, w *Mat, x []float32) {
 	}
 }
 
-func (o *failingFastPathOps) MatVecWithQuant(dst []float32, w *Mat, x []float32, _ *QuantVec) {
+func (o *failingFastPathOps) MatVecWithQuant(dst []float32, w *instance.Mat, x []float32, _ *QuantVec) {
 	o.MatVec(dst, w, x)
 }
 
@@ -54,9 +56,11 @@ func (o *failingFastPathOps) DeviceRMSNorm(dst, src, _ []float32, _ float32) boo
 	return true
 }
 
-func (o *failingFastPathOps) DeviceMatVec(_ []float32, _ *Mat, _ []float32) bool { return false }
+func (o *failingFastPathOps) DeviceMatVec(_ []float32, _ *instance.Mat, _ []float32) bool {
+	return false
+}
 
-func (o *failingFastPathOps) DeviceMatVecNoCopy(_ *Mat, _ []float32) bool { return false }
+func (o *failingFastPathOps) DeviceMatVecNoCopy(_ *instance.Mat, _ []float32) bool { return false }
 
 func (o *failingFastPathOps) DeviceArgMaxLastResult() (idx int, ok bool) { return 0, false }
 
@@ -67,20 +71,20 @@ func (o *failingFastPathOps) ConsumeFastPathError() error {
 }
 
 func tinyRuntimeInstance(ops Ops) *Instance {
-	emb := NewMatFromData(3, 2, []float32{
+	emb := instance.NewMatFromData(3, 2, []float32{
 		1, 0,
 		0, 1,
 		1, 1,
 	})
-	out := NewMatFromData(3, 2, []float32{
+	out := instance.NewMatFromData(3, 2, []float32{
 		1, 0,
 		0, 1,
 		1, 1,
 	})
 
-	return &Instance{
-		Config: &ModelConfig{
-			Config: Config{
+	m := &Instance{
+		Config: &instance.ModelConfig{
+			Config: instance.Config{
 				VocabSize:        3,
 				EmbeddingLength:  2,
 				LMHeadMultiplier: 1,
@@ -91,14 +95,15 @@ func tinyRuntimeInstance(ops Ops) *Instance {
 		Output:     &out,
 		MaxContext: 16,
 		RMSEpsilon: 1e-5,
-		Scratch: ScratchBuffers{
+		Scratch: instance.ScratchBuffers{
 			X:      make([]float32, 2),
 			Tmp:    make([]float32, 2),
 			Tmp2:   make([]float32, 2),
 			Logits: make([]float32, 3),
 		},
-		ops: ops,
 	}
+	m.SetOps(ops)
+	return m
 }
 
 func TestForwardTokenFailsOnFastPathError(t *testing.T) {

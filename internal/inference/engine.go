@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/samcharles93/mantle/internal/backend/simd"
+	"github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/logits"
 )
@@ -30,7 +30,7 @@ type prefillForwarder interface {
 
 // Generator manages the state of a generation session
 type Generator struct {
-	Model     simd.Model
+	Model     core.Model
 	Sampler   *logits.Sampler
 	Tokenizer interface {
 		Decode([]int) (string, error)
@@ -252,7 +252,7 @@ afterPrompt:
 	return g.ContextTokens, stats, nil
 }
 
-func safeForwardToken(m simd.Model, id int) (logits []float32, err error) {
+func safeForwardToken(m core.Model, id int) (logits []float32, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			err = fmt.Errorf("panic in ForwardToken(%d): %v", id, rec)

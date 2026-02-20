@@ -1,4 +1,4 @@
-package simd
+package core
 
 import "github.com/samcharles93/mantle/internal/tokenizer"
 

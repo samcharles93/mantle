@@ -1,9 +1,11 @@
 package simd
 
+import instance "github.com/samcharles93/mantle/internal/backend/core"
+
 // Ops defines the matvec operations used by the runtime.
 type Ops interface {
-	MatVec(dst []float32, w *Mat, x []float32)
-	MatVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec)
+	MatVec(dst []float32, w *instance.Mat, x []float32)
+	MatVecWithQuant(dst []float32, w *instance.Mat, x []float32, qx *instance.QuantVec)
 	RMSNorm(dst, src, weight []float32, eps float32)
 	Softmax(x []float32)
 	ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32)
@@ -13,21 +15,21 @@ type Ops interface {
 // DefaultOps provides default CPU-based operations.
 type DefaultOps struct{}
 
-func (DefaultOps) MatVec(dst []float32, w *Mat, x []float32) {
+func (DefaultOps) MatVec(dst []float32, w *instance.Mat, x []float32) {
 	MatVec(dst, w, x)
 }
 
-func (DefaultOps) MatVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec) {
+func (DefaultOps) MatVecWithQuant(dst []float32, w *instance.Mat, x []float32, qx *instance.QuantVec) {
 	MatVecWithQuant(dst, w, x, qx)
 }
 
-func (DefaultOps) FlashAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
+func (DefaultOps) FlashAttention(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
 	// This method is not typically used directly since FlashAttention operates on full sequences
 	// Return false to indicate that this specific fast path is not used
 	return false
 }
 
-func (DefaultOps) FlashAttentionMultiHead(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
+func (DefaultOps) FlashAttentionMultiHead(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
 	// For incremental processing with KV caching, we can't directly use the full FlashAttention
 	// implementation since it's designed for full sequence processing.
 	// However, we can implement a version that works with the current KV cache structure.
@@ -39,7 +41,7 @@ func (DefaultOps) FlashAttentionMultiHead(attnOut []float32, layer *Layer, q, k,
 }
 
 // Add the method to DefaultOps
-func (DefaultOps) IncrementalAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
+func (DefaultOps) IncrementalAttention(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
 	// For now, return false to indicate that this specific fast path is not implemented
 	// This would be where we implement an optimized attention kernel that leverages
 	// FlashAttention concepts for the incremental processing pattern

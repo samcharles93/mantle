@@ -1,6 +1,10 @@
 package simd
 
-import "fmt"
+import (
+	"fmt"
+
+	instance "github.com/samcharles93/mantle/internal/backend/core"
+)
 
 // ForwardTokenGreedy runs one autoregressive step and returns the next token id
 // using greedy argmax selection. It prefers fully device-resident output head
@@ -162,7 +166,7 @@ func (m *Instance) ForwardTokenGreedy(tok int) (int, error) {
 	}
 
 	type greedyHeadOps interface {
-		DeviceMatVecNoCopy(w *Mat, x []float32) bool
+		DeviceMatVecNoCopy(w *instance.Mat, x []float32) bool
 		DeviceArgMaxLastResult() (idx int, ok bool)
 	}
 

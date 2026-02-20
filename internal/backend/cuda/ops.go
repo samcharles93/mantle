@@ -12,8 +12,10 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/samcharles93/mantle/internal/backend/core"
+	instance "github.com/samcharles93/mantle/internal/backend/core"
+	model "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/backend/cuda/native"
-	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
@@ -23,16 +25,16 @@ type Ops struct {
 
 	mu             sync.Mutex
 	fastPathErr    error
-	weights        map[*simd.Mat]deviceMat
-	qweights       map[*simd.Mat]deviceQuantMat
-	offloadedMats  map[*simd.Mat]struct{} // weights intentionally kept on CPU
-	gpuLayers      int                    // -1 auto, 0 all layers on CPU, N first N layers on GPU
+	weights        map[*model.Mat]deviceMat
+	qweights       map[*model.Mat]deviceQuantMat
+	offloadedMats  map[*model.Mat]struct{} // weights intentionally kept on CPU
+	gpuLayers      int                     // -1 auto, 0 all layers on CPU, N first N layers on GPU
 	normWeights    map[uintptr]native.DeviceBuffer
-	attnCaches     map[*simd.Layer]deviceAttnCache
-	f16Dequant     map[*simd.Mat]native.DeviceBuffer  // Cached F16 dequantized weights
-	convKernels    map[*simd.Mat]native.DeviceBuffer  // Cached conv kernel weights on device
-	convStates     map[*simd.Layer]convDeviceState    // Per-layer conv state on device
-	convStateReady map[*simd.Layer]bool               // conv state already resident on device
+	attnCaches     map[*model.Layer]deviceAttnCache
+	f16Dequant     map[*model.Mat]native.DeviceBuffer // Cached F16 dequantized weights
+	convKernels    map[*model.Mat]native.DeviceBuffer // Cached conv kernel weights on device
+	convStates     map[*model.Layer]convDeviceState   // Per-layer conv state on device
+	convStateReady map[*model.Layer]bool              // conv state already resident on device
 	quantGraphs    map[quantGraphKey]native.GraphExec // Cached CUDA Graph executables for quant kernels
 	ffnQuantGraphs map[ffnQuantGraphKey]native.GraphExec
 
@@ -182,16 +184,16 @@ func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 	return &Ops{
 		stream:         stream,
 		blas:           blas,
-		weights:        make(map[*simd.Mat]deviceMat),
-		qweights:       make(map[*simd.Mat]deviceQuantMat),
-		offloadedMats:  make(map[*simd.Mat]struct{}),
+		weights:        make(map[*model.Mat]deviceMat),
+		qweights:       make(map[*model.Mat]deviceQuantMat),
+		offloadedMats:  make(map[*model.Mat]struct{}),
 		gpuLayers:      -1,
 		normWeights:    make(map[uintptr]native.DeviceBuffer),
-		attnCaches:     make(map[*simd.Layer]deviceAttnCache),
-		f16Dequant:     make(map[*simd.Mat]native.DeviceBuffer),
-		convKernels:    make(map[*simd.Mat]native.DeviceBuffer),
-		convStates:     make(map[*simd.Layer]convDeviceState),
-		convStateReady: make(map[*simd.Layer]bool),
+		attnCaches:     make(map[*model.Layer]deviceAttnCache),
+		f16Dequant:     make(map[*model.Mat]native.DeviceBuffer),
+		convKernels:    make(map[*model.Mat]native.DeviceBuffer),
+		convStates:     make(map[*model.Layer]convDeviceState),
+		convStateReady: make(map[*model.Layer]bool),
 		quantGraphs:    make(map[quantGraphKey]native.GraphExec),
 		ffnQuantGraphs: make(map[ffnQuantGraphKey]native.GraphExec),
 	}
@@ -219,7 +221,7 @@ func (o *Ops) ConsumeFastPathError() error {
 }
 
 // FlushBlockResult flushes a pending device-resident block output to host.
-// Exposed for the SIMD runtime to force host visibility before host-only ops.
+// Exposed for the model runtime to force host visibility before host-only ops.
 func (o *Ops) FlushBlockResult() error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -297,7 +299,7 @@ func (o *Ops) ResetConvStates() {
 
 // FusedRMSNormMatVec performs fused RMSNorm + MatVec in a single kernel
 // This eliminates one memory roundtrip compared to calling them separately
-func (o *Ops) FusedRMSNormMatVec(out []float32, w *simd.Mat, x, normWeight []float32, eps float32) bool {
+func (o *Ops) FusedRMSNormMatVec(out []float32, w *model.Mat, x, normWeight []float32, eps float32) bool {
 	// TODO: Fusion causes illegal memory access errors - needs investigation
 	// Enable with MANTLE_CUDA_FUSE=1 for testing
 	if os.Getenv("MANTLE_CUDA_FUSE") == "" {
@@ -374,7 +376,7 @@ func (o *Ops) FusedRMSNormMatVec(out []float32, w *simd.Mat, x, normWeight []flo
 
 // PreloadModelWeights uploads all model matrices and RMSNorm weights to device memory.
 // This removes lazy first-use uploads from the decode hot path.
-func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
+func (o *Ops) PreloadModelWeights(m *core.Instance) error {
 	if o == nil || m == nil {
 		return nil
 	}
@@ -406,7 +408,7 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 		targetGPULayers = min(o.gpuLayers, len(m.Layers))
 	}
 
-	uploadMat := func(name string, mat *simd.Mat) error {
+	uploadMat := func(name string, mat *model.Mat) error {
 		if mat == nil {
 			return nil
 		}
@@ -447,8 +449,8 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 		}
 		return nil
 	}
-	seenMats := make(map[*simd.Mat]struct{})
-	recordMatBytes := func(mat *simd.Mat, used *int64) {
+	seenMats := make(map[*model.Mat]struct{})
+	recordMatBytes := func(mat *model.Mat, used *int64) {
 		if mat == nil {
 			return
 		}
@@ -458,19 +460,19 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 		seenMats[mat] = struct{}{}
 		*used += estimateMatBytes(mat, mode)
 	}
-	layerWithinBudget := func(layer *simd.Layer, used int64) bool {
+	layerWithinBudget := func(layer *model.Layer, used int64) bool {
 		if !budgeted || layer == nil {
 			return true
 		}
 		layerBytes := estimateLayerMatBytes(layer, mode, seenMats)
 		return used+layerBytes <= uploadBudget
 	}
-	recordLayerMatBytes := func(layer *simd.Layer, used *int64) {
+	recordLayerMatBytes := func(layer *model.Layer, used *int64) {
 		for _, mat := range layerMats(layer) {
 			recordMatBytes(mat, used)
 		}
 	}
-	uploadLayerMats := func(prefix string, layer *simd.Layer) error {
+	uploadLayerMats := func(prefix string, layer *model.Layer) error {
 		if err := uploadMat(prefix+".wq", layer.Wq); err != nil {
 			return err
 		}
@@ -623,7 +625,7 @@ func (o *Ops) PreloadModelWeights(m *simd.Instance) error {
 	return nil
 }
 
-func (o *Ops) preloadLayerManaged(layer *simd.Layer) error {
+func (o *Ops) preloadLayerManaged(layer *model.Layer) error {
 	for _, mat := range layerMats(layer) {
 		if err := o.ensureManagedMat(mat); err != nil {
 			return err
@@ -632,7 +634,7 @@ func (o *Ops) preloadLayerManaged(layer *simd.Layer) error {
 	return nil
 }
 
-func (o *Ops) ensureManagedMat(mat *simd.Mat) error {
+func (o *Ops) ensureManagedMat(mat *model.Mat) error {
 	if mat == nil {
 		return nil
 	}
@@ -709,7 +711,7 @@ func (o *Ops) ensureManagedMat(mat *simd.Mat) error {
 	return nil
 }
 
-// BeginToken implements simd.DeviceStateOps.
+// BeginToken implements instance.DeviceStateOps.
 func (o *Ops) BeginToken(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -742,7 +744,7 @@ func (o *Ops) BeginToken(x []float32) {
 	}
 }
 
-// EndToken implements simd.DeviceStateOps.
+// EndToken implements instance.DeviceStateOps.
 func (o *Ops) EndToken(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -769,7 +771,7 @@ func (o *Ops) EndToken(x []float32) {
 	o.clearNormDeviceView()
 }
 
-// HostStateDirty implements simd.DeviceStateOps.
+// HostStateDirty implements instance.DeviceStateOps.
 func (o *Ops) HostStateDirty(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -785,7 +787,7 @@ func (o *Ops) HostStateDirty(x []float32) {
 	o.xDevDirty = false
 }
 
-// SyncHostState implements simd.DeviceStateOps.
+// SyncHostState implements instance.DeviceStateOps.
 func (o *Ops) SyncHostState(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -848,7 +850,7 @@ func (o *Ops) SyncDeviceSlice(x []float32) {
 	}
 }
 
-// DeviceAdd implements simd.DeviceStateOps.
+// DeviceAdd implements instance.DeviceStateOps.
 func (o *Ops) DeviceAdd(dst, src []float32) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -912,7 +914,7 @@ func (o *Ops) DeviceAdd(dst, src []float32) bool {
 	return true
 }
 
-// DeviceRMSNorm implements simd.DeviceStateOps.
+// DeviceRMSNorm implements instance.DeviceStateOps.
 func (o *Ops) DeviceRMSNorm(dst, src, weight []float32, eps float32) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -937,8 +939,8 @@ func (o *Ops) DeviceRMSNorm(dst, src, weight []float32, eps float32) bool {
 	return true
 }
 
-// DeviceMatVec implements simd.DeviceStateOps.
-func (o *Ops) DeviceMatVec(dst []float32, w *simd.Mat, x []float32) bool {
+// DeviceMatVec implements instance.DeviceStateOps.
+func (o *Ops) DeviceMatVec(dst []float32, w *instance.Mat, x []float32) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if len(dst) < w.R {
@@ -976,9 +978,9 @@ func (o *Ops) DeviceMatVec(dst []float32, w *simd.Mat, x []float32) bool {
 	return true
 }
 
-// DeviceMatVecNoCopy implements simd.DeviceStateOps.
+// DeviceMatVecNoCopy implements model.DeviceStateOps.
 // It computes matvec on device and keeps the result device-resident.
-func (o *Ops) DeviceMatVecNoCopy(w *simd.Mat, x []float32) bool {
+func (o *Ops) DeviceMatVecNoCopy(w *model.Mat, x []float32) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -1019,7 +1021,7 @@ func (o *Ops) DeviceMatVecNoCopy(w *simd.Mat, x []float32) bool {
 	return true
 }
 
-// DeviceArgMaxLastResult implements simd.DeviceStateOps.
+// DeviceArgMaxLastResult implements instance.DeviceStateOps.
 func (o *Ops) DeviceArgMaxLastResult() (idx int, ok bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -1036,7 +1038,7 @@ func (o *Ops) DeviceArgMaxLastResult() (idx int, ok bool) {
 	return val, true
 }
 
-// DeviceLogitSoftcap implements simd.DeviceStateOps.
+// DeviceLogitSoftcap implements instance.DeviceStateOps.
 func (o *Ops) DeviceLogitSoftcap(data []float32, softcap float32) bool {
 	if softcap <= 0 {
 		return true
@@ -1067,7 +1069,7 @@ func (o *Ops) Close() error {
 			err = e
 		}
 	}
-	o.weights = make(map[*simd.Mat]deviceMat)
+	o.weights = make(map[*model.Mat]deviceMat)
 	for _, q := range o.qweights {
 		if e := q.q.Free(); e != nil && err == nil {
 			err = e
@@ -1082,7 +1084,7 @@ func (o *Ops) Close() error {
 			err = e
 		}
 	}
-	o.qweights = make(map[*simd.Mat]deviceQuantMat)
+	o.qweights = make(map[*model.Mat]deviceQuantMat)
 
 	for _, buf := range o.normWeights {
 		if e := buf.Free(); e != nil && err == nil {
@@ -1145,7 +1147,7 @@ func (o *Ops) Close() error {
 			err = e
 		}
 	}
-	o.attnCaches = make(map[*simd.Layer]deviceAttnCache)
+	o.attnCaches = make(map[*model.Layer]deviceAttnCache)
 
 	if e := o.xDev.Free(); e != nil && err == nil {
 		err = e
@@ -1204,7 +1206,7 @@ func (o *Ops) Close() error {
 	return err
 }
 
-func (o *Ops) MatVec(dst []float32, w *simd.Mat, x []float32) {
+func (o *Ops) MatVec(dst []float32, w *model.Mat, x []float32) {
 	if w == nil || w.R == 0 || w.C == 0 {
 		return
 	}
@@ -1219,7 +1221,7 @@ func (o *Ops) MatVec(dst []float32, w *simd.Mat, x []float32) {
 	if _, offloaded := o.offloadedMats[w]; offloaded {
 		o.mu.Unlock()
 		native.RecordMatVecCPUFallback()
-		simd.MatVec(dst, w, x)
+		model.MatVec(dst, w, x)
 		return
 	}
 	defer o.mu.Unlock()
@@ -1332,7 +1334,7 @@ func (o *Ops) isNormDeviceX(x []float32) bool {
 
 // matVecWithDeviceInput performs MatVec using an already resident device input vector.
 // Requires o.mu locked.
-func (o *Ops) matVecWithDeviceInput(dst []float32, w *simd.Mat, xDev native.DeviceBuffer, xLen int) error {
+func (o *Ops) matVecWithDeviceInput(dst []float32, w *model.Mat, xDev native.DeviceBuffer, xLen int) error {
 	if w == nil || w.R == 0 || w.C == 0 {
 		return fmt.Errorf("invalid weight matrix")
 	}
@@ -1420,7 +1422,7 @@ func (o *Ops) matVecWithDeviceInput(dst []float32, w *simd.Mat, xDev native.Devi
 // matVecWithDeviceInputNoCopy performs MatVec using an already resident
 // device input and leaves the output in o.yDev without host copy.
 // Requires o.mu locked.
-func (o *Ops) matVecWithDeviceInputNoCopy(w *simd.Mat, xDev native.DeviceBuffer, xLen int) error {
+func (o *Ops) matVecWithDeviceInputNoCopy(w *model.Mat, xDev native.DeviceBuffer, xLen int) error {
 	if w == nil || w.R == 0 || w.C == 0 {
 		return fmt.Errorf("invalid weight matrix")
 	}
@@ -1512,7 +1514,7 @@ func (o *Ops) matVecWithDeviceInputNoCopy(w *simd.Mat, xDev native.DeviceBuffer,
 
 // matVecQuantWithDeviceInput performs quantized MatVec with an already resident device input.
 // Requires o.mu locked.
-func (o *Ops) matVecQuantWithDeviceInput(dst []float32, w *simd.Mat, xDev native.DeviceBuffer) error {
+func (o *Ops) matVecQuantWithDeviceInput(dst []float32, w *model.Mat, xDev native.DeviceBuffer) error {
 	qw, err := o.ensureQuantMat(w)
 	if err != nil {
 		return err
@@ -1566,7 +1568,7 @@ func (o *Ops) rmsNormWithDeviceX(dst, weight []float32, eps float32) error {
 	return nil
 }
 
-func (o *Ops) matVecQuant(dst []float32, w *simd.Mat, x []float32) {
+func (o *Ops) matVecQuant(dst []float32, w *model.Mat, x []float32) {
 	if o.isNormDeviceX(x) {
 		if err := o.matVecQuantWithDeviceInput(dst, w, o.normDev); err != nil {
 			panic(fmt.Errorf("cuda quant matvec failed: %w", err))
@@ -1638,7 +1640,7 @@ func (o *Ops) matVecQuant(dst []float32, w *simd.Mat, x []float32) {
 	runtime.KeepAlive(dst)
 }
 
-func (o *Ops) MatVecWithQuant(dst []float32, w *simd.Mat, x []float32, qx *simd.QuantVec) {
+func (o *Ops) MatVecWithQuant(dst []float32, w *model.Mat, x []float32, qx *model.QuantVec) {
 	if o == nil {
 		panic("cuda ops is nil")
 	}
@@ -1646,14 +1648,14 @@ func (o *Ops) MatVecWithQuant(dst []float32, w *simd.Mat, x []float32, qx *simd.
 	if _, offloaded := o.offloadedMats[w]; offloaded {
 		o.mu.Unlock()
 		native.RecordMatVecCPUFallback()
-		simd.MatVecWithQuant(dst, w, x, qx)
+		model.MatVecWithQuant(dst, w, x, qx)
 		return
 	}
 	o.mu.Unlock()
 	o.MatVec(dst, w, x)
 }
 
-func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
+func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	if !useFFNFastPath() {
 		return false
 	}
@@ -1790,7 +1792,7 @@ func (o *Ops) FFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
 
 // quantFFNBlock runs the full FFN (Up, Gate, SiLU, Down) on device using quantized matvec kernels.
 // This avoids H2D transfers for intermediate results and keeps the entire FFN computation on-GPU.
-func (o *Ops) quantFFNBlock(layer *simd.Layer, x []float32, out []float32) bool {
+func (o *Ops) quantFFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	if len(x) < layer.FfnUp.C || len(out) < layer.FfnDown.R {
 		return false
 	}
@@ -2052,7 +2054,7 @@ func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.D
 
 // ShortConvBlock runs the full ShortConv block (InProj, depthwise conv, OutProj) on device.
 // This eliminates H2D/D2H transfers for intermediate proj and conv results.
-func (o *Ops) ShortConvBlock(layer *simd.Layer, x []float32, out []float32, embd int) bool {
+func (o *Ops) ShortConvBlock(layer *model.Layer, x []float32, out []float32, embd int) bool {
 	if layer == nil || layer.ShortConvInProj == nil || layer.ShortConvOutProj == nil || layer.ShortConvKernel == nil {
 		return false
 	}
@@ -2193,7 +2195,7 @@ func (o *Ops) ShortConvBlock(layer *simd.Layer, x []float32, out []float32, embd
 }
 
 // ensureConvKernel uploads F32 conv kernel weights to device, cached per Mat.
-func (o *Ops) ensureConvKernel(kernel *simd.Mat) (native.DeviceBuffer, error) {
+func (o *Ops) ensureConvKernel(kernel *model.Mat) (native.DeviceBuffer, error) {
 	if buf, ok := o.convKernels[kernel]; ok {
 		return buf, nil
 	}
@@ -2212,7 +2214,7 @@ func (o *Ops) ensureConvKernel(kernel *simd.Mat) (native.DeviceBuffer, error) {
 }
 
 // ensureConvState ensures a device buffer exists for the layer's conv state.
-func (o *Ops) ensureConvState(layer *simd.Layer, bytes int) (convDeviceState, error) {
+func (o *Ops) ensureConvState(layer *model.Layer, bytes int) (convDeviceState, error) {
 	if cs, ok := o.convStates[layer]; ok && cs.size >= bytes {
 		return cs, nil
 	}
@@ -2230,7 +2232,7 @@ func (o *Ops) ensureConvState(layer *simd.Layer, bytes int) (convDeviceState, er
 	return cs, nil
 }
 
-func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *simd.Mat, x []float32) bool {
+func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *model.Mat, x []float32) bool {
 	if !useQKVFastPath() {
 		return false
 	}
@@ -2412,7 +2414,7 @@ func (o *Ops) deviceInputForVector(x []float32, dtype native.BlasDataType, lengt
 	}
 }
 
-func (o *Ops) AttentionInner(attnOut []float32, layer *simd.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool {
+func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool {
 	if !useAttentionInnerFastPath() {
 		return false
 	}
@@ -2465,14 +2467,14 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *simd.Layer, q, k, v []flo
 	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), nHead*headDim), q[:nHead*headDim])
 	if !cache.useQ8K {
 		for i := range kvStride {
-			o.kTmpU16[i] = simd.Float32ToFloat16(k[i])
+			o.kTmpU16[i] = instance.Float32ToFloat16(k[i])
 		}
 	} else {
 		o.kTmpQ8Scale[0] = quantizeQ8(k, o.kTmpQ8[:kvStride])
 	}
 	if !cache.useQ8V {
 		for i := range kvStride {
-			o.vTmpU16[i] = simd.Float32ToFloat16(v[i])
+			o.vTmpU16[i] = instance.Float32ToFloat16(v[i])
 		}
 	} else {
 		o.vTmpQ8Scale[0] = quantizeQ8(v, o.vTmpQ8[:kvStride])
@@ -2557,7 +2559,7 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *simd.Layer, q, k, v []flo
 	return true
 }
 
-func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32) bool {
+func (o *Ops) AttentionInnerProjection(projOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32) bool {
 	if !useAttentionInnerFastPath() {
 		return false
 	}
@@ -2615,14 +2617,14 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *simd.Layer, q, 
 	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), nHead*headDim), q[:nHead*headDim])
 	if !cache.useQ8K {
 		for i := range kvStride {
-			o.kTmpU16[i] = simd.Float32ToFloat16(k[i])
+			o.kTmpU16[i] = instance.Float32ToFloat16(k[i])
 		}
 	} else {
 		o.kTmpQ8Scale[0] = quantizeQ8(k, o.kTmpQ8[:kvStride])
 	}
 	if !cache.useQ8V {
 		for i := range kvStride {
-			o.vTmpU16[i] = simd.Float32ToFloat16(v[i])
+			o.vTmpU16[i] = instance.Float32ToFloat16(v[i])
 		}
 	} else {
 		o.vTmpQ8Scale[0] = quantizeQ8(v, o.vTmpQ8[:kvStride])
@@ -2793,7 +2795,7 @@ func (o *Ops) Softmax(x []float32) {
 		panic("cuda ops is nil")
 	}
 	if !useAttnSoftmaxKernel() {
-		simd.Softmax(x)
+		model.Softmax(x)
 		return
 	}
 
@@ -2987,7 +2989,7 @@ func (o *Ops) StoreKV(_ int, pos, kvStride int, kDst, vDst []float32, kDst16, vD
 		copy(kDst[offset:], k)
 	} else if kDst16 != nil {
 		for i, kv := range k {
-			kDst16[offset+i] = simd.Float32ToFloat16(kv)
+			kDst16[offset+i] = model.Float32ToFloat16(kv)
 		}
 	} else if kDstQ8 != nil {
 		storeQ8(k, kDstQ8[offset:offset+kvStride], kDstQ8S, pos)
@@ -2996,7 +2998,7 @@ func (o *Ops) StoreKV(_ int, pos, kvStride int, kDst, vDst []float32, kDst16, vD
 		copy(vDst[offset:], v)
 	} else if vDst16 != nil {
 		for i, vv := range v {
-			vDst16[offset+i] = simd.Float32ToFloat16(vv)
+			vDst16[offset+i] = model.Float32ToFloat16(vv)
 		}
 	} else if vDstQ8 != nil {
 		storeQ8(v, vDstQ8[offset:offset+kvStride], vDstQ8S, pos)
@@ -3004,41 +3006,64 @@ func (o *Ops) StoreKV(_ int, pos, kvStride int, kDst, vDst []float32, kDst16, vD
 }
 
 func storeQ8(src []float32, dst []int8, scales []float32, pos int) {
-	var maxAbs float32
-	for _, v := range src {
-		if v < 0 {
-			if -v > maxAbs {
+	// Block definitions from mcf
+	blockSize := int(mcf.QuantBlockSize)
+	blocks := (len(src) + blockSize - 1) / blockSize
+	if blocks*blockSize != len(src) {
+		panic(fmt.Sprintf("storeQ8: src length %d is not a multiple of block size %d", len(src), blockSize))
+	}
+
+	scaleOffset := pos * blocks
+	if scaleOffset+blocks > len(scales) {
+		panic(fmt.Sprintf("storeQ8: scale offset %d out of bounds for scales length %d", scaleOffset, len(scales)))
+	}
+
+	for b := 0; b < blocks; b++ {
+		start := b * blockSize
+		end := start + blockSize
+
+		blockSrc := src[start:end]
+		blockDst := dst[start:end]
+
+		// Find max abs value in block for quant scale
+		var maxAbs float32
+		for _, v := range blockSrc {
+			if v < 0 && -v > maxAbs {
 				maxAbs = -v
+			} else if v > 0 && v > maxAbs {
+				maxAbs = v
 			}
-		} else if v > maxAbs {
-			maxAbs = v
 		}
-	}
-	if maxAbs == 0 {
-		scales[pos] = 0
-		for i := range dst {
-			dst[i] = 0
+
+		// Handle empty blocks
+		if maxAbs == 0 {
+			scales[scaleOffset+b] = 0
+			for i := range blockDst {
+				blockDst[i] = 0
+			}
+			continue
 		}
-		return
-	}
-	scale := maxAbs / 127.0
-	scales[pos] = scale
-	invScale := 127.0 / maxAbs
-	for i, v := range src {
-		q := int32(v*invScale + 0.5)
-		if v < 0 {
-			q = int32(v*invScale - 0.5)
+
+		// Calculate scale and quantise
+		scale := maxAbs / 127.0
+		invScale := 127.0 / maxAbs
+		scales[scaleOffset+b] = scale
+		for i, v := range blockSrc {
+			q := int32(v*invScale + 0.5)
+			if v < 0 {
+				q = int32(v*invScale - 0.5)
+			}
+			if q > 127 {
+				q = 127
+			} else if q < -127 {
+				q = -127
+			}
+			blockDst[i] = int8(q)
 		}
-		if q > 127 {
-			q = 127
-		} else if q < -127 {
-			q = -127
-		}
-		dst[i] = int8(q)
 	}
 }
 
-func (o *Ops) deviceMat(w *simd.Mat) (deviceMat, error) {
+func (o *Ops) deviceMat(w *model.Mat) (deviceMat, error) {
 	if _, ok := o.qweights[w]; ok {
 		return deviceMat{}, fmt.Errorf("mat has pre-loaded quant data; use matVecQuant path")
 	}
@@ -3104,7 +3129,7 @@ func (o *Ops) deviceMat(w *simd.Mat) (deviceMat, error) {
 	return info, nil
 }
 
-func (o *Ops) uploadQuantAsF16Device(w *simd.Mat) (native.DeviceBuffer, error) {
+func (o *Ops) uploadQuantAsF16Device(w *model.Mat) (native.DeviceBuffer, error) {
 	// Check cache first (2-3% TPS improvement by avoiding redundant GPU dequantization)
 	if cached, ok := o.f16Dequant[w]; ok {
 		runtime.KeepAlive(w)
@@ -3186,7 +3211,7 @@ func (o *Ops) uploadQuantAsF16Device(w *simd.Mat) (native.DeviceBuffer, error) {
 	return out, nil
 }
 
-func decodeQuantToF16(w *simd.Mat) ([]uint16, error) {
+func decodeQuantToF16(w *model.Mat) ([]uint16, error) {
 	if w == nil || w.R == 0 || w.C == 0 {
 		return nil, fmt.Errorf("empty quantized weight matrix")
 	}
@@ -3199,7 +3224,7 @@ func decodeQuantToF16(w *simd.Mat) ([]uint16, error) {
 		w.RowTo(row, r)
 		base := r * w.C
 		for c, v := range row {
-			out[base+c] = simd.Float32ToFloat16(v)
+			out[base+c] = model.Float32ToFloat16(v)
 		}
 	}
 	return out, nil
@@ -3295,7 +3320,7 @@ func currentCUDAWeightMode() cudaWeightMode {
 	}
 }
 
-func shouldPreferQuantWeights(mat *simd.Mat, mode cudaWeightMode) bool {
+func shouldPreferQuantWeights(mat *model.Mat, mode cudaWeightMode) bool {
 	if mat == nil {
 		return false
 	}
@@ -3327,7 +3352,7 @@ func (o *Ops) waitForResult(hostDst unsafe.Pointer, devSrc native.DeviceBuffer, 
 	return native.MemcpyD2H(hostDst, devSrc, bytes)
 }
 
-func (o *Ops) ensureQuantMat(w *simd.Mat) (deviceQuantMat, error) {
+func (o *Ops) ensureQuantMat(w *model.Mat) (deviceQuantMat, error) {
 	if buf, ok := o.qweights[w]; ok {
 		return buf, nil
 	}
@@ -3347,7 +3372,7 @@ func (o *Ops) ensureQuantMat(w *simd.Mat) (deviceQuantMat, error) {
 		return info, nil
 	}
 	if w.Quant == nil && mcf.DTypeRequiresAligned64(w.DType) && len(w.Raw) > 0 {
-		qc, err := simd.BuildQuantCache(w)
+		qc, err := model.BuildQuantCache(w)
 		if err != nil {
 			return deviceQuantMat{}, fmt.Errorf("quant cache build failed for %s matrix [%d x %d]: %w", dtypeString(w.DType), w.R, w.C, err)
 		}
@@ -3408,7 +3433,7 @@ type k4PayloadView struct {
 	subScales    []byte
 }
 
-func parseQ4PayloadView(w *simd.Mat) (q4PayloadView, error) {
+func parseQ4PayloadView(w *model.Mat) (q4PayloadView, error) {
 	blocksPerRow, totalBlocks, err := quantBlocks(w.R, w.C)
 	if err != nil {
 		return q4PayloadView{}, err
@@ -3435,7 +3460,7 @@ func parseQ4PayloadView(w *simd.Mat) (q4PayloadView, error) {
 	}, nil
 }
 
-func parseK4PayloadView(w *simd.Mat) (k4PayloadView, error) {
+func parseK4PayloadView(w *model.Mat) (k4PayloadView, error) {
 	blocksPerRow, totalBlocks, err := quantBlocks(w.R, w.C)
 	if err != nil {
 		return k4PayloadView{}, err
@@ -3607,7 +3632,7 @@ func (o *Ops) allocManagedK4Payload(v k4PayloadView) (native.DeviceBuffer, nativ
 	return qBuf, superBuf, subBuf, nil
 }
 
-func (o *Ops) ensureQuantMatQ4Raw(w *simd.Mat) (deviceQuantMat, error) {
+func (o *Ops) ensureQuantMatQ4Raw(w *model.Mat) (deviceQuantMat, error) {
 	v, err := parseQ4PayloadView(w)
 	if err != nil {
 		return deviceQuantMat{}, err
@@ -3663,7 +3688,7 @@ func align64Int(n int) (int, bool) {
 	return (n + 63) &^ 63, true
 }
 
-func weightUploadSpec(w *simd.Mat) (native.BlasDataType, int64, unsafe.Pointer, error) {
+func weightUploadSpec(w *model.Mat) (native.BlasDataType, int64, unsafe.Pointer, error) {
 	if w.Raw == nil || w.DType == mcf.DTypeF32 {
 		if len(w.Data) == 0 {
 			return 0, 0, nil, nil
@@ -3858,7 +3883,7 @@ func quantizeQ8(src []float32, dst []int8) float32 {
 	return scale
 }
 
-func (o *Ops) ensureAttnCache(layer *simd.Layer, kvStride, cacheLen int) (deviceAttnCache, error) {
+func (o *Ops) ensureAttnCache(layer *model.Layer, kvStride, cacheLen int) (deviceAttnCache, error) {
 	if cache, ok := o.attnCaches[layer]; ok {
 		return cache, nil
 	}
@@ -3868,6 +3893,13 @@ func (o *Ops) ensureAttnCache(layer *simd.Layer, kvStride, cacheLen int) (device
 	if layer == nil {
 		return deviceAttnCache{}, fmt.Errorf("nil attention layer")
 	}
+
+	// Calculate how many blocks fit into one KV stride
+	blocksPerStride := kvStride / int(mcf.QuantBlockSize)
+	if kvStride%int(mcf.QuantBlockSize) != 0 {
+		return deviceAttnCache{}, fmt.Errorf("kv stride must be a multiple of quant block size (%d)", mcf.QuantBlockSize)
+	}
+
 	totalElems, ok := mulInt(kvStride, cacheLen)
 	if !ok {
 		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
@@ -3880,8 +3912,11 @@ func (o *Ops) ensureAttnCache(layer *simd.Layer, kvStride, cacheLen int) (device
 	if !ok {
 		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
 	}
+
 	totalQ8Bytes := totalElems
-	scaleBytes, ok := mulInt(cacheLen, int(unsafe.Sizeof(float32(0))))
+
+	// Allocate enough scales for every block across entire cache len
+	scaleBytes, ok := mulInt(cacheLen*blocksPerStride, int(unsafe.Sizeof(float32(0))))
 	if !ok {
 		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
 	}
@@ -3901,6 +3936,7 @@ func (o *Ops) ensureAttnCache(layer *simd.Layer, kvStride, cacheLen int) (device
 		*dst = buf
 		return nil
 	}
+
 	cleanup := func() {
 		_ = cache.kF16.Free()
 		_ = cache.vF16.Free()
@@ -3991,7 +4027,7 @@ func fillXBuffer(buf native.HostBuffer, dtype native.BlasDataType, x []float32) 
 	case native.BlasF16:
 		dst := unsafe.Slice((*uint16)(buf.Ptr()), len(x))
 		for i, v := range x {
-			dst[i] = simd.Float32ToFloat16(v)
+			dst[i] = model.Float32ToFloat16(v)
 		}
 		return nil
 	case native.BlasBF16:
@@ -4007,16 +4043,16 @@ func fillXBuffer(buf native.HostBuffer, dtype native.BlasDataType, x []float32) 
 
 func bf16FromF32(v float32) uint16 {
 	u := math.Float32bits(v)
-	// Round-to-nearest-even on truncated 16 bits to match SIMD path.
+	// Round-to-nearest-even on truncated 16 bits to match model path.
 	rnd := uint32(0x7FFF + ((u >> 16) & 1))
 	return uint16((u + rnd) >> 16)
 }
 
-func layerMats(layer *simd.Layer) []*simd.Mat {
+func layerMats(layer *model.Layer) []*model.Mat {
 	if layer == nil {
 		return nil
 	}
-	mats := []*simd.Mat{
+	mats := []*model.Mat{
 		layer.Wq,
 		layer.Wk,
 		layer.Wv,
@@ -4047,7 +4083,7 @@ func layerMats(layer *simd.Layer) []*simd.Mat {
 	return mats
 }
 
-func estimateLayerMatBytes(layer *simd.Layer, mode cudaWeightMode, seen map[*simd.Mat]struct{}) int64 {
+func estimateLayerMatBytes(layer *model.Layer, mode cudaWeightMode, seen map[*model.Mat]struct{}) int64 {
 	if layer == nil {
 		return 0
 	}
@@ -4064,7 +4100,7 @@ func estimateLayerMatBytes(layer *simd.Layer, mode cudaWeightMode, seen map[*sim
 	return total
 }
 
-func (o *Ops) markLayerOffloadedLocked(layer *simd.Layer) {
+func (o *Ops) markLayerOffloadedLocked(layer *model.Layer) {
 	if layer == nil {
 		return
 	}
@@ -4075,12 +4111,12 @@ func (o *Ops) markLayerOffloadedLocked(layer *simd.Layer) {
 	}
 }
 
-func estimateModelWeightBytes(m *simd.Instance, mode cudaWeightMode) int64 {
+func estimateModelWeightBytes(m *model.Instance, mode cudaWeightMode) int64 {
 	if m == nil {
 		return 0
 	}
 	var total int64
-	addMat := func(mat *simd.Mat) {
+	addMat := func(mat *model.Mat) {
 		total += estimateMatBytes(mat, mode)
 	}
 	addNorm := func(v []float32) {
@@ -4124,7 +4160,7 @@ func estimateModelWeightBytes(m *simd.Instance, mode cudaWeightMode) int64 {
 	return total
 }
 
-func estimateMatBytes(mat *simd.Mat, mode cudaWeightMode) int64 {
+func estimateMatBytes(mat *model.Mat, mode cudaWeightMode) int64 {
 	if mat == nil {
 		return 0
 	}
@@ -4155,7 +4191,7 @@ func dtypeString(dt mcf.TensorDType) string {
 	return fmt.Sprintf("0x%04x", uint16(dt))
 }
 
-func estimateQuantCacheBytes(mat *simd.Mat) (int64, bool) {
+func estimateQuantCacheBytes(mat *model.Mat) (int64, bool) {
 	if mat == nil || mat.R <= 0 || mat.C <= 0 {
 		return 0, false
 	}

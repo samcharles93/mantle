@@ -86,12 +86,10 @@ func (m *Instance) bindDefaultOps() {
 	if m == nil {
 		return
 	}
-	m.opsBindOnce.Do(func() {
-		if m.ops != nil && !isDefaultLikeOps(m.ops) {
-			return
-		}
-		m.ops = newBoundCPUOps(m.hostCaps, m.HeadDim)
-	})
+	if !isDefaultLikeOps(m.Ops()) {
+		return
+	}
+	m.SetOps(newBoundCPUOps(nil, m.HeadDim))
 }
 
 func isDefaultLikeOps(ops Ops) bool {
