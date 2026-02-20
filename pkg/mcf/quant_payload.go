@@ -2,9 +2,11 @@ package mcf
 
 import "errors"
 
+// Standard MCF Block Sizes
 const (
-	quantBlockSize   uint64 = 32
-	quantSuperBlocks uint64 = 8
+	QuantBlockSize uint64 = 32
+	QuantSuperBlocks uint64 = 8
+	QuantSuperSize uint64 = QuantBlockSize * QuantSuperBlocks
 )
 
 // QuantPayloadSize returns the exact payload size for a quantized tensor.
@@ -48,13 +50,13 @@ func QuantPayloadSize(shape []uint64, dt TensorDType) (uint64, error) {
 		return 0, errors.New("mcf: unsupported quant dtype")
 	}
 
-	blocksPerRow := (cols + quantBlockSize - 1) / quantBlockSize
+	blocksPerRow := (cols + QuantBlockSize - 1) / QuantBlockSize
 	totalBlocks, ok := mulUint64(rows, blocksPerRow)
 	if !ok {
 		return 0, errors.New("mcf: quant tensor too large")
 	}
 
-	blockBits, ok := mulUint64(quantBlockSize, uint64(bits))
+	blockBits, ok := mulUint64(QuantBlockSize, uint64(bits))
 	if !ok || blockBits%8 != 0 {
 		return 0, errors.New("mcf: invalid quant block size")
 	}
@@ -81,7 +83,7 @@ func QuantPayloadSize(shape []uint64, dt TensorDType) (uint64, error) {
 		return size, nil
 	}
 
-	superBlocksPerRow := (blocksPerRow + quantSuperBlocks - 1) / quantSuperBlocks
+	superBlocksPerRow := (blocksPerRow + QuantSuperBlocks - 1) / QuantSuperBlocks
 	superCount, ok := mulUint64(rows, superBlocksPerRow)
 	if !ok {
 		return 0, errors.New("mcf: quant tensor too large")
