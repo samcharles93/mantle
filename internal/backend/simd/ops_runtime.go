@@ -14,6 +14,8 @@ type Ops interface {
 
 // DefaultOps provides default CPU-based operations.
 type DefaultOps struct {
+	// scratch is a reusable buffer for attention. It is not thread-safe and
+	// must not be used concurrently.
 	scratch []float32
 }
 

@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/reasoning"
 	"github.com/samcharles93/mantle/internal/tokenizer"
+	"github.com/samcharles93/mantle/internal/utils"
 )
 
 func runCmd() *cli.Command {
@@ -613,7 +613,7 @@ func runCmd() *cli.Command {
 				tools []any
 			)
 			if toolsJSON != "" {
-				if !fileExists(toolsJSON) {
+				if !utils.FileExists(toolsJSON) {
 					return cli.Exit(fmt.Sprintf("error: tools json not found: %s", toolsJSON), 1)
 				}
 				loaded, err := tokenizer.LoadToolsJSON(toolsJSON)
@@ -625,7 +625,7 @@ func runCmd() *cli.Command {
 
 			interactive := false
 			if messagesJSON != "" {
-				if !fileExists(messagesJSON) {
+				if !utils.FileExists(messagesJSON) {
 					return cli.Exit(fmt.Sprintf("error: messages json not found: %s", messagesJSON), 1)
 				}
 				loaded, err := tokenizer.LoadMessagesJSON(messagesJSON)
@@ -717,7 +717,7 @@ func runCmd() *cli.Command {
 						log.Error("encode prompt failed", "error", err)
 						break
 					}
-					log.Debug("input tokens", "count", len(ids), "tokens", joinInts(ids))
+					log.Debug("input tokens", "count", len(ids), "tokens", utils.JoinInts(ids))
 				}
 
 				echoPromptVal := echoPrompt && !interactive
@@ -798,54 +798,4 @@ func runCmd() *cli.Command {
 			return nil
 		},
 	}
-}
-
-func joinInts(ids []int) string {
-	if len(ids) == 0 {
-		return "[]"
-	}
-	var b strings.Builder
-	b.WriteByte('[')
-	for i, id := range ids {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		fmt.Fprintf(&b, "%d", id)
-	}
-	b.WriteByte(']')
-	return b.String()
-}
-
-func escapeRawOutput(s string) string {
-	if s == "" {
-		return ""
-	}
-	var b strings.Builder
-	for _, r := range s {
-		switch r {
-		case '\n':
-			fmt.Fprint(&b, "\\n")
-		case '\r':
-			fmt.Fprint(&b, "\\r")
-		case '\t':
-			fmt.Fprint(&b, "\\t")
-		case '\\':
-			fmt.Fprint(&b, "\\\\")
-		default:
-			if strconv.IsPrint(r) {
-				b.WriteRune(r)
-			} else {
-				fmt.Fprintf(&b, `\u%04x`, r)
-			}
-		}
-	}
-	return b.String()
-}
-
-func fileExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	_, err := os.Stat(path)
-	return err == nil
 }

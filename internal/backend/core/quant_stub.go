@@ -1,6 +1,10 @@
 package core
 
-import "errors"
+import "fmt"
+
+func errRowOutOfRange(row int) error {
+	return fmt.Errorf("row out of range: %d", row)
+}
 
 func rowToQuant(dst []float32, m *Mat, row int) error {
 	layout, err := quantLayoutForMat(m.R, m.C, m.DType, len(m.Raw))
@@ -8,7 +12,7 @@ func rowToQuant(dst []float32, m *Mat, row int) error {
 		return err
 	}
 	if row < 0 || row >= m.R {
-		return errors.New("row out of range")
+		return errRowOutOfRange(row)
 	}
 
 	if layout.family == 'q' {

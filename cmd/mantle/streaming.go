@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/samcharles93/mantle/internal/logger"
+	"github.com/samcharles93/mantle/internal/utils"
 )
 
 type StreamMode string
@@ -90,7 +91,7 @@ func (w *StreamWriter) Flush() string {
 		result := w.accumulator.String()
 		if w.rawOutput {
 			// Apply escaping to full output at once
-			escaped := escapeRawOutput(result)
+			escaped := utils.EscapeRawOutput(result)
 			if _, err := fmt.Fprint(w.output, escaped); err != nil {
 				w.log.Debug("failed to write output", "error", err)
 			}
@@ -119,7 +120,7 @@ func (w *StreamWriter) writeInstant(token string) {
 	w.accumulator.WriteString(token)
 
 	if w.rawOutput {
-		escaped := escapeRawOutput(token)
+		escaped := utils.EscapeRawOutput(token)
 		if _, err := w.buffer.WriteString(escaped); err != nil {
 			w.log.Debug("failed to write to buffer", "error", err)
 		}
@@ -193,7 +194,7 @@ func (w *StreamWriter) flushBatch() {
 
 	text := w.batch.String()
 	if w.rawOutput {
-		escaped := escapeRawOutput(text)
+		escaped := utils.EscapeRawOutput(text)
 		if _, err := w.buffer.WriteString(escaped); err != nil {
 			w.log.Debug("failed to write to buffer", "error", err)
 		}
