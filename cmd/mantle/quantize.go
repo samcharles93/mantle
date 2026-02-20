@@ -115,19 +115,22 @@ type quantMethod struct {
 }
 
 func parseQuantMethod(s string) (quantMethod, error) {
+	bSize := int(mcf.QuantBlockSize)
+	sSize := int(mcf.QuantSuperSize)
+
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "k6":
-		return quantMethod{Name: "k6", DType: mcf.DTypeK6, Bits: 6, BlockSize: 32, SuperSize: 256, Family: "k"}, nil
+		return quantMethod{Name: "k6", DType: mcf.DTypeK6, Bits: 6, BlockSize: bSize, SuperSize: sSize, Family: "k"}, nil
 	case "k4":
-		return quantMethod{Name: "k4", DType: mcf.DTypeK4, Bits: 4, BlockSize: 32, SuperSize: 256, Family: "k"}, nil
+		return quantMethod{Name: "k4", DType: mcf.DTypeK4, Bits: 4, BlockSize: bSize, SuperSize: sSize, Family: "k"}, nil
 	case "k3":
-		return quantMethod{Name: "k3", DType: mcf.DTypeK3, Bits: 3, BlockSize: 32, SuperSize: 256, Family: "k"}, nil
+		return quantMethod{Name: "k3", DType: mcf.DTypeK3, Bits: 3, BlockSize: bSize, SuperSize: sSize, Family: "k"}, nil
 	case "k2":
-		return quantMethod{Name: "k2", DType: mcf.DTypeK2, Bits: 2, BlockSize: 32, SuperSize: 256, Family: "k"}, nil
+		return quantMethod{Name: "k2", DType: mcf.DTypeK2, Bits: 2, BlockSize: bSize, SuperSize: sSize, Family: "k"}, nil
 	case "q8":
-		return quantMethod{Name: "q8", DType: mcf.DTypeQ8, Bits: 8, BlockSize: 32, SuperSize: 0, Family: "q"}, nil
+		return quantMethod{Name: "q8", DType: mcf.DTypeQ8, Bits: 8, BlockSize: bSize, SuperSize: 0, Family: "q"}, nil
 	case "q4":
-		return quantMethod{Name: "q4", DType: mcf.DTypeQ4, Bits: 4, BlockSize: 32, SuperSize: 0, Family: "q"}, nil
+		return quantMethod{Name: "q4", DType: mcf.DTypeQ4, Bits: 4, BlockSize: bSize, SuperSize: 0, Family: "q"}, nil
 	case "int8", "int4":
 		return quantMethod{}, errors.New("int* quantization is reserved for activations and is not implemented")
 	default:

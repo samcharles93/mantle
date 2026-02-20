@@ -111,7 +111,23 @@ type TensorIndexRecord struct {
 
 var errBadTensorIndex = errors.New("mcf: corrupt tensor index section")
 
-// ParseTensorIndexSection validates and returns a view over a tensor index section payload.
+/*
+ParseTensorIndexSection validates and returns a view over a tensor index section payload.
+It does not interpret tensor data or names, but it does validate that all offsets/sizes are within bounds.
+The section must be at least 48 bytes (header) and contain enough data for the declared tables.
+
+Example:
+	ti, err := ParseTensorIndexSection(sec)
+	if err != nil {
+		// handle error
+	}
+	count := ti.Count()
+	for i := 0; i < count; i++ {
+		name, _ := ti.Name(i) // zero-copy string view over mmap bytes
+		shape, _ := ti.Shape(i)
+		fmt.Printf("Tensor %d: name=%s shape=%v\n", i, name, shape)
+	}
+*/
 func ParseTensorIndexSection(sec []byte) (*TensorIndex, error) {
 	// Header is fixed-size and little-endian in the file.
 	const hdrSize = 48 // binary.Size(TensorIndexHeader{}) if packed; keep constant for stability.

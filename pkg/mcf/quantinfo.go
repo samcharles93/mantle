@@ -29,13 +29,10 @@ type QuantInfoHeader struct {
 }
 
 // QuantRecord is the fixed-size metadata for a single quantized tensor.
-// TOTAL SIZE: 24 bytes.
-// ALIGNMENT: 8-byte aligned (friendly for 64-bit readers).
 type QuantRecord struct {
 	TensorIndex uint32 // Maps to Tensor Table
 
 	// Method is cast from TensorDType.
-	// We use uint8 to maintain perfect struct packing.
 	Method uint8 // Matches TensorDType (e.g., 0x31)
 
 	// Domain controls reconstruction
@@ -49,7 +46,7 @@ type QuantRecord struct {
 	// Ensures struct size is exactly 24 bytes.
 	Reserved [6]byte
 
-	// Calibration Stats (Reconstruction Source of Truth)
+	// Calibration Stats (used for reconstruction of activations; optional for weights)
 	MinClip float32
 	MaxClip float32
 }
@@ -70,8 +67,27 @@ func init() {
 	}
 }
 
-// ParseQuantInfoSection validates and returns a view over a QuantInfo section payload.
-// Pass it File.SectionData(File.Section(SectionQuantInfo)).
+/*
+ParseQuantInfoSection validates and returns a view over a QuantInfo section payload.
+
+The section must be at least 8 bytes (header) and contain enough data for the declared record count.
+The section is not copied; the returned QuantInfo keeps a reference to the original bytes (which usually reference the mmap). The caller must not retain the QuantInfo after File.Close().
+
+Example usage:
+
+	sec := mcfFile.SectionData(mcf.SectionQuantInfo)
+	quantInfo, err := ParseQuantInfoSection(sec)
+	if err != nil {
+		// handle error
+	}
+	for i := 0; i < quantInfo.Count(); i++ {
+		rec, err := quantInfo.Record(i)
+		if err != nil {
+			// handle error
+		}
+		// use rec
+	}
+*/
 func ParseQuantInfoSection(sec []byte) (*QuantInfo, error) {
 	if len(sec) < quantInfoHeaderSize {
 		return nil, ErrCorruptFile
@@ -197,14 +213,14 @@ func validateQuantRecord(r QuantRecord) error {
 		if r.Domain != uint8(DomainWeights) {
 			return errBadQuantInfo
 		}
-		if r.BlockSize != 32 || r.SuperSize != 0 {
+		if r.BlockSize != uint16(QuantBlockSize) || r.SuperSize != 0 {
 			return errBadQuantInfo
 		}
 	case DTypeK6, DTypeK4, DTypeK3, DTypeK2:
 		if r.Domain != uint8(DomainWeights) {
 			return errBadQuantInfo
 		}
-		if r.BlockSize != 32 || r.SuperSize != 256 {
+		if r.BlockSize != uint16(QuantBlockSize) || r.SuperSize != uint16(QuantSuperSize) {
 			return errBadQuantInfo
 		}
 	case DTypeInt8, DTypeInt4:
