@@ -117,6 +117,7 @@ It does not interpret tensor data or names, but it does validate that all offset
 The section must be at least 48 bytes (header) and contain enough data for the declared tables.
 
 Example:
+
 	ti, err := ParseTensorIndexSection(sec)
 	if err != nil {
 		// handle error

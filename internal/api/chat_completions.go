@@ -37,10 +37,10 @@ type ChatCompletionRequest struct {
 }
 
 type ChatMessage struct {
-	Role       string         `json:"role"`
-	Content    any            `json:"content"`
-	Name       string         `json:"name,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role       string `json:"role"`
+	Content    any    `json:"content"`
+	Name       string `json:"name,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 type ChatTool struct {

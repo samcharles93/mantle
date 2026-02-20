@@ -1,7 +1,7 @@
 package simd
 
 import (
-	core "github.com/samcharles93/mantle/internal/backend/core"
+	"github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/hostcaps"
 )
 
@@ -15,9 +15,14 @@ func (m *Instance) asCore() *core.Instance {
 func (m *Instance) Ops() core.Ops {
 	cm := m.asCore()
 	if cm == nil {
-		return core.DefaultOps{}
+		return &DefaultOps{}
 	}
-	return cm.Ops()
+	ops := cm.Ops()
+	if _, ok := ops.(core.DefaultOps); ok {
+		m.bindDefaultOps()
+		ops = cm.Ops()
+	}
+	return ops
 }
 
 func (m *Instance) SetOps(ops core.Ops) {
@@ -41,11 +46,7 @@ func (m *Instance) setHostCapabilities(caps *hostcaps.Snapshot) {
 }
 
 func (m *Instance) BindDefaultOps() {
-	cm := m.asCore()
-	if cm == nil {
-		return
-	}
-	cm.BindDefaultOps()
+	m.bindDefaultOps()
 }
 
 func (m *Instance) GetAttnPool() *core.AttnPool {

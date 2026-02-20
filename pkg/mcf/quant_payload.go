@@ -4,9 +4,9 @@ import "errors"
 
 // Standard MCF Block Sizes
 const (
-	QuantBlockSize uint64 = 32
+	QuantBlockSize   uint64 = 32
 	QuantSuperBlocks uint64 = 8
-	QuantSuperSize uint64 = QuantBlockSize * QuantSuperBlocks
+	QuantSuperSize   uint64 = QuantBlockSize * QuantSuperBlocks
 )
 
 // QuantPayloadSize returns the exact payload size for a quantized tensor.

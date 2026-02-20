@@ -110,7 +110,7 @@ func TestRunAttnHeadsUsesContextSoftmaxOps(t *testing.T) {
 	fillTestData(ctx.CacheK, 0.05)
 	fillTestData(ctx.CacheV, 0.07)
 
-	rec := &softmaxRecorderOps{}
+	rec := &softmaxRecorderOps{&DefaultOps{}, 0}
 	ctx.Ops = rec
 
 	RunAttnHeads(&ctx, make([]float32, pos+1), 0, nHead)
@@ -121,7 +121,7 @@ func TestRunAttnHeadsUsesContextSoftmaxOps(t *testing.T) {
 }
 
 type softmaxRecorderOps struct {
-	DefaultOps
+	*DefaultOps
 	calls int
 }
 
@@ -256,6 +256,7 @@ func compareSlices(t *testing.T, got, want []float32, tol float32) {
 
 func TestAttentionSkipsStoreKVOnInnerProjectionFastPath(t *testing.T) {
 	ops := &attentionFastPathOps{
+		DefaultOps:                 &DefaultOps{},
 		useQKVFastPath:             true,
 		useInnerProjectionFastPath: true,
 	}
@@ -272,6 +273,7 @@ func TestAttentionSkipsStoreKVOnInnerProjectionFastPath(t *testing.T) {
 
 func TestAttentionSkipsStoreKVOnInnerFastPath(t *testing.T) {
 	ops := &attentionFastPathOps{
+		DefaultOps:         &DefaultOps{},
 		useQKVFastPath:     true,
 		useInnerFastPath:   true,
 		innerFastPathValue: []float32{2, 3},
@@ -290,6 +292,7 @@ func TestAttentionSkipsStoreKVOnInnerFastPath(t *testing.T) {
 
 func TestAttentionStoresKVOnFallbackPath(t *testing.T) {
 	ops := &attentionFastPathOps{
+		DefaultOps:     &DefaultOps{},
 		useQKVFastPath: true,
 	}
 	m, layer := newAttentionFastPathFixture(ops)
@@ -304,7 +307,7 @@ func TestAttentionStoresKVOnFallbackPath(t *testing.T) {
 }
 
 type attentionFastPathOps struct {
-	DefaultOps
+	*DefaultOps
 	storeKVCalls                int
 	useQKVFastPath              bool
 	useInnerFastPath            bool

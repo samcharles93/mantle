@@ -8,7 +8,7 @@ import (
 	"github.com/samcharles93/mantle/internal/backend/simd"
 )
 
-var errCUDAUnavailable = errors.New("cuda backend not implemented in this build")
+var errCUDAUnavailable = errors.New("cuda backend unavailable in this binary (built without cuda support)")
 
 func newCPU() (Backend, error) {
 	return simd.New(), nil

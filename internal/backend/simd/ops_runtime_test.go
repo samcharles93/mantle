@@ -84,15 +84,15 @@ func TestInstanceBindDefaultOpsUsesBoundDispatch(t *testing.T) {
 }
 
 type customOps struct {
-	DefaultOps
+	*DefaultOps
 }
 
 func TestInstanceBindDefaultOpsPreservesCustomOps(t *testing.T) {
 	m := &Instance{HeadDim: 128}
-	m.SetOps(customOps{})
+	m.SetOps(&customOps{&DefaultOps{}})
 	m.bindDefaultOps()
 
-	if _, ok := m.Ops().(customOps); !ok {
-		t.Fatalf("expected customOps, got %T", m.Ops())
+	if _, ok := m.Ops().(*customOps); !ok {
+		t.Fatalf("expected *customOps, got %T", m.Ops())
 	}
 }

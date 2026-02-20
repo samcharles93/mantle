@@ -57,7 +57,7 @@ func printTensorDump(name string, indexBytes, dataBytes []byte) {
 		fmt.Println("(data offset out of bounds)")
 		return
 	}
-	end := min(start + avail, len(dataBytes))
+	end := min(start+avail, len(dataBytes))
 
 	raw := dataBytes[start:end]
 	fmt.Printf("Raw Bytes (first %d):\n", len(raw))

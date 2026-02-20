@@ -13,54 +13,98 @@ type Ops interface {
 }
 
 // DefaultOps provides default CPU-based operations.
-type DefaultOps struct{}
+type DefaultOps struct {
+	scratch []float32
+}
 
-func (DefaultOps) MatVec(dst []float32, w *instance.Mat, x []float32) {
+func (o *DefaultOps) MatVec(dst []float32, w *instance.Mat, x []float32) {
 	MatVec(dst, w, x)
 }
 
-func (DefaultOps) MatVecWithQuant(dst []float32, w *instance.Mat, x []float32, qx *instance.QuantVec) {
+func (o *DefaultOps) MatVecWithQuant(dst []float32, w *instance.Mat, x []float32, qx *instance.QuantVec) {
 	MatVecWithQuant(dst, w, x, qx)
 }
 
-func (DefaultOps) FlashAttention(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
-	// This method is not typically used directly since FlashAttention operates on full sequences
-	// Return false to indicate that this specific fast path is not used
-	return false
+func (o *DefaultOps) FlashAttention(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool {
+	return o.IncrementalAttention(attnOut, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap)
 }
 
-func (DefaultOps) FlashAttentionMultiHead(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
-	// For incremental processing with KV caching, we can't directly use the full FlashAttention
-	// implementation since it's designed for full sequence processing.
-	// However, we can implement a version that works with the current KV cache structure.
-
-	// Check if we have enough context to meaningfully use FlashAttention
-	// For now, return false to indicate that this specific fast path is not implemented
-	// for the incremental processing pattern
-	return false
+func (o *DefaultOps) FlashAttentionMultiHead(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool {
+	return o.IncrementalAttention(attnOut, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap)
 }
 
-// Add the method to DefaultOps
-func (DefaultOps) IncrementalAttention(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale float32) bool {
-	// For now, return false to indicate that this specific fast path is not implemented
-	// This would be where we implement an optimized attention kernel that leverages
-	// FlashAttention concepts for the incremental processing pattern
-	return false
+func (o *DefaultOps) IncrementalAttention(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool {
+	if layer == nil || kvStride <= 0 || nHead <= 0 || headDim <= 0 || kvHeads <= 0 {
+		return false
+	}
+	if len(attnOut) < nHead*headDim || len(q) < nHead*headDim || len(k) < kvStride || len(v) < kvStride {
+		return false
+	}
+	if start < 0 || start > pos {
+		return false
+	}
+
+	cacheLen := layer.AttnCache.CacheLen
+	cachePos := pos
+	if cacheLen > 0 {
+		cachePos = pos % cacheLen
+	}
+	layer.AttnCache.EnsurePos(cachePos)
+	o.StoreKV(-1, cachePos, kvStride,
+		layer.AttnCache.K, layer.AttnCache.V,
+		layer.AttnCache.K16, layer.AttnCache.V16,
+		layer.AttnCache.KQ8, layer.AttnCache.VQ8,
+		layer.AttnCache.KQ8S, layer.AttnCache.VQ8S,
+		k, v)
+
+	winLen := pos - start + 1
+	if winLen <= 0 {
+		return false
+	}
+	ctx := AttnContext{
+		Q:         q,
+		CacheK:    layer.AttnCache.K,
+		CacheV:    layer.AttnCache.V,
+		CacheK16:  layer.AttnCache.K16,
+		CacheV16:  layer.AttnCache.V16,
+		CacheKQ8:  layer.AttnCache.KQ8,
+		CacheVQ8:  layer.AttnCache.VQ8,
+		CacheKQ8S: layer.AttnCache.KQ8S,
+		CacheVQ8S: layer.AttnCache.VQ8S,
+		AttnOut:   attnOut[:nHead*headDim],
+		Pos:       pos,
+		Start:     start,
+		KvStride:  kvStride,
+		HeadDim:   headDim,
+		NHead:     nHead,
+		KvHeads:   kvHeads,
+		Scale:     scale,
+		Softcap:   softcap,
+		CacheLen:  cacheLen,
+		Ops:       o,
+	}
+	if cap(o.scratch) < winLen {
+		o.scratch = make([]float32, winLen)
+	} else {
+		o.scratch = o.scratch[:winLen]
+	}
+	RunAttnHeads(&ctx, o.scratch, 0, nHead)
+	return true
 }
 
-func (DefaultOps) RMSNorm(dst, src, weight []float32, eps float32) {
+func (o *DefaultOps) RMSNorm(dst, src, weight []float32, eps float32) {
 	RMSNorm(dst, src, weight, eps)
 }
 
-func (DefaultOps) Softmax(x []float32) {
+func (o *DefaultOps) Softmax(x []float32) {
 	Softmax(x)
 }
 
-func (DefaultOps) ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {
+func (o *DefaultOps) ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {
 	ApplyRoPE(x, nHead, headDim, pos, invFreq, attentionFactor)
 }
 
-func (DefaultOps) StoreKV(_ int, pos, kvStride int, kDst, vDst []float32, kDst16, vDst16 []uint16, kDstQ8, vDstQ8 []int8, kDstQ8S, vDstQ8S []float32, k, v []float32) {
+func (o *DefaultOps) StoreKV(_ int, pos, kvStride int, kDst, vDst []float32, kDst16, vDst16 []uint16, kDstQ8, vDstQ8 []int8, kDstQ8S, vDstQ8S []float32, k, v []float32) {
 	if kvStride <= 0 {
 		return
 	}

@@ -1,6 +1,9 @@
 package simd
 
-import "github.com/samcharles93/mantle/internal/hostcaps"
+import (
+	"github.com/samcharles93/mantle/internal/backend/core"
+	"github.com/samcharles93/mantle/internal/hostcaps"
+)
 
 type rmsNormKernel func(dst, src, weight []float32, eps float32)
 
@@ -86,17 +89,23 @@ func (m *Instance) bindDefaultOps() {
 	if m == nil {
 		return
 	}
-	if !isDefaultLikeOps(m.Ops()) {
+	cm := m.asCore()
+	if cm == nil {
 		return
 	}
-	m.SetOps(newBoundCPUOps(nil, m.HeadDim))
+	if !isDefaultLikeOps(cm.Ops()) {
+		return
+	}
+	cm.SetOps(newBoundCPUOps(nil, m.HeadDim))
 }
 
 func isDefaultLikeOps(ops Ops) bool {
 	switch ops.(type) {
 	case nil:
 		return true
-	case DefaultOps:
+	case *DefaultOps:
+		return true
+	case core.DefaultOps:
 		return true
 	case *boundCPUOps:
 		return true
