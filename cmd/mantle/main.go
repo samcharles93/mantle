@@ -48,6 +48,7 @@ func main() {
 		},
 		Commands: []*cli.Command{
 			runCmd(),
+			doCmd(),
 			packCmd(),
 			quantizeCmd(),
 			inspectCmd(),
