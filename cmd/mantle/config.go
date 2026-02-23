@@ -35,6 +35,10 @@ type Config struct {
 
 	// Server
 	ServerAddress string `yaml:"server_address"`
+
+	// Agent settings
+	TooldefsDir     string `yaml:"tooldefs_dir"`
+	SystemPromptTpl string `yaml:"system_prompt_template"` // path to template file (optional)
 }
 
 func configPath() string {
@@ -102,6 +106,19 @@ func applyServeConfig(c *cli.Command, cfg Config, service *api.InferenceService,
 	// Apply sampling parameter defaults to service if available
 	if service != nil {
 		service.SetSamplingDefaults(cfg.Temperature, cfg.TopP, cfg.TopK, cfg.RepeatPenalty, cfg.MaxContext, cfg.Steps, cfg.Seed)
+	}
+}
+
+// applyAgentConfig applies config file defaults to agent (do) command variables.
+func applyAgentConfig(c *cli.Command, cfg Config, tooldefsDir *string) {
+	if cfg.ModelsDir != "" && !c.IsSet("models-path") {
+		modelsPath = cfg.ModelsDir
+	}
+	if cfg.Backend != "" && !c.IsSet("backend") {
+		backend = cfg.Backend
+	}
+	if cfg.TooldefsDir != "" && !c.IsSet("tooldefs-dir") {
+		*tooldefsDir = cfg.TooldefsDir
 	}
 }
 
