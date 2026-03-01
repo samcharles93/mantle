@@ -63,6 +63,20 @@ func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int, opt
 	return loadModelFromSource(cfg, spec, mcfSource{mf: mcfFile}, maxContext, opts)
 }
 
+// safeMulInt multiplies two ints, returning an error if the result would overflow.
+func safeMulInt(a, b int) (int, error) {
+	if a < 0 || b < 0 {
+		return 0, fmt.Errorf("negative dimension in size computation")
+	}
+	if a == 0 || b == 0 {
+		return 0, nil
+	}
+	if a > math.MaxInt/b {
+		return 0, fmt.Errorf("dimension too large in size computation")
+	}
+	return a * b, nil
+}
+
 func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSource, maxContext int, opts LoadModelOptions) (*Instance, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("nil config")
@@ -1099,8 +1113,20 @@ func loadMambaLayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames
 	if kernelLen < 1 {
 		return nil, fmt.Errorf("layer %d: invalid mamba conv kernel length", layer)
 	}
-	convState := make([]float32, (kernelLen-1)*convChannels)
-	ssmState := make([]float32, headCount*headDim*dState)
+	convLen, err := safeMulInt(kernelLen-1, convChannels)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: mamba conv state too large: %w", layer, err)
+	}
+	convState := make([]float32, convLen)
+	hc, err := safeMulInt(headCount, headDim)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: mamba ssm state too large (head dims): %w", layer, err)
+	}
+	ssmLen, err := safeMulInt(hc, dState)
+	if err != nil {
+		return nil, fmt.Errorf("layer %d: mamba ssm state too large (d_state): %w", layer, err)
+	}
+	ssmState := make([]float32, ssmLen)
 
 	return &core.MambaLayer{
 		InProj:       inProj,
