@@ -33,19 +33,25 @@ type HFConfig struct {
 	SharedKVLayersAlt    int                        `json:"attention.shared_kv_layers"`
 	GlobalAttnEveryN     int                        `json:"global_attn_every_n_layers"`
 	AttentionBias        bool                       `json:"attention_bias"`
+	AttnOutputGate       bool                       `json:"attn_output_gate"`
 	MuPEnabled           bool                       `json:"mup_enabled"`
 
-	HiddenSize        int     `json:"hidden_size"`
-	IntermediateSize  FlexInt `json:"intermediate_size"`
-	FeedForwardLength []int   `json:"feed_forward_length"`
-	NumHiddenLayers   int     `json:"num_hidden_layers"`
-	HeadDim           int     `json:"head_dim"`
-	RMSNormEps        float64 `json:"rms_norm_eps"`
-	LayerNormEps      float64 `json:"layer_norm_eps"`
-	VocabSize         int     `json:"vocab_size"`
-	RopeTheta         float64 `json:"rope_theta"`
-	RopeLocalBaseFreq float64 `json:"rope_local_base_freq"`
-	HiddenActivation  string  `json:"hidden_activation"`
+	HiddenSize          int     `json:"hidden_size"`
+	IntermediateSize    FlexInt `json:"intermediate_size"`
+	FeedForwardLength   []int   `json:"feed_forward_length"`
+	NumHiddenLayers     int     `json:"num_hidden_layers"`
+	HeadDim             int     `json:"head_dim"`
+	LinearConvKernel    int     `json:"linear_conv_kernel_dim"`
+	LinearKeyHeadDim    int     `json:"linear_key_head_dim"`
+	LinearValueHeadDim  int     `json:"linear_value_head_dim"`
+	LinearNumKeyHeads   int     `json:"linear_num_key_heads"`
+	LinearNumValueHeads int     `json:"linear_num_value_heads"`
+	RMSNormEps          float64 `json:"rms_norm_eps"`
+	LayerNormEps        float64 `json:"layer_norm_eps"`
+	VocabSize           int     `json:"vocab_size"`
+	RopeTheta           float64 `json:"rope_theta"`
+	RopeLocalBaseFreq   float64 `json:"rope_local_base_freq"`
+	HiddenActivation    string  `json:"hidden_activation"`
 
 	AttnLogitSoftcapping  float64 `json:"attn_logit_softcapping"`
 	FinalLogitSoftcapping float64 `json:"final_logit_softcapping"`
@@ -141,6 +147,7 @@ type ropeScaling struct {
 	RopeType                      string  `json:"rope_type"`
 	Factor                        float64 `json:"factor"`
 	OriginalMaxPositionEmbeddings int     `json:"original_max_position_embeddings"`
+	PartialRotaryFactor           float64 `json:"partial_rotary_factor"`
 	LowFreqFactor                 float64 `json:"low_freq_factor"`
 	HighFreqFactor                float64 `json:"high_freq_factor"`
 	AttentionFactor               float64 `json:"attention_factor"`
@@ -159,6 +166,7 @@ type ropeParams struct {
 	Factor                        float64 `json:"factor"`
 	OriginalMaxPositionEmbeddings int     `json:"original_max_position_embeddings"`
 	RopeTheta                     float64 `json:"rope_theta"`
+	PartialRotaryFactor           float64 `json:"partial_rotary_factor"`
 
 	LowFreqFactor   float64 `json:"low_freq_factor"`
 	HighFreqFactor  float64 `json:"high_freq_factor"`
@@ -216,6 +224,16 @@ type ArchNames struct {
 	ShortConvKernel  func(layer int) string
 	ShortConvInProj  func(layer int) string
 	ShortConvOutProj func(layer int) string
+
+	DeltaQKVProj func(layer int) string
+	DeltaAProj   func(layer int) string
+	DeltaBProj   func(layer int) string
+	DeltaZProj   func(layer int) string
+	DeltaOutProj func(layer int) string
+	DeltaConv    func(layer int) string
+	DeltaNorm    func(layer int) string
+	DeltaALog    func(layer int) string
+	DeltaDTBias  func(layer int) string
 
 	// Mamba/SSM tensors (optional).
 	MambaInProj   func(layer int) string
@@ -322,6 +340,21 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	if dst.HeadDim == 0 && textCfg.HeadDim > 0 {
 		dst.HeadDim = textCfg.HeadDim
 	}
+	if dst.LinearConvKernel == 0 && textCfg.LinearConvKernel > 0 {
+		dst.LinearConvKernel = textCfg.LinearConvKernel
+	}
+	if dst.LinearKeyHeadDim == 0 && textCfg.LinearKeyHeadDim > 0 {
+		dst.LinearKeyHeadDim = textCfg.LinearKeyHeadDim
+	}
+	if dst.LinearValueHeadDim == 0 && textCfg.LinearValueHeadDim > 0 {
+		dst.LinearValueHeadDim = textCfg.LinearValueHeadDim
+	}
+	if dst.LinearNumKeyHeads == 0 && textCfg.LinearNumKeyHeads > 0 {
+		dst.LinearNumKeyHeads = textCfg.LinearNumKeyHeads
+	}
+	if dst.LinearNumValueHeads == 0 && textCfg.LinearNumValueHeads > 0 {
+		dst.LinearNumValueHeads = textCfg.LinearNumValueHeads
+	}
 	if dst.RMSNormEps == 0 && textCfg.RMSNormEps > 0 {
 		dst.RMSNormEps = textCfg.RMSNormEps
 	}
@@ -380,6 +413,9 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	}
 	if !dst.AttentionBias && textCfg.AttentionBias {
 		dst.AttentionBias = true
+	}
+	if !dst.AttnOutputGate && textCfg.AttnOutputGate {
+		dst.AttnOutputGate = true
 	}
 	if !dst.MuPEnabled && textCfg.MuPEnabled {
 		dst.MuPEnabled = true
@@ -440,6 +476,8 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 		return falconH1Spec(), nil
 	case hasArch("lfm"):
 		return lfm2Spec(), nil
+	case hasArch("qwen3_5"):
+		return qwen35Spec(), nil
 	case hasArch("qwen3"):
 		return qwen3Spec(), nil
 	case hasArch("afmoe"):
