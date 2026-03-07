@@ -7,22 +7,23 @@ import (
 
 type rmsNormKernel func(dst, src, weight []float32, eps float32)
 
-type applyRoPEKernel func(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32)
-
 type boundCPUOps struct {
 	DefaultOps
 
-	headDim int
+	headDim   int
+	hasAVX2   bool
+	hasAVX512 bool
 
-	rmsNormFn   rmsNormKernel
-	applyRoPEFn applyRoPEKernel
+	rmsNormFn rmsNormKernel
 }
 
 func newBoundCPUOps(caps *hostcaps.Snapshot, headDim int) Ops {
 	hasAVX2, hasAVX512 := dispatchCPUFeatures(caps)
 
 	ops := &boundCPUOps{
-		headDim: headDim,
+		headDim:   headDim,
+		hasAVX2:   hasAVX2,
+		hasAVX512: hasAVX512,
 	}
 
 	switch {
@@ -32,22 +33,6 @@ func newBoundCPUOps(caps *hostcaps.Snapshot, headDim int) Ops {
 		ops.rmsNormFn = rmsNormSIMD
 	default:
 		ops.rmsNormFn = rmsNormScalar
-	}
-
-	half := headDim / 2
-	switch {
-	case hasAVX512 && half >= 16:
-		ops.applyRoPEFn = func(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {
-			applyRoPEAVX512(x, nHead, headDim, pos, invFreq, attentionFactor, half)
-		}
-	case hasAVX2 && half >= 8:
-		ops.applyRoPEFn = func(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {
-			applyRoPESIMD(x, nHead, headDim, pos, invFreq, attentionFactor, half)
-		}
-	default:
-		ops.applyRoPEFn = func(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {
-			applyRoPEScalar(x, nHead, headDim, pos, invFreq, attentionFactor, half)
-		}
 	}
 
 	return ops
@@ -72,17 +57,31 @@ func (o *boundCPUOps) RMSNorm(dst, src, weight []float32, eps float32) {
 }
 
 func (o *boundCPUOps) ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {
-	if o == nil || o.applyRoPEFn == nil || headDim != o.headDim {
+	if o == nil || headDim != o.headDim {
 		ApplyRoPE(x, nHead, headDim, pos, invFreq, attentionFactor)
 		return
 	}
 	if headDim%2 != 0 {
 		panic("headDim must be even for RoPE")
 	}
+	half := len(invFreq)
+	if half == 0 {
+		return
+	}
+	if half*2 > headDim {
+		panic("RoPE rotary dim exceeds headDim")
+	}
 	if attentionFactor == 0 {
 		attentionFactor = 1
 	}
-	o.applyRoPEFn(x, nHead, headDim, pos, invFreq, attentionFactor)
+	switch {
+	case o.hasAVX512 && half >= 16:
+		applyRoPEAVX512(x, nHead, headDim, pos, invFreq, attentionFactor, half)
+	case o.hasAVX2 && half >= 8:
+		applyRoPESIMD(x, nHead, headDim, pos, invFreq, attentionFactor, half)
+	default:
+		applyRoPEScalar(x, nHead, headDim, pos, invFreq, attentionFactor, half)
+	}
 }
 
 func (m *Instance) bindDefaultOps() {

@@ -74,6 +74,8 @@ type Layer struct {
 	ShortConvOutProj *Mat
 	ShortConvState   ShortConvState
 
+	DeltaNet *DeltaNetLayer
+
 	FfnUp   *Mat
 	FfnGate *Mat
 	FfnDown *Mat
@@ -135,6 +137,29 @@ type MambaLayer struct {
 	SSMState  []float32
 }
 
+// DeltaNetLayer holds the weights and recurrent state for a Gated DeltaNet block.
+type DeltaNetLayer struct {
+	QKVProj *Mat
+	AProj   *Mat
+	BProj   *Mat
+	ZProj   *Mat
+	OutProj *Mat
+	Conv    *Mat
+	Norm    []float32
+	ALog    []float32
+	DTBias  []float32
+
+	NumKeyHeads   int
+	NumValueHeads int
+	HeadKeyDim    int
+	HeadValueDim  int
+	KeyDim        int
+	ValueDim      int
+
+	ConvState      []float32
+	RecurrentState []float32
+}
+
 // ScratchBuffers holds temporary buffers for computation.
 type ScratchBuffers struct {
 	X         []float32
@@ -158,6 +183,14 @@ type ScratchBuffers struct {
 	ScProj    []float32
 	ScBx      []float32
 	ScConv    []float32
+	DeltaQKV  []float32
+	DeltaA    []float32
+	DeltaB    []float32
+	DeltaZ    []float32
+	DeltaQ    []float32
+	DeltaK    []float32
+	DeltaV    []float32
+	DeltaOut  []float32
 	Logits    []float32
 
 	MambaIn   []float32

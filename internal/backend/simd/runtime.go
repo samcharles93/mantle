@@ -279,7 +279,9 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 				}
 				attnIn = buf
 			}
-			if layer.IsRecurrent {
+			if layer.DeltaNet != nil {
+				attnOut = DeltaNet(m, layer, attnIn)
+			} else if layer.IsRecurrent {
 				attnOut = ShortConv(m, layer, attnIn)
 			} else {
 				attnOut = Attention(m, layer, attnIn, m.Pos)
@@ -300,6 +302,8 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 				copy(opOut, attnOut)
 				Add(opOut, mambaOut)
 			}
+		} else if layer.DeltaNet != nil {
+			opOut = DeltaNet(m, layer, m.Scratch.Tmp)
 		} else if layer.IsRecurrent {
 			opOut = ShortConv(m, layer, m.Scratch.Tmp)
 		} else {
@@ -432,6 +436,14 @@ func (m *Instance) Reset() {
 				layer.ShortConvState.Buf[j] = 0
 			}
 		}
+		if layer.DeltaNet != nil {
+			for j := range layer.DeltaNet.ConvState {
+				layer.DeltaNet.ConvState[j] = 0
+			}
+			for j := range layer.DeltaNet.RecurrentState {
+				layer.DeltaNet.RecurrentState[j] = 0
+			}
+		}
 		if layer.Mamba != nil {
 			if layer.Mamba.ConvState != nil {
 				for j := range layer.Mamba.ConvState {
@@ -460,7 +472,7 @@ func (m *Instance) PrecomputeRoPETables() {
 		return // Nothing to precompute
 	}
 
-	half := m.HeadDim / 2
+	half := len(m.RopeInvFreq)
 	totalEntries := m.MaxContext * half
 
 	m.RopeCosTable = make([]float32, totalEntries)

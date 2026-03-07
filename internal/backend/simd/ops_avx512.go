@@ -165,7 +165,7 @@ func applyRoPEAVX512(x []float32, nHead, headDim, pos int, invFreq []float64, at
 	for h := range nHead {
 		base := h * headDim
 		lo := x[base : base+half]
-		hi := x[base+half : base+headDim]
+		hi := x[base+half : base+half+half]
 
 		i := 0
 		for ; i+16 <= half; i += 16 {

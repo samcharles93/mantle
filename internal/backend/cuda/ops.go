@@ -515,6 +515,26 @@ func (o *Ops) PreloadModelWeights(m *core.Instance) error {
 		if err := uploadMat(prefix+".shortconv_out", layer.ShortConvOutProj); err != nil {
 			return err
 		}
+		if layer.DeltaNet != nil {
+			if err := uploadMat(prefix+".delta_qkv", layer.DeltaNet.QKVProj); err != nil {
+				return err
+			}
+			if err := uploadMat(prefix+".delta_a", layer.DeltaNet.AProj); err != nil {
+				return err
+			}
+			if err := uploadMat(prefix+".delta_b", layer.DeltaNet.BProj); err != nil {
+				return err
+			}
+			if err := uploadMat(prefix+".delta_z", layer.DeltaNet.ZProj); err != nil {
+				return err
+			}
+			if err := uploadMat(prefix+".delta_out", layer.DeltaNet.OutProj); err != nil {
+				return err
+			}
+			if err := uploadMat(prefix+".delta_conv", layer.DeltaNet.Conv); err != nil {
+				return err
+			}
+		}
 		if err := uploadMat(prefix+".ffn_up", layer.FfnUp); err != nil {
 			return err
 		}
@@ -2989,10 +3009,16 @@ func (o *Ops) ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64,
 	if headDim%2 != 0 {
 		panic("headDim must be even for RoPE")
 	}
+	half := len(invFreq)
+	if half == 0 {
+		return
+	}
+	if half*2 > headDim {
+		panic("RoPE rotary dim exceeds headDim")
+	}
 	if attentionFactor == 0 {
 		attentionFactor = 1
 	}
-	half := headDim / 2
 	for h := range nHead {
 		base := h * headDim
 		for i := range half {
@@ -4095,6 +4121,16 @@ func layerMats(layer *model.Layer) []*model.Mat {
 		layer.FfnGate,
 		layer.FfnDown,
 	}
+	if layer.DeltaNet != nil {
+		mats = append(mats,
+			layer.DeltaNet.QKVProj,
+			layer.DeltaNet.AProj,
+			layer.DeltaNet.BProj,
+			layer.DeltaNet.ZProj,
+			layer.DeltaNet.OutProj,
+			layer.DeltaNet.Conv,
+		)
+	}
 	if layer.MoE != nil {
 		mats = append(mats,
 			layer.MoE.Router,
@@ -4172,6 +4208,14 @@ func estimateModelWeightBytes(m *model.Instance, mode cudaWeightMode) int64 {
 		addMat(layer.ShortConvKernel)
 		addMat(layer.ShortConvInProj)
 		addMat(layer.ShortConvOutProj)
+		if layer.DeltaNet != nil {
+			addMat(layer.DeltaNet.QKVProj)
+			addMat(layer.DeltaNet.AProj)
+			addMat(layer.DeltaNet.BProj)
+			addMat(layer.DeltaNet.ZProj)
+			addMat(layer.DeltaNet.OutProj)
+			addMat(layer.DeltaNet.Conv)
+		}
 		addMat(layer.FfnUp)
 		addMat(layer.FfnGate)
 		addMat(layer.FfnDown)

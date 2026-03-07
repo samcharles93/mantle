@@ -222,10 +222,16 @@ func ApplyRoPESIMD(x []float32, nHead, headDim, pos int, invFreq []float64, atte
 	if headDim%2 != 0 {
 		panic("headDim must be even for RoPE")
 	}
+	half := len(invFreq)
+	if half == 0 {
+		return
+	}
+	if half*2 > headDim {
+		panic("RoPE rotary dim exceeds headDim")
+	}
 	if attentionFactor == 0 {
 		attentionFactor = 1
 	}
-	half := headDim / 2
 	applyRoPESIMD(x, nHead, headDim, pos, invFreq, attentionFactor, half)
 }
 
@@ -262,7 +268,7 @@ func applyRoPESIMD(x []float32, nHead, headDim, pos int, invFreq []float64, atte
 	for h := range nHead {
 		base := h * headDim
 		lo := x[base : base+half]
-		hi := x[base+half : base+headDim]
+		hi := x[base+half : base+half+half]
 
 		i := 0
 		for ; i+8 <= half; i += 8 {

@@ -250,10 +250,16 @@ func ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentio
 	if headDim%2 != 0 {
 		panic("headDim must be even for RoPE")
 	}
+	half := len(invFreq)
+	if half == 0 {
+		return
+	}
+	if half*2 > headDim {
+		panic("RoPE rotary dim exceeds headDim")
+	}
 	if attentionFactor == 0 {
 		attentionFactor = 1
 	}
-	half := headDim / 2
 	if cpu.HasAVX512 && half >= 16 {
 		applyRoPEAVX512(x, nHead, headDim, pos, invFreq, attentionFactor, half)
 		return

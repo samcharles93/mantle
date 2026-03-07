@@ -238,6 +238,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		ropeLocalBase = ropeBase
 	}
 	ropeScaling := model.RopeScalingForConfig(cfg)
+	rotaryDim := model.RotaryDimForConfig(cfg)
 	routeScale := cfg.RouteScale
 	if routeScale == 0 {
 		routeScale = 1
@@ -275,6 +276,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			FFNLength:              ffnLength,
 			HeadCount:              headCount,
 			HeadDim:                headDim,
+			RotaryDim:              rotaryDim,
 			HeadCountKV:            headKVArr,
 			RMSEpsilon:             rmsEps,
 			RopeFreqBase:           ropeBase,
@@ -283,6 +285,13 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			ContextLength:          cfg.MaxPosition,
 			VocabSize:              cfg.VocabSize,
 			ShortConvLCache:        cfg.ConvLCache,
+			DeltaKeyDim:            cfg.LinearNumKeyHeads * cfg.LinearKeyHeadDim,
+			DeltaValueDim:          cfg.LinearNumValueHeads * cfg.LinearValueHeadDim,
+			DeltaNumKeyHeads:       cfg.LinearNumKeyHeads,
+			DeltaNumValueHeads:     cfg.LinearNumValueHeads,
+			DeltaHeadKeyDim:        cfg.LinearKeyHeadDim,
+			DeltaHeadValueDim:      cfg.LinearValueHeadDim,
+			DeltaConvKernel:        cfg.LinearConvKernel,
 			EmbeddingMultiplier:    cfg.EmbeddingMultiplier,
 			LMHeadMultiplier:       cfg.LMHeadMultiplier,
 			AttentionInMultiplier:  cfg.AttentionInMultiplier,
@@ -434,28 +443,36 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		}
 
 		if layer.IsRecurrent {
-			if names.ShortConvKernel == nil || names.ShortConvInProj == nil || names.ShortConvOutProj == nil {
-				return nil, fmt.Errorf("layer %d: recurrent layer not supported for arch %s", i, spec.Name)
-			}
-			layer.ShortConvKernel, err = loadConvKernel(src, names.ShortConvKernel(i))
-			if err != nil {
-				return nil, err
-			}
-			layer.ShortConvInProj, err = loadMat(src, names.ShortConvInProj(i))
-			if err != nil {
-				return nil, err
-			}
-			layer.ShortConvOutProj, err = loadMat(src, names.ShortConvOutProj(i))
-			if err != nil {
-				return nil, err
-			}
-			kernelLen := layer.ShortConvKernel.C
-			if kernelLen < 1 {
-				return nil, fmt.Errorf("invalid shortconv kernel length for layer %d", i)
-			}
-			layer.ShortConvState = core.ShortConvState{
-				Buf:       make([]float32, (kernelLen-1)*cfg.HiddenSize),
-				KernelLen: kernelLen,
+			if names.DeltaQKVProj != nil {
+				delta, err := loadDeltaNetLayer(src, cfg, names, i)
+				if err != nil {
+					return nil, err
+				}
+				layer.DeltaNet = delta
+			} else {
+				if names.ShortConvKernel == nil || names.ShortConvInProj == nil || names.ShortConvOutProj == nil {
+					return nil, fmt.Errorf("layer %d: recurrent layer not supported for arch %s", i, spec.Name)
+				}
+				layer.ShortConvKernel, err = loadConvKernel(src, names.ShortConvKernel(i))
+				if err != nil {
+					return nil, err
+				}
+				layer.ShortConvInProj, err = loadMat(src, names.ShortConvInProj(i))
+				if err != nil {
+					return nil, err
+				}
+				layer.ShortConvOutProj, err = loadMat(src, names.ShortConvOutProj(i))
+				if err != nil {
+					return nil, err
+				}
+				kernelLen := layer.ShortConvKernel.C
+				if kernelLen < 1 {
+					return nil, fmt.Errorf("invalid shortconv kernel length for layer %d", i)
+				}
+				layer.ShortConvState = core.ShortConvState{
+					Buf:       make([]float32, (kernelLen-1)*cfg.HiddenSize),
+					KernelLen: kernelLen,
+				}
 			}
 		} else {
 			if spec.HasQKNorm {
@@ -482,7 +499,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 					return nil, fmt.Errorf("layer %d: could not resolve q/k norm tensors", i)
 				}
 			}
-			layer.Wq, err = loadMat(src, names.Wq(i))
+			layer.Wq, layer.AttnGate, err = loadAttentionQAndGate(src, cfg, names.Wq(i), qDim, cfg.HiddenSize, headDim)
 			if err != nil {
 				return nil, err
 			}
@@ -523,17 +540,17 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			if layer.Wo.R != hidden || layer.Wo.C != qDim {
 				return nil, fmt.Errorf("layer %d: o_proj shape [%d %d] incompatible with hidden=%d head_dim=%d heads=%d", i, layer.Wo.R, layer.Wo.C, hidden, headDim, headCount)
 			}
-			if names.AttnGate != nil {
+			if names.AttnGate != nil && layer.AttnGate == nil {
 				layer.AttnGate, err = loadMat(src, names.AttnGate(i))
 				if err != nil {
 					return nil, err
 				}
-				if layer.AttnGate.R != qDim || layer.AttnGate.C != hidden {
-					return nil, fmt.Errorf(
-						"layer %d: attn gate shape [%d %d] incompatible with hidden=%d qdim=%d",
-						i, layer.AttnGate.R, layer.AttnGate.C, hidden, qDim,
-					)
-				}
+			}
+			if layer.AttnGate != nil && (layer.AttnGate.R != qDim || layer.AttnGate.C != hidden) {
+				return nil, fmt.Errorf(
+					"layer %d: attn gate shape [%d %d] incompatible with hidden=%d qdim=%d",
+					i, layer.AttnGate.R, layer.AttnGate.C, hidden, qDim,
+				)
 			}
 			if isMoELayer {
 				moe, err := loadMoELayer(src, cfg, names, i)
@@ -697,6 +714,151 @@ func numElementsModel(shape []int) (int, error) {
 		n *= d
 	}
 	return n, nil
+}
+
+func loadMatRows(src tensorSource, name string, rowStart, rowCount int) (*core.Mat, error) {
+	payload, err := src.ReadTensor(name)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	shape := payload.Shape
+	if len(shape) != 2 {
+		return nil, fmt.Errorf("%s: expected 2D tensor", name)
+	}
+	r := shape[0]
+	c := shape[1]
+	if r <= 0 || c <= 0 {
+		return nil, fmt.Errorf("%s: invalid shape %v", name, shape)
+	}
+	if rowStart < 0 || rowCount <= 0 || rowStart+rowCount > r {
+		return nil, fmt.Errorf("%s: invalid row slice start=%d count=%d shape=%v", name, rowStart, rowCount, shape)
+	}
+	switch payload.DType {
+	case mcf.DTypeF32:
+		data, err := decodeTensorF32(payload)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		start := rowStart * c
+		end := (rowStart + rowCount) * c
+		out := append([]float32(nil), data[start:end]...)
+		m := core.NewMatFromData(rowCount, c, out)
+		return &m, nil
+	case mcf.DTypeBF16, mcf.DTypeF16:
+		rowBytes, err := safeMulInt(c, 2)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		start := rowStart * rowBytes
+		end := (rowStart + rowCount) * rowBytes
+		m, err := core.NewMatFromRaw(rowCount, c, payload.DType, payload.Raw[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		return &m, nil
+	default:
+		return nil, fmt.Errorf("%s: row slicing unsupported for dtype %d", name, payload.DType)
+	}
+}
+
+func loadInterleavedHeadBlocks(src tensorSource, name string, headDim, headCount, hidden int) (*core.Mat, *core.Mat, error) {
+	payload, err := src.ReadTensor(name)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", name, err)
+	}
+	shape := payload.Shape
+	if len(shape) != 2 {
+		return nil, nil, fmt.Errorf("%s: expected 2D tensor", name)
+	}
+	totalRows := 2 * headDim * headCount
+	if shape[0] != totalRows || shape[1] != hidden {
+		return nil, nil, fmt.Errorf("%s: unexpected fused q/gate shape %v", name, shape)
+	}
+
+	switch payload.DType {
+	case mcf.DTypeF32:
+		data, err := decodeTensorF32(payload)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", name, err)
+		}
+		rowsPerMat := headDim * headCount
+		qData := make([]float32, rowsPerMat*hidden)
+		gData := make([]float32, rowsPerMat*hidden)
+		dstQ := 0
+		dstG := 0
+		for h := range headCount {
+			baseRow := 2 * h * headDim
+			qStart := baseRow * hidden
+			qEnd := (baseRow + headDim) * hidden
+			copy(qData[dstQ:dstQ+headDim*hidden], data[qStart:qEnd])
+			dstQ += headDim * hidden
+
+			gStart := qEnd
+			gEnd := (baseRow + 2*headDim) * hidden
+			copy(gData[dstG:dstG+headDim*hidden], data[gStart:gEnd])
+			dstG += headDim * hidden
+		}
+		qMat := core.NewMatFromData(rowsPerMat, hidden, qData)
+		gMat := core.NewMatFromData(rowsPerMat, hidden, gData)
+		return &qMat, &gMat, nil
+	case mcf.DTypeBF16, mcf.DTypeF16:
+		rowBytes, err := safeMulInt(hidden, 2)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", name, err)
+		}
+		blockBytes := headDim * rowBytes
+		qRaw := make([]byte, headCount*blockBytes)
+		gRaw := make([]byte, headCount*blockBytes)
+		dstQ := 0
+		dstG := 0
+		for h := range headCount {
+			baseRow := 2 * h * headDim
+			qStart := baseRow * rowBytes
+			qEnd := qStart + blockBytes
+			copy(qRaw[dstQ:dstQ+blockBytes], payload.Raw[qStart:qEnd])
+			dstQ += blockBytes
+
+			gStart := qEnd
+			gEnd := gStart + blockBytes
+			copy(gRaw[dstG:dstG+blockBytes], payload.Raw[gStart:gEnd])
+			dstG += blockBytes
+		}
+		qMat, err := core.NewMatFromRaw(headDim*headCount, hidden, payload.DType, qRaw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", name, err)
+		}
+		gMat, err := core.NewMatFromRaw(headDim*headCount, hidden, payload.DType, gRaw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", name, err)
+		}
+		return &qMat, &gMat, nil
+	default:
+		return nil, nil, fmt.Errorf("%s: fused q/gate split unsupported for dtype %d", name, payload.DType)
+	}
+}
+
+func loadAttentionQAndGate(src tensorSource, cfg *model.HFConfig, qName string, qDim, hidden, headDim int) (*core.Mat, *core.Mat, error) {
+	if cfg != nil && cfg.AttnOutputGate {
+		if shape, ok := src.TensorShape(qName); ok && len(shape) == 2 && shape[0] == 2*qDim && shape[1] == hidden {
+			if headDim > 0 && qDim%headDim == 0 {
+				return loadInterleavedHeadBlocks(src, qName, headDim, qDim/headDim, hidden)
+			}
+			wq, err := loadMatRows(src, qName, 0, qDim)
+			if err != nil {
+				return nil, nil, err
+			}
+			gate, err := loadMatRows(src, qName, qDim, qDim)
+			if err != nil {
+				return nil, nil, err
+			}
+			return wq, gate, nil
+		}
+	}
+	wq, err := loadMat(src, qName)
+	if err != nil {
+		return nil, nil, err
+	}
+	return wq, nil, nil
 }
 
 // bf16ToF32 and fp16ToF32 are defined in dtype.go.
@@ -976,6 +1138,108 @@ func loadMoELayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, 
 	}, nil
 }
 
+func loadDeltaNetLayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, layer int) (*core.DeltaNetLayer, error) {
+	if names.DeltaQKVProj == nil || names.DeltaAProj == nil || names.DeltaBProj == nil || names.DeltaZProj == nil ||
+		names.DeltaOutProj == nil || names.DeltaConv == nil || names.DeltaNorm == nil || names.DeltaALog == nil || names.DeltaDTBias == nil {
+		return nil, fmt.Errorf("layer %d: gated deltanet tensor names are incomplete", layer)
+	}
+	qkv, err := loadMat(src, names.DeltaQKVProj(layer))
+	if err != nil {
+		return nil, err
+	}
+	aProj, err := loadMat(src, names.DeltaAProj(layer))
+	if err != nil {
+		return nil, err
+	}
+	bProj, err := loadMat(src, names.DeltaBProj(layer))
+	if err != nil {
+		return nil, err
+	}
+	zProj, err := loadMat(src, names.DeltaZProj(layer))
+	if err != nil {
+		return nil, err
+	}
+	outProj, err := loadMat(src, names.DeltaOutProj(layer))
+	if err != nil {
+		return nil, err
+	}
+	conv, err := loadConvKernel(src, names.DeltaConv(layer))
+	if err != nil {
+		return nil, err
+	}
+	norm, err := loadVec(src, names.DeltaNorm(layer))
+	if err != nil {
+		return nil, err
+	}
+	aLog, err := loadVec(src, names.DeltaALog(layer))
+	if err != nil {
+		return nil, err
+	}
+	dtBias, err := loadVec(src, names.DeltaDTBias(layer))
+	if err != nil {
+		return nil, err
+	}
+
+	keyHeads := cfg.LinearNumKeyHeads
+	valueHeads := cfg.LinearNumValueHeads
+	keyDim := cfg.LinearKeyHeadDim
+	valueDim := cfg.LinearValueHeadDim
+	hidden := cfg.HiddenSize
+	if keyHeads <= 0 || valueHeads <= 0 || keyDim <= 0 || valueDim <= 0 {
+		return nil, fmt.Errorf("layer %d: linear attention config is incomplete", layer)
+	}
+	if valueHeads%keyHeads != 0 {
+		return nil, fmt.Errorf("layer %d: linear attention value_heads=%d not divisible by key_heads=%d", layer, valueHeads, keyHeads)
+	}
+	totalKey := keyHeads * keyDim
+	totalValue := valueHeads * valueDim
+	convDim := 2*totalKey + totalValue
+	if qkv.C != hidden || qkv.R != convDim {
+		return nil, fmt.Errorf("layer %d: delta qkv shape [%d %d] incompatible with hidden=%d conv_dim=%d", layer, qkv.R, qkv.C, hidden, convDim)
+	}
+	if zProj.C != hidden || zProj.R != totalValue {
+		return nil, fmt.Errorf("layer %d: delta z_proj shape [%d %d] incompatible with hidden=%d value_dim=%d", layer, zProj.R, zProj.C, hidden, totalValue)
+	}
+	if aProj.C != hidden || aProj.R != valueHeads {
+		return nil, fmt.Errorf("layer %d: delta a_proj shape [%d %d] incompatible with hidden=%d value_heads=%d", layer, aProj.R, aProj.C, hidden, valueHeads)
+	}
+	if bProj.C != hidden || bProj.R != valueHeads {
+		return nil, fmt.Errorf("layer %d: delta b_proj shape [%d %d] incompatible with hidden=%d value_heads=%d", layer, bProj.R, bProj.C, hidden, valueHeads)
+	}
+	if outProj.R != hidden || outProj.C != totalValue {
+		return nil, fmt.Errorf("layer %d: delta out_proj shape [%d %d] incompatible with hidden=%d value_dim=%d", layer, outProj.R, outProj.C, hidden, totalValue)
+	}
+	if conv.R != convDim {
+		return nil, fmt.Errorf("layer %d: delta conv channels %d incompatible with conv_dim=%d", layer, conv.R, convDim)
+	}
+	if len(norm) != valueDim {
+		return nil, fmt.Errorf("layer %d: delta norm length %d incompatible with head_value_dim=%d", layer, len(norm), valueDim)
+	}
+	if len(aLog) != valueHeads || len(dtBias) != valueHeads {
+		return nil, fmt.Errorf("layer %d: delta A_log/dt_bias lengths incompatible with value_heads=%d", layer, valueHeads)
+	}
+
+	return &core.DeltaNetLayer{
+		QKVProj:        qkv,
+		AProj:          aProj,
+		BProj:          bProj,
+		ZProj:          zProj,
+		OutProj:        outProj,
+		Conv:           conv,
+		Norm:           norm,
+		ALog:           aLog,
+		DTBias:         dtBias,
+		NumKeyHeads:    keyHeads,
+		NumValueHeads:  valueHeads,
+		HeadKeyDim:     keyDim,
+		HeadValueDim:   valueDim,
+		KeyDim:         totalKey,
+		ValueDim:       totalValue,
+		ConvState:      make([]float32, max(conv.C-1, 0)*convDim),
+		RecurrentState: make([]float32, valueHeads*keyDim*valueDim),
+	}, nil
+}
+
 func loadMambaLayer(src tensorSource, cfg *model.HFConfig, names model.ArchNames, layer int, modelCfg *core.ModelConfig) (*core.MambaLayer, error) {
 	if names.MambaInProj == nil || names.MambaOutProj == nil || names.MambaConv == nil || names.MambaALog == nil || names.MambaD == nil || names.MambaDTBias == nil {
 		return nil, nil
@@ -1238,6 +1502,9 @@ func initInstanceScratch(m *Instance) {
 	ffn := m.Config.Config.FFNLength
 	numExperts := m.Config.Config.NumExperts
 	topK := m.Config.Config.NumExpertsPerTok
+	deltaQKV := 2*m.Config.Config.DeltaKeyDim + m.Config.Config.DeltaValueDim
+	deltaValue := m.Config.Config.DeltaValueDim
+	deltaHeads := m.Config.Config.DeltaNumValueHeads
 	kv := m.MaxHeadKV * m.HeadDim
 	if kv < 1 {
 		kv = m.HeadDim
@@ -1268,6 +1535,14 @@ func initInstanceScratch(m *Instance) {
 		ScProj:    make([]float32, embd*3),
 		ScBx:      make([]float32, embd),
 		ScConv:    make([]float32, embd),
+		DeltaQKV:  make([]float32, max(deltaQKV, 1)),
+		DeltaA:    make([]float32, max(deltaHeads, 1)),
+		DeltaB:    make([]float32, max(deltaHeads, 1)),
+		DeltaZ:    make([]float32, max(deltaValue, 1)),
+		DeltaQ:    make([]float32, max(m.Config.Config.DeltaKeyDim, 1)),
+		DeltaK:    make([]float32, max(m.Config.Config.DeltaKeyDim, 1)),
+		DeltaV:    make([]float32, max(deltaValue, 1)),
+		DeltaOut:  make([]float32, max(deltaValue, 1)),
 		Logits:    make([]float32, m.Config.Config.VocabSize),
 	}
 	if m.Config.Config.MambaInner > 0 && m.Config.Config.MambaHeadCount > 0 {
@@ -1299,13 +1574,23 @@ func updateInstanceRoPE(m *Instance) {
 	if headDim == 0 {
 		headDim = m.Config.Config.EmbeddingLength / m.Config.Config.HeadCount
 	}
+	rotaryDim := m.Config.Config.RotaryDim
+	if rotaryDim <= 0 || rotaryDim > headDim {
+		rotaryDim = headDim
+	}
+	if rotaryDim%2 != 0 {
+		rotaryDim--
+	}
+	if rotaryDim <= 0 {
+		rotaryDim = headDim
+	}
 	calc := func(base float64) ([]float64, float32) {
 		if base <= 0 {
 			base = 10000
 		}
-		ropeInvFreq := make([]float64, headDim/2)
+		ropeInvFreq := make([]float64, rotaryDim/2)
 		for i := range ropeInvFreq {
-			power := float64(2*i) / float64(headDim)
+			power := float64(2*i) / float64(rotaryDim)
 			ropeInvFreq[i] = 1.0 / math.Pow(base, power)
 		}
 		attnScale := 1.0
@@ -1374,22 +1659,25 @@ func adjustGemmaNorms(m *Instance, cfg *model.HFConfig) {
 	if m == nil || cfg == nil {
 		return
 	}
-	// Check for Gemma model types
-	isGemma := false
+	// Gemma and Qwen3.5 use one-centered RMSNorm parameters.
+	needsOneCenteredNorms := false
 	mt := strings.ToLower(cfg.ModelType)
 	if strings.Contains(mt, "gemma") {
-		isGemma = true
+		needsOneCenteredNorms = true
+	}
+	if strings.Contains(mt, "qwen3_5") {
+		needsOneCenteredNorms = true
 	}
 	// Also check architecture list if model_type is generic
 	for _, arch := range cfg.Architectures {
 		at := strings.ToLower(arch)
-		if strings.Contains(at, "gemma") {
-			isGemma = true
+		if strings.Contains(at, "gemma") || strings.Contains(at, "qwen3_5") {
+			needsOneCenteredNorms = true
 			break
 		}
 	}
 
-	if !isGemma {
+	if !needsOneCenteredNorms {
 		return
 	}
 

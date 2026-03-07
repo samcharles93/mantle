@@ -79,7 +79,9 @@ func (m *Instance) ForwardTokenGreedy(tok int) (int, error) {
 				}
 				attnIn = buf
 			}
-			if layer.IsRecurrent {
+			if layer.DeltaNet != nil {
+				attnOut = DeltaNet(m, layer, attnIn)
+			} else if layer.IsRecurrent {
 				attnOut = ShortConv(m, layer, attnIn)
 			} else {
 				attnOut = Attention(m, layer, attnIn, m.Pos)
@@ -100,6 +102,8 @@ func (m *Instance) ForwardTokenGreedy(tok int) (int, error) {
 				copy(opOut, attnOut)
 				Add(opOut, mambaOut)
 			}
+		} else if layer.DeltaNet != nil {
+			opOut = DeltaNet(m, layer, m.Scratch.Tmp)
 		} else if layer.IsRecurrent {
 			opOut = ShortConv(m, layer, m.Scratch.Tmp)
 		} else {

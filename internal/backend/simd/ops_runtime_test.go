@@ -68,6 +68,24 @@ func TestDefaultOpsApplyRoPEMatchesFunction(t *testing.T) {
 	}
 }
 
+func TestApplyRoPEPartialLeavesSuffixUntouched(t *testing.T) {
+	x := []float32{1, 2, 3, 4, 5, 6, 7, 8}
+	orig := append([]float32(nil), x...)
+
+	ApplyRoPE(x, 1, 8, 2, []float64{1.0, 0.5}, 1.0)
+
+	for i := 4; i < len(x); i++ {
+		if x[i] != orig[i] {
+			t.Fatalf("suffix x[%d]: got %v want %v", i, x[i], orig[i])
+		}
+	}
+	for i := range 4 {
+		if x[i] == orig[i] {
+			t.Fatalf("prefix x[%d] did not rotate", i)
+		}
+	}
+}
+
 func TestInstanceBindDefaultOpsUsesBoundDispatch(t *testing.T) {
 	m := &Instance{HeadDim: 128}
 	m.setHostCapabilities(&hostcaps.Snapshot{
