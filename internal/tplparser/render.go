@@ -24,7 +24,7 @@ func renderByArchDefault(opts RenderOptions) (string, bool, error) {
 		return renderGemma3(opts)
 	case "gemma3_text", "gemma3", "gemma3n_text", "gemma3n":
 		return renderGemma3(opts)
-	case "qwen3":
+	case "qwen3", "qwen3_5":
 		return renderQwen3(opts)
 	case "mistral3":
 		return renderMistral3(opts)

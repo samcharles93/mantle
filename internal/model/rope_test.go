@@ -80,3 +80,15 @@ func TestRopeScalingYarnAttentionFactor(t *testing.T) {
 		t.Fatalf("expected yarn scaling to modify at least one frequency")
 	}
 }
+
+func TestRotaryDimForConfigPartialFactor(t *testing.T) {
+	cfg := &HFConfig{
+		HeadDim: 256,
+		RopeParameters: &ropeParams{
+			PartialRotaryFactor: 0.25,
+		},
+	}
+	if got := RotaryDimForConfig(cfg); got != 64 {
+		t.Fatalf("RotaryDimForConfig()=%d want 64", got)
+	}
+}

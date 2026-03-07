@@ -207,9 +207,13 @@ def main():
     except Exception as e:
         raise SystemExit(f"Failed to parse config.json: {e}")
 
+    text_cfg = cfg.get("text_config")
+    if not isinstance(text_cfg, dict):
+        text_cfg = {}
+
     model_type = cfg.get("model_type", "unknown")
     archs = cfg.get("architectures", [])
-    layer_types = cfg.get("layer_types")
+    layer_types = cfg.get("layer_types") or text_cfg.get("layer_types")
 
     names = collect_tensor_names(root)
 

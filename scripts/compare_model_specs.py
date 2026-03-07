@@ -27,21 +27,28 @@ def pick_attn_layer_index(names, layer_types):
     if not layer_types:
         return 0
     max_check = min(len(layer_types), 128)
+    prefixes = ["model.layers.", "model.language_model.layers.", "language_model.model.layers."]
     for i in range(max_check):
-        prefix = f"model.layers.{i}."
-        if any(n.startswith(prefix + "self_attn.") or n.startswith(prefix + "attention.") for n in names):
-            return i
+        for p in prefixes:
+            prefix = f"{p}{i}."
+            if any(n.startswith(prefix + "self_attn.") or n.startswith(prefix + "attention.") for n in names):
+                return i
     return 0
 
-def pick_conv_layer_index(names, layer_types):
+def pick_recurrent_layer_index(names, layer_types):
     if not layer_types:
         return 0
     max_check = min(len(layer_types), 128)
+    prefixes = ["model.layers.", "model.language_model.layers.", "language_model.model.layers."]
     for i in range(max_check):
-        prefix = f"model.layers.{i}."
-        if any(n.startswith(prefix + "conv.") for n in names):
-            return i
+        for p in prefixes:
+            prefix = f"{p}{i}."
+            if any(n.startswith(prefix + "linear_attn.") or n.startswith(prefix + "conv.") for n in names):
+                return i
     return 0
+
+def pick_conv_layer_index(names, layer_types):
+    return pick_recurrent_layer_index(names, layer_types)
 
 
 def load_spec_files(paths):
@@ -117,6 +124,8 @@ def detect_spec(cfg):
 
     if has("lfm"):
         return "lfm2Spec"
+    if has("qwen3_5"):
+        return "qwen35Spec"
     if has("qwen3"):
         return "qwen3Spec"
     if has("afmoe"):
@@ -134,16 +143,16 @@ def detect_spec(cfg):
     return None
 
 
-def check_presence(header_names, spec, layer_index, conv_layer_index):
+def check_presence(header_names, spec, attn_layer_index, recurrent_layer_index):
     missing = []
     def has(name):
         return name in header_names
 
-    def has_any(names):
+    def has_any(names, layer_idx):
         expanded = []
         for n in names:
             if "%d" in n:
-                expanded.append(n % layer_index)
+                expanded.append(n % layer_idx)
             else:
                 expanded.append(n)
         return any(n in header_names for n in expanded)
@@ -153,30 +162,57 @@ def check_presence(header_names, spec, layer_index, conv_layer_index):
         if key in spec and not has(spec[key]):
             missing.append((key, spec[key]))
     # candidates
-    for key in ["OutputCandidates", "AttnNormCandidates", "FfnNormCandidates", "PostAttnNormCandidates", "PostFfnNormCandidates", "QNormCandidates", "KNormCandidates"]:
+    for key in ["OutputCandidates"]:
         if key in spec:
             vals = spec[key]
             if isinstance(vals, list):
-                if not has_any(vals):
+                if not has_any(vals, 0):
                     missing.append((key, vals))
-    # layer0 format strings
-    for key in ["Wq", "Wk", "Wv", "Wo", "FfnUp", "FfnGate", "FfnDown", "AttnGate"]:
+    
+    for key in ["AttnNormCandidates", "FfnNormCandidates", "PostAttnNormCandidates", "PostFfnNormCandidates"]:
+        if key in spec:
+            vals = spec[key]
+            if isinstance(vals, list):
+                if not (has_any(vals, attn_layer_index) or has_any(vals, recurrent_layer_index)):
+                    missing.append((key, vals))
+
+    for key in ["QNormCandidates", "KNormCandidates"]:
+        if key in spec:
+            vals = spec[key]
+            if isinstance(vals, list):
+                if not has_any(vals, attn_layer_index):
+                    missing.append((key, vals))
+
+    # layer format strings
+    for key in ["Wq", "Wk", "Wv", "Wo", "AttnGate"]:
         if key in spec:
             fmt = spec[key]
-            name = fmt % layer_index if "%d" in fmt else fmt
+            name = fmt % attn_layer_index if "%d" in fmt else fmt
             if not has(name):
                 missing.append((key, name))
+
+    for key in ["FfnUp", "FfnGate", "FfnDown"]:
+        if key in spec:
+            fmt = spec[key]
+            name = fmt % attn_layer_index if "%d" in fmt else fmt
+            if not has(name):
+                # try recurrent index too
+                name2 = fmt % recurrent_layer_index if "%d" in fmt else fmt
+                if not has(name2):
+                    missing.append((key, name))
+
     for key in ["ShortConvKernel", "ShortConvInProj", "ShortConvOutProj"]:
         if key in spec:
             fmt = spec[key]
-            name = fmt % conv_layer_index if "%d" in fmt else fmt
+            name = fmt % recurrent_layer_index if "%d" in fmt else fmt
             if not has(name):
                 missing.append((key, name))
-    # Bias tensors are optional in the runtime; only flag if present in spec AND missing feels like a hard error.
+
+    # Bias tensors
     for key in ["WqBias", "WkBias", "WvBias"]:
         if key in spec:
             fmt = spec[key]
-            name = fmt % layer_index if "%d" in fmt else fmt
+            name = fmt % attn_layer_index if "%d" in fmt else fmt
             if has(name):
                 continue
     return missing
@@ -203,6 +239,8 @@ def main():
         if not cfg_path.exists():
             continue
         cfg = json.loads(cfg_path.read_text())
+        text_cfg = cfg.get("text_config", {})
+        layer_types = cfg.get("layer_types") or text_cfg.get("layer_types")
         spec_func = detect_spec(cfg)
         if spec_func is None:
             print(f"{d.name}: no spec mapping for model_type={cfg.get('model_type')}")
@@ -213,9 +251,9 @@ def main():
             continue
         arch = parse_arch_names(body)
         names = collect_tensor_names(d)
-        layer_index = pick_attn_layer_index(names, cfg.get("layer_types"))
-        conv_layer_index = pick_conv_layer_index(names, cfg.get("layer_types"))
-        missing = check_presence(names, arch, layer_index, conv_layer_index)
+        attn_layer_index = pick_attn_layer_index(names, layer_types)
+        recurrent_layer_index = pick_recurrent_layer_index(names, layer_types)
+        missing = check_presence(names, arch, attn_layer_index, recurrent_layer_index)
         if missing:
             print(f"{d.name}: {spec_func} MISSING {len(missing)} entries")
             for k, v in missing[:12]:

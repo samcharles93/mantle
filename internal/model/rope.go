@@ -5,6 +5,37 @@ import (
 	"strings"
 )
 
+func RotaryDimForConfig(cfg *HFConfig) int {
+	if cfg == nil {
+		return 0
+	}
+	headDim := cfg.HeadDim
+	if headDim <= 0 && cfg.HiddenSize > 0 && cfg.NumAttentionHeads > 0 {
+		headDim = cfg.HiddenSize / cfg.NumAttentionHeads
+	}
+	if headDim <= 0 {
+		return 0
+	}
+	factor := 1.0
+	switch {
+	case cfg.RopeParameters != nil && cfg.RopeParameters.PartialRotaryFactor > 0:
+		factor = cfg.RopeParameters.PartialRotaryFactor
+	case cfg.RopeScaling != nil && cfg.RopeScaling.PartialRotaryFactor > 0:
+		factor = cfg.RopeScaling.PartialRotaryFactor
+	}
+	rotaryDim := int(float64(headDim) * factor)
+	if rotaryDim <= 0 || rotaryDim > headDim {
+		rotaryDim = headDim
+	}
+	if rotaryDim%2 != 0 {
+		rotaryDim--
+	}
+	if rotaryDim <= 0 {
+		return headDim
+	}
+	return rotaryDim
+}
+
 func RopeScalingForConfig(cfg *HFConfig) *RopeScaling {
 	if cfg == nil {
 		return nil

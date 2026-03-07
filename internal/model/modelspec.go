@@ -239,6 +239,89 @@ func qwen3Spec() *ArchSpec {
 	}
 }
 
+// Qwen3.5
+func qwen35Spec() *ArchSpec {
+	return &ArchSpec{
+		Name:          "qwen3_5",
+		HasQKNorm:     true,
+		UseLayerTypes: true,
+		Names: ArchNames{
+			Embedding:  "model.language_model.embed_tokens.weight",
+			OutputNorm: "model.language_model.norm.weight",
+			OutputCandidates: func() []string {
+				return []string{
+					"model.language_model.lm_head.weight",
+					"model.language_model.embed_tokens.weight",
+				}
+			},
+			AttnNorm: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.input_layernorm.weight", layer)
+			},
+			FfnNorm: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.post_attention_layernorm.weight", layer)
+			},
+			QNormCandidates: func(layer int) []string {
+				return []string{
+					fmt.Sprintf("model.language_model.layers.%d.self_attn.q_norm.weight", layer),
+				}
+			},
+			KNormCandidates: func(layer int) []string {
+				return []string{
+					fmt.Sprintf("model.language_model.layers.%d.self_attn.k_norm.weight", layer),
+				}
+			},
+			Wq: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.self_attn.q_proj.weight", layer)
+			},
+			Wk: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.self_attn.k_proj.weight", layer)
+			},
+			Wv: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.self_attn.v_proj.weight", layer)
+			},
+			Wo: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.self_attn.o_proj.weight", layer)
+			},
+			FfnUp: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.mlp.up_proj.weight", layer)
+			},
+			FfnGate: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.mlp.gate_proj.weight", layer)
+			},
+			FfnDown: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.mlp.down_proj.weight", layer)
+			},
+			DeltaQKVProj: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.linear_attn.in_proj_qkv.weight", layer)
+			},
+			DeltaAProj: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.linear_attn.in_proj_a.weight", layer)
+			},
+			DeltaBProj: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.linear_attn.in_proj_b.weight", layer)
+			},
+			DeltaZProj: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.linear_attn.in_proj_z.weight", layer)
+			},
+			DeltaOutProj: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.linear_attn.out_proj.weight", layer)
+			},
+			DeltaConv: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.linear_attn.conv1d.weight", layer)
+			},
+			DeltaNorm: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.linear_attn.norm.weight", layer)
+			},
+			DeltaALog: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.linear_attn.A_log", layer)
+			},
+			DeltaDTBias: func(layer int) string {
+				return fmt.Sprintf("model.language_model.layers.%d.linear_attn.dt_bias", layer)
+			},
+		},
+	}
+}
+
 // Falcon H1
 func falconH1Spec() *ArchSpec {
 	return &ArchSpec{
