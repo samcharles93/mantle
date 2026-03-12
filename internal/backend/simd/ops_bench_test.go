@@ -16,8 +16,7 @@ func BenchmarkDotProductScalar(b *testing.B) {
 		bv[i] = float32(i * 2)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = dotScalar(a, bv)
 	}
 }
@@ -36,8 +35,7 @@ func BenchmarkDotProductAVX2(b *testing.B) {
 		bv[i] = float32(i * 2)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = dotSIMD(a, bv)
 	}
 }
@@ -56,8 +54,7 @@ func BenchmarkDotProductAVX512(b *testing.B) {
 		bv[i] = float32(i * 2)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = dotAVX512(a, bv)
 	}
 }
@@ -73,8 +70,7 @@ func BenchmarkAddScalar(b *testing.B) {
 		src[i] = float32(i * 2)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		addScalar(dst, src)
 	}
 }
@@ -93,8 +89,7 @@ func BenchmarkAddAVX2(b *testing.B) {
 		src[i] = float32(i * 2)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		addSIMD(dst, src)
 	}
 }
@@ -113,8 +108,7 @@ func BenchmarkAddAVX512(b *testing.B) {
 		src[i] = float32(i * 2)
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		addAVX512(dst, src)
 	}
 }
@@ -132,8 +126,7 @@ func BenchmarkRMSNormScalar(b *testing.B) {
 		weight[i] = float32(i%10) * 0.1
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		rmsNormScalar(dst, src, weight, eps)
 	}
 }
@@ -154,8 +147,7 @@ func BenchmarkRMSNormAVX2(b *testing.B) {
 		weight[i] = float32(i%10) * 0.1
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		rmsNormSIMD(dst, src, weight, eps)
 	}
 }
@@ -176,8 +168,7 @@ func BenchmarkRMSNormAVX512(b *testing.B) {
 		weight[i] = float32(i%10) * 0.1
 	}
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		rmsNormAVX512(dst, src, weight, eps)
 	}
 }
