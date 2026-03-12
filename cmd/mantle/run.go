@@ -20,7 +20,6 @@ import (
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/reasoning"
 	"github.com/samcharles93/mantle/internal/tokenizer"
-	"github.com/samcharles93/mantle/internal/utils"
 )
 
 func runCmd() *cli.Command {
@@ -615,7 +614,7 @@ func runCmd() *cli.Command {
 				tools []any
 			)
 			if toolsJSON != "" {
-				if !utils.FileExists(toolsJSON) {
+				if !fileExists(toolsJSON) {
 					return cli.Exit(fmt.Sprintf("error: tools json not found: %s", toolsJSON), 1)
 				}
 				loaded, err := tokenizer.LoadToolsJSON(toolsJSON)
@@ -627,7 +626,7 @@ func runCmd() *cli.Command {
 
 			interactive := false
 			if messagesJSON != "" {
-				if !utils.FileExists(messagesJSON) {
+				if !fileExists(messagesJSON) {
 					return cli.Exit(fmt.Sprintf("error: messages json not found: %s", messagesJSON), 1)
 				}
 				loaded, err := tokenizer.LoadMessagesJSON(messagesJSON)
@@ -719,7 +718,7 @@ func runCmd() *cli.Command {
 						log.Error("encode prompt failed", "error", err)
 						break
 					}
-					log.Debug("input tokens", "count", len(ids), "tokens", utils.JoinInts(ids))
+					log.Debug("input tokens", "count", len(ids), "tokens", joinInts(ids))
 				}
 
 				echoPromptVal := echoPrompt && !interactive
@@ -799,4 +798,28 @@ func runCmd() *cli.Command {
 			return nil
 		},
 	}
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func joinInts(ids []int) string {
+	if len(ids) == 0 {
+		return "[]"
+	}
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%d", id)
+	}
+	b.WriteByte(']')
+	return b.String()
 }

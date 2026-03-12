@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/samcharles93/mantle/internal/logger"
-	"github.com/samcharles93/mantle/internal/utils"
 )
 
 type StreamMode string
@@ -102,7 +101,7 @@ func (w *StreamWriter) Flush() string {
 		result := w.accumulator.String()
 		if w.rawOutput {
 			// Apply escaping to full output at once
-			escaped := utils.EscapeRawOutput(result)
+			escaped := escapeRawOutput(result)
 			if _, err := fmt.Fprint(w.output, escaped); err != nil {
 				w.log.Debug("failed to write output", "error", err)
 			}
@@ -131,7 +130,7 @@ func (w *StreamWriter) writeInstant(token string) {
 	w.accumulator.WriteString(token)
 
 	if w.rawOutput {
-		escaped := utils.EscapeRawOutput(token)
+		escaped := escapeRawOutput(token)
 		if _, err := w.buffer.WriteString(escaped); err != nil {
 			w.log.Debug("failed to write to buffer", "error", err)
 		}
@@ -205,7 +204,7 @@ func (w *StreamWriter) flushBatch() {
 
 	text := w.batch.String()
 	if w.rawOutput {
-		escaped := utils.EscapeRawOutput(text)
+		escaped := escapeRawOutput(text)
 		if _, err := w.buffer.WriteString(escaped); err != nil {
 			w.log.Debug("failed to write to buffer", "error", err)
 		}
@@ -253,4 +252,30 @@ func escapeRawOutputRune(r rune) string {
 		}
 		return fmt.Sprintf(`\u%04x`, r)
 	}
+}
+
+func escapeRawOutput(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\n':
+			fmt.Fprint(&b, "\\n")
+		case '\r':
+			fmt.Fprint(&b, "\\r")
+		case '\t':
+			fmt.Fprint(&b, "\\t")
+		case '\\':
+			fmt.Fprint(&b, "\\\\")
+		default:
+			if strconv.IsPrint(r) {
+				b.WriteRune(r)
+			} else {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			}
+		}
+	}
+	return b.String()
 }
