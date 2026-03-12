@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"math"
 	"os"
@@ -203,8 +202,6 @@ func Pack(opts PackOptions) error {
 	recs := make([]TensorIndexRecord, 0, len(names))
 	total := len(names)
 
-	// logf("pack: tensors=%d cast=%s quant_embed=%s dedup=%t align=%d", total, opts.Cast, opts.QuantEmbed, opts.Dedup, align)
-
 	var (
 		processed      int
 		dedupCount     int
@@ -257,18 +254,11 @@ func Pack(opts PackOptions) error {
 		isEmbedding := isEmbeddingTensor(name)
 		quantEmbed := opts.QuantEmbed != "" && opts.QuantEmbed != "none" && isEmbedding
 
-		// Optional hash-on-write for dedup.
-		var h io.Writer
-		var sumHash *hash.Hash
-		_ = sumHash
-
 		var hasher = sha256.New()
 		var dst io.Writer = td
 		if deduper != nil {
 			dst = io.MultiWriter(td, hasher)
 		}
-
-		_ = h
 
 		// Handle embedding quantization
 		if quantEmbed {

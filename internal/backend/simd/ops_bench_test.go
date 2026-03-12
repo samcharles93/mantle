@@ -1,7 +1,6 @@
 package simd
 
 import (
-	"math"
 	"simd/archsimd"
 	"testing"
 )
@@ -180,56 +179,5 @@ func BenchmarkRMSNormAVX512(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		rmsNormAVX512(dst, src, weight, eps)
-	}
-}
-
-func BenchmarkApplyRoPEWithTablesAVX2(b *testing.B) {
-	if !cpu.HasAVX2 {
-		b.Skip("AVX2 not available")
-	}
-
-	nHead := 8
-	headDim := 64
-	size := nHead * headDim
-	x := make([]float32, size)
-	cosTable := make([]float32, 100*headDim/2) // Precomputed for 100 positions
-	sinTable := make([]float32, 100*headDim/2)
-	pos := 10
-
-	for i := range x {
-		x[i] = float32(i%20) * 0.1
-	}
-
-	// Precompute tables
-	for p := range 100 {
-		for i := 0; i < headDim/2; i++ {
-			angle := float64(p) * float64(i+1) * 0.01
-			cosTable[p*(headDim/2)+i] = float32(math.Cos(angle))
-			sinTable[p*(headDim/2)+i] = float32(math.Sin(angle))
-		}
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		applyRoPESIMDWithTables(x, nHead, headDim, pos, cosTable, sinTable, headDim/2)
-	}
-}
-
-func BenchmarkSiluAndMulAVX2(b *testing.B) {
-	if !cpu.HasAVX2 {
-		b.Skip("AVX2 not available")
-	}
-
-	size := 512
-	dst := make([]float32, size)
-	x := make([]float32, size*2)
-
-	for i := range x {
-		x[i] = float32(i%20) * 0.1
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		siluAndMulSIMD(dst, x)
 	}
 }

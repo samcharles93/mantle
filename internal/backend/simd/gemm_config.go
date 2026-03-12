@@ -25,12 +25,6 @@ func MaxTileN() int { return maxTileN }
 // MaxTileK returns the maximum TileK value.
 func MaxTileK() int { return maxTileK }
 
-// CPUHasAVX2 reports whether the CPU supports AVX2.
-func CPUHasAVX2() bool { return cpu.HasAVX2 }
-
-// CPUHasAVX512 reports whether the CPU supports AVX-512.
-func CPUHasAVX512() bool { return cpu.HasAVX512 }
-
 // TilingConfig holds runtime-configurable tiling parameters.
 type TilingConfig struct {
 	TileM int

@@ -28,14 +28,6 @@ type MCFSection struct {
 	Size    uint64
 }
 
-type Section struct {
-	MCFSection
-}
-
-func (s *Section) End() uint64 {
-	return s.Offset + s.Size
-}
-
 func decodeSection(data []byte) (MCFSection, bool) {
 	if len(data) < mcfSectionSize {
 		return MCFSection{}, false

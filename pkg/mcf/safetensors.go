@@ -204,23 +204,6 @@ func (sf *SafetensorsFile) TensorReader(name string) (*io.SectionReader, Safeten
 	return io.NewSectionReader(sf.f, ti.Start, ti.End-ti.Start), ti, nil
 }
 
-// ReadTensor reads the raw tensor bytes into memory.
-func (sf *SafetensorsFile) ReadTensor(name string) ([]byte, SafetensorsTensorInfo, error) {
-	r, ti, err := sf.TensorReader(name)
-	if err != nil {
-		return nil, SafetensorsTensorInfo{}, err
-	}
-	sz := ti.End - ti.Start
-	if sz < 0 {
-		return nil, SafetensorsTensorInfo{}, fmt.Errorf("safetensors: tensor %q: invalid size", name)
-	}
-	buf := make([]byte, sz)
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return nil, SafetensorsTensorInfo{}, fmt.Errorf("safetensors: read tensor %q: %w", name, err)
-	}
-	return buf, ti, nil
-}
-
 // SafetensorsTensorRef points to a tensor within a sharded model.
 type SafetensorsTensorRef struct {
 	Name string
@@ -289,35 +272,6 @@ func (m *SafetensorsModel) TensorReader(name string) (*io.SectionReader, Safeten
 		return nil, SafetensorsTensorRef{}, err
 	}
 	return r, tr, nil
-}
-
-func (m *SafetensorsModel) CopyTensorTo(dst io.Writer, name string) (int64, SafetensorsTensorRef, error) {
-	r, tr, err := m.TensorReader(name)
-	if err != nil {
-		return 0, SafetensorsTensorRef{}, err
-	}
-	n, err := io.Copy(dst, r)
-	if err != nil {
-		return n, SafetensorsTensorRef{}, fmt.Errorf("safetensors: copy tensor %q: %w", name, err)
-	}
-	return n, tr, nil
-}
-
-// CopyTensorToBuffer streams the raw tensor bytes into dst using the provided buffer.
-// If buf is nil, it behaves like CopyTensorTo.
-func (m *SafetensorsModel) CopyTensorToBuffer(dst io.Writer, name string, buf []byte) (int64, SafetensorsTensorRef, error) {
-	r, tr, err := m.TensorReader(name)
-	if err != nil {
-		return 0, SafetensorsTensorRef{}, err
-	}
-	if buf == nil {
-		return m.CopyTensorTo(dst, name)
-	}
-	n, err := io.CopyBuffer(dst, r, buf)
-	if err != nil {
-		return n, SafetensorsTensorRef{}, fmt.Errorf("safetensors: copy tensor %q: %w", name, err)
-	}
-	return n, tr, nil
 }
 
 // OpenSafetensorsModel opens either:

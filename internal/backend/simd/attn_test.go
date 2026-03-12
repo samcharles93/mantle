@@ -363,6 +363,20 @@ func (o *attentionFastPathOps) StoreKV(layerIndex, pos, kvStride int, kDst, vDst
 	o.DefaultOps.StoreKV(layerIndex, pos, kvStride, kDst, vDst, kDst16, vDst16, kDstQ8, vDstQ8, kDstQ8S, vDstQ8S, k, v)
 }
 
+// Disable fast paths inherited from DefaultOps that would intercept the
+// Attention flow before the code paths these tests exercise.
+func (o *attentionFastPathOps) IncrementalAttention([]float32, *Layer, []float32, []float32, []float32, int, int, int, int, int, int, float32, float32) bool {
+	return false
+}
+
+func (o *attentionFastPathOps) FlashAttention([]float32, *Layer, []float32, []float32, []float32, int, int, int, int, int, int, float32, float32) bool {
+	return false
+}
+
+func (o *attentionFastPathOps) FlashAttentionMultiHead([]float32, *Layer, []float32, []float32, []float32, int, int, int, int, int, int, float32, float32) bool {
+	return false
+}
+
 func newAttentionFastPathFixture(ops Ops) (*Instance, *Layer) {
 	wo := instance.NewMatFromData(2, 2, []float32{
 		1, 0,

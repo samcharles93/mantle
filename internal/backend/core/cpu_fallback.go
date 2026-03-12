@@ -7,11 +7,6 @@ import (
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
-// MatVec computes dst = w * x using a portable scalar fallback.
-func MatVec(dst []float32, w *Mat, x []float32) {
-	MatVecWithQuant(dst, w, x, nil)
-}
-
 // MatVecWithQuant computes dst = w * x using optional pre-quantized x.
 func MatVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec) {
 	if w == nil || w.R == 0 || w.C == 0 {

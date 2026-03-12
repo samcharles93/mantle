@@ -1259,7 +1259,7 @@ func (o *Ops) MatVec(dst []float32, w *model.Mat, x []float32) {
 	if _, offloaded := o.offloadedMats[w]; offloaded {
 		o.mu.Unlock()
 		native.RecordMatVecCPUFallback()
-		model.MatVec(dst, w, x)
+		model.MatVecWithQuant(dst, w, x, nil)
 		return
 	}
 	defer o.mu.Unlock()

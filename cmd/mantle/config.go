@@ -109,19 +109,6 @@ func applyServeConfig(c *cli.Command, cfg Config, service *api.InferenceService,
 	}
 }
 
-// applyAgentConfig applies config file defaults to agent (do) command variables.
-func applyAgentConfig(c *cli.Command, cfg Config, tooldefsDir *string) {
-	if cfg.ModelsDir != "" && !c.IsSet("models-path") {
-		modelsPath = cfg.ModelsDir
-	}
-	if cfg.Backend != "" && !c.IsSet("backend") {
-		backend = cfg.Backend
-	}
-	if cfg.TooldefsDir != "" && !c.IsSet("tooldefs-dir") {
-		*tooldefsDir = cfg.TooldefsDir
-	}
-}
-
 // LoadConfig reads the config file. Returns a zero Config if the file doesn't exist.
 func LoadConfig() Config {
 	path := configPath()
