@@ -124,22 +124,19 @@ func deltaNetSplitQKV(qDst, kDst, vDst, mixed []float32, numKeyHeads, numValueHe
 	if numValueHeads%numKeyHeads != 0 {
 		panic("delta value heads must be divisible by key heads")
 	}
-	valuesPerKey := numValueHeads / numKeyHeads
-	valueGroupDim := valuesPerKey * headValueDim
-	groupDim := 2*headKeyDim + valueGroupDim
-	if len(mixed) < numKeyHeads*groupDim {
+	totalKey := numKeyHeads * headKeyDim
+	totalValue := numValueHeads * headValueDim
+	totalDim := 2*totalKey + totalValue
+	if len(mixed) < totalDim {
 		panic("delta mixed QKV buffer too small")
 	}
-	if len(qDst) < numKeyHeads*headKeyDim || len(kDst) < numKeyHeads*headKeyDim || len(vDst) < numValueHeads*headValueDim {
+	if len(qDst) < totalKey || len(kDst) < totalKey || len(vDst) < totalValue {
 		panic("delta output buffers too small")
 	}
-	for hk := range numKeyHeads {
-		srcBase := hk * groupDim
-		copy(qDst[hk*headKeyDim:(hk+1)*headKeyDim], mixed[srcBase:srcBase+headKeyDim])
-		srcBase += headKeyDim
-		copy(kDst[hk*headKeyDim:(hk+1)*headKeyDim], mixed[srcBase:srcBase+headKeyDim])
-		srcBase += headKeyDim
-		vBase := hk * valueGroupDim
-		copy(vDst[vBase:vBase+valueGroupDim], mixed[srcBase:srcBase+valueGroupDim])
-	}
+	// Flat contiguous split: [Q_all | K_all | V_all]
+	// This matches the upstream layout where in_proj_qkv is a single linear
+	// projection followed by torch.split(mixed, [key_dim, key_dim, value_dim]).
+	copy(qDst[:totalKey], mixed[:totalKey])
+	copy(kDst[:totalKey], mixed[totalKey:2*totalKey])
+	copy(vDst[:totalValue], mixed[2*totalKey:totalDim])
 }

@@ -48,6 +48,7 @@ type Layer struct {
 	AttnType    string
 	AttnWindow  int
 	NoRoPE      bool // skip RoPE positional encoding for this layer
+	FusedQGate  bool // Q and Attention Gate are fused into a single weight matrix (2*qDim rows)
 
 	AttnNorm     []float32
 	PostAttnNorm []float32

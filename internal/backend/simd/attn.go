@@ -94,7 +94,14 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			ops.MatVecWithQuant(dst, w, x, qx)
 		}
 
-		project(q, layer.Wq)
+		if layer.FusedQGate {
+			qDim := nHead * headDim
+			fused := m.Scratch.AttnGate[:2*qDim]
+			project(fused, layer.Wq)
+			copy(q, fused[:qDim])
+		} else {
+			project(q, layer.Wq)
+		}
 		project(k, layer.Wk)
 		project(v, layer.Wv)
 	}
@@ -171,8 +178,12 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		// FlashAttention fast path (single-head version)
 		if fp, ok := ops.(flashAttentionFastPath); ok && fp.FlashAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap) {
 			// If FlashAttention handles the computation, skip the traditional path
-			if layer.AttnGate != nil {
-				gate := m.Scratch.AttnGate[:nHead*headDim]
+			var gate []float32
+			if layer.FusedQGate {
+				qDim := nHead * headDim
+				gate = m.Scratch.AttnGate[qDim : 2*qDim]
+			} else {
+				gate = m.Scratch.AttnGate[:nHead*headDim]
 				if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
 					// x may still be device-backed from fast-path norm/projections.
 					// Ensure host visibility before CPU gate matvec fallback.
@@ -182,21 +193,21 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 					}
 					ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
 				}
+			}
 
-				// Vectorized Sigmoid with multiplication
-				n := len(gate)
-				i := 0
-				if cpu.HasAVX2 {
-					for ; i+8 <= n; i += 8 {
-						vout := archsimd.LoadFloat32x8Slice(attnOut[i:])
-						vgate := archsimd.LoadFloat32x8Slice(gate[i:])
-						vout = vout.Mul(fastSigmoidVec(vgate))
-						vout.StoreSlice(attnOut[i:])
-					}
+			// Vectorized Sigmoid with multiplication
+			n := len(gate)
+			i := 0
+			if cpu.HasAVX2 {
+				for ; i+8 <= n; i += 8 {
+					vout := archsimd.LoadFloat32x8Slice(attnOut[i:])
+					vgate := archsimd.LoadFloat32x8Slice(gate[i:])
+					vout = vout.Mul(fastSigmoidVec(vgate))
+					vout.StoreSlice(attnOut[i:])
 				}
-				for ; i < n; i++ {
-					attnOut[i] *= Sigmoid(gate[i])
-				}
+			}
+			for ; i < n; i++ {
+				attnOut[i] *= Sigmoid(gate[i])
 			}
 			ops.MatVec(m.Scratch.AttnProj, layer.Wo, attnOut[:nHead*headDim])
 			return m.Scratch.AttnProj
@@ -209,16 +220,22 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	// Check for incremental attention fast path
 	if fp, ok := ops.(incrementalAttentionFastPath); ok && fp.IncrementalAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap) {
 		// If incremental attention handles the computation, skip the traditional path
-		if layer.AttnGate != nil {
-			gate := m.Scratch.AttnGate[:nHead*headDim]
-			if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
-				// x may still be device-backed from fast-path norm/projections.
-				// Ensure host visibility before CPU gate matvec fallback.
-				syncDeviceSlice(ops, x)
-				if qx == nil && CanUseQuantVec(layer.AttnGate) {
-					qx = PrepareQuantVec(x)
+		if layer.AttnGate != nil || layer.FusedQGate {
+			var gate []float32
+			if layer.FusedQGate {
+				qDim := nHead * headDim
+				gate = m.Scratch.AttnGate[qDim : 2*qDim]
+			} else {
+				gate = m.Scratch.AttnGate[:nHead*headDim]
+				if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
+					// x may still be device-backed from fast-path norm/projections.
+					// Ensure host visibility before CPU gate matvec fallback.
+					syncDeviceSlice(ops, x)
+					if qx == nil && CanUseQuantVec(layer.AttnGate) {
+						qx = PrepareQuantVec(x)
+					}
+					ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
 				}
-				ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
 			}
 
 			// Vectorized Sigmoid with multiplication
@@ -241,7 +258,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	}
 
 	// Combined attention inner + projection fast path (no gate)
-	if layer.AttnGate == nil {
+	if layer.AttnGate == nil && !layer.FusedQGate {
 		if fp, ok := ops.(attentionInnerProjectionFastPath); ok && fp.AttentionInnerProjection(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, m.RMSEpsilon, softcap) {
 			return m.Scratch.AttnProj
 		}
@@ -292,16 +309,22 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		RunAttnHeads(&ctx, m.Scratch.Scores, 0, nHead)
 	}
 
-	if layer.AttnGate != nil {
-		gate := m.Scratch.AttnGate[:nHead*headDim]
-		if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
-			// x may still be device-backed from fast-path norm/projections.
-			// Ensure host visibility before CPU gate matvec fallback.
-			syncDeviceSlice(ops, x)
-			if qx == nil && CanUseQuantVec(layer.AttnGate) {
-				qx = PrepareQuantVec(x)
+	if layer.AttnGate != nil || layer.FusedQGate {
+		var gate []float32
+		if layer.FusedQGate {
+			qDim := nHead * headDim
+			gate = m.Scratch.AttnGate[qDim : 2*qDim]
+		} else {
+			gate = m.Scratch.AttnGate[:nHead*headDim]
+			if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
+				// x may still be device-backed from fast-path norm/projections.
+				// Ensure host visibility before CPU gate matvec fallback.
+				syncDeviceSlice(ops, x)
+				if qx == nil && CanUseQuantVec(layer.AttnGate) {
+					qx = PrepareQuantVec(x)
+				}
+				ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
 			}
-			ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
 		}
 
 		// Vectorized Sigmoid with multiplication

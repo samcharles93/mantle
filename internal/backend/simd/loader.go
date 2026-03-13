@@ -527,7 +527,15 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 				layer.WvBias, _ = loadVec(src, names.WvBias(i))
 			}
 			hidden := cfg.HiddenSize
-			if layer.Wq.C != hidden || layer.Wq.R != qDim {
+			if layer.Wq.C != hidden {
+				return nil, fmt.Errorf("layer %d: q_proj col dim %d incompatible with hidden=%d", i, layer.Wq.C, hidden)
+			}
+			if layer.Wq.R == 2*qDim && layer.AttnGate == nil {
+				// Fused Q/gate tensor that could not be split at load time
+				// (e.g. quantized dtype). The runtime will project through all
+				// 2*qDim rows and split the output into Q and gate.
+				layer.FusedQGate = true
+			} else if layer.Wq.R != qDim {
 				return nil, fmt.Errorf("layer %d: q_proj shape [%d %d] incompatible with hidden=%d head_dim=%d heads=%d", i, layer.Wq.R, layer.Wq.C, hidden, headDim, headCount)
 			}
 			wantKV := layer.HeadKV * headDim
@@ -766,6 +774,10 @@ func loadInterleavedHeadBlocks(src tensorSource, name string, headDim, headCount
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: %w", name, err)
 	}
+	return loadInterleavedHeadBlocksFromPayload(name, payload, headDim, headCount, hidden)
+}
+
+func loadInterleavedHeadBlocksFromPayload(name string, payload tensorPayload, headDim, headCount, hidden int) (*core.Mat, *core.Mat, error) {
 	shape := payload.Shape
 	if len(shape) != 2 {
 		return nil, nil, fmt.Errorf("%s: expected 2D tensor", name)
@@ -840,18 +852,26 @@ func loadInterleavedHeadBlocks(src tensorSource, name string, headDim, headCount
 func loadAttentionQAndGate(src tensorSource, cfg *model.HFConfig, qName string, qDim, hidden, headDim int) (*core.Mat, *core.Mat, error) {
 	if cfg != nil && cfg.AttnOutputGate {
 		if shape, ok := src.TensorShape(qName); ok && len(shape) == 2 && shape[0] == 2*qDim && shape[1] == hidden {
-			if headDim > 0 && qDim%headDim == 0 {
-				return loadInterleavedHeadBlocks(src, qName, headDim, qDim/headDim, hidden)
-			}
-			wq, err := loadMatRows(src, qName, 0, qDim)
+			// Read the raw payload to check the dtype before committing to a split path.
+			payload, err := src.ReadTensor(qName)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, fmt.Errorf("%s: %w", qName, err)
 			}
-			gate, err := loadMatRows(src, qName, qDim, qDim)
-			if err != nil {
-				return nil, nil, err
+			// Quantized dtypes use block-structured payloads that interleave
+			// scales and data across all rows. Row-level splitting is not
+			// possible without re-encoding, so fall through to loading the
+			// full fused mat and splitting the output at inference time.
+			if !mcf.DTypeRequiresAligned64(payload.DType) {
+				wq, err := loadMatRows(src, qName, 0, qDim)
+				if err != nil {
+					return nil, nil, err
+				}
+				gate, err := loadMatRows(src, qName, qDim, qDim)
+				if err != nil {
+					return nil, nil, err
+				}
+				return wq, gate, nil
 			}
-			return wq, gate, nil
 		}
 	}
 	wq, err := loadMat(src, qName)
@@ -1522,7 +1542,7 @@ func initInstanceScratch(m *Instance) {
 		V:         make([]float32, kv),
 		AttnOut:   make([]float32, qDim),
 		AttnProj:  make([]float32, embd),
-		AttnGate:  make([]float32, qDim),
+		AttnGate:  make([]float32, 2*qDim),
 		Scores:    make([]float32, m.MaxContext),
 		FfnUp:     make([]float32, ffn),
 		FfnGate:   make([]float32, ffn),

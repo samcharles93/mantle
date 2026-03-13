@@ -3,9 +3,10 @@ package simd
 import "testing"
 
 func TestDeltaNetSplitQKVGroupedLayout(t *testing.T) {
+	// Flat contiguous layout: [Q0, Q1 | K0, K1 | V0, V1, V2, V3]
 	mixed := []float32{
-		1, 2, 10, 20,
-		3, 4, 30, 40,
+		1, 3, 2, 4,
+		10, 20, 30, 40,
 	}
 	q := make([]float32, 2)
 	k := make([]float32, 2)
