@@ -314,6 +314,26 @@ func parseHFConfig(raw []byte) hfConfigSummary {
 		RopeTheta:     getFloatAny(get("rope_theta")),
 	}
 
+	// GPT2 and other aliases
+	if s.HiddenSize == 0 {
+		s.HiddenSize = getIntAny(get("n_embd"))
+	}
+	if s.NumLayers == 0 {
+		s.NumLayers = getIntAny(get("n_layer"))
+	}
+	if s.HeadCount == 0 {
+		s.HeadCount = getIntAny(get("n_head"))
+	}
+	if s.MaxPosition == 0 {
+		s.MaxPosition = getIntAny(get("n_ctx"))
+		if s.MaxPosition == 0 {
+			s.MaxPosition = getIntAny(get("n_positions"))
+		}
+	}
+	if s.KVHeads == 0 {
+		s.KVHeads = s.HeadCount
+	}
+
 	if s.RopeTheta == 0 {
 		if rp, ok := get("rope_parameters").(map[string]any); ok {
 			s.RopeTheta = getFloatAny(rp["rope_theta"])

@@ -13,6 +13,16 @@ import (
 )
 
 func main() {
+	cli.RootCommandHelpTemplate += `
+GLOBAL CONFIGURATION:
+   Mantle reads defaults from ~/.config/mantle/config.yaml.
+   Use 'mantle config' to manage this file.
+
+   Environment Variables:
+     MANTLE_MODELS_DIR    Directory containing .mcf models
+     MANTLE_PACK_OUT_DIR  Default output directory for 'pack'
+     MANTLE_CUDA_TRACE    Set to 1 to enable verbose CUDA tracing
+`
 	app := &cli.Command{
 		Name:    "mantle",
 		Usage:   "Model execution substrate CLI",
@@ -48,11 +58,15 @@ func main() {
 		},
 		Commands: []*cli.Command{
 			runCmd(),
+			traceCmd(),
 			packCmd(),
 			quantizeCmd(),
 			inspectCmd(),
 			serveCmd(),
 			listModelsCmd(),
+			showCmd(),
+			configCmd(),
+			pullCmd(),
 			benchmarkCmd(),
 			versionCmd(),
 		},

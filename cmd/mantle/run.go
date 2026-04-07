@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,28 +68,33 @@ func runCmd() *cli.Command {
 	flags = append(flags,
 		&cli.StringFlag{
 			Name:        "prompt",
+			Category:    "Generation",
 			Aliases:     []string{"p"},
 			Usage:       "prompt text to tokenize",
 			Destination: &prompt,
 		},
 		&cli.StringFlag{
 			Name:        "system",
+			Category:    "Generation",
 			Aliases:     []string{"sys"},
 			Usage:       "optional system prompt",
 			Destination: &system,
 		},
 		&cli.StringFlag{
 			Name:        "messages-json",
+			Category:    "Generation",
 			Usage:       "path to JSON chat history (array or {\"messages\": [...]})",
 			Destination: &messagesJSON,
 		},
 		&cli.StringFlag{
 			Name:        "tools-json",
+			Category:    "Generation",
 			Usage:       "path to JSON tools definition (array or {\"tools\": [...]})",
 			Destination: &toolsJSON,
 		},
 		&cli.Int64Flag{
 			Name:        "steps",
+			Category:    "Generation",
 			Aliases:     []string{"n", "num-tokens", "num_tokens"},
 			Usage:       "number of tokens to generate (default -1 = infinite)",
 			Value:       -1,
@@ -150,86 +156,103 @@ func runCmd() *cli.Command {
 		},
 		&cli.BoolFlag{
 			Name:        "no-template",
+			Category:    "Tokenizer Overrides",
 			Usage:       "disable chat template rendering",
 			Destination: &noTemplate,
 		},
 		&cli.BoolFlag{
 			Name:        "echo-prompt",
+			Category:    "Generation",
 			Usage:       "print prompt text before generation",
 			Destination: &echoPrompt,
 		},
 		&cli.StringFlag{
 			Name:        "reasoning-format",
+			Category:    "Generation",
 			Usage:       "reasoning extraction mode: auto, none, deepseek, deepseek-legacy",
 			Value:       "auto",
 			Destination: &reasoningFmt,
 		},
 		&cli.Int64Flag{
 			Name:        "reasoning-budget",
+			Category:    "Generation",
 			Usage:       "reasoning budget control: -1 unrestricted, 0 disable thinking in template when supported",
 			Value:       -1,
 			Destination: &reasoningBgt,
 		},
 		&cli.StringFlag{
-			Name:    "cache-type-k",
-			Aliases: []string{"cache_type_k", "ctk"},
-			Usage:   "KV cache data type for K (f32, f16, q8_0)",
-			Value:   "f16",
+			Name:     "cache-type-k",
+			Category: "Performance",
+			Aliases:  []string{"cache_type_k", "ctk"},
+			Usage:    "KV cache data type for K (f32, f16, q8_0)",
+			Value:    "f16",
 		},
 		&cli.StringFlag{
-			Name:    "cache-type-v",
-			Aliases: []string{"cache_type_v", "ctv"},
-			Usage:   "KV cache data type for V (f32, f16, q8_0)",
-			Value:   "f16",
+			Name:     "cache-type-v",
+			Category: "Performance",
+			Aliases:  []string{"cache_type_v", "ctv"},
+			Usage:    "KV cache data type for V (f32, f16, q8_0)",
+			Value:    "f16",
 		},
 		// Optional overrides
 		&cli.StringFlag{
-			Name:  "rope-scaling",
-			Usage: "RoPE scaling type (linear, yarn, none)",
+			Name:     "rope-scaling",
+			Category: "RoPE/YaRN Overrides",
+			Usage:    "RoPE scaling type (linear, yarn, none)",
 		},
 		&cli.Float64Flag{
-			Name:  "rope-scale",
-			Usage: "RoPE scaling factor",
+			Name:     "rope-scale",
+			Category: "RoPE/YaRN Overrides",
+			Usage:    "RoPE scaling factor",
 		},
 		&cli.Float64Flag{
-			Name:  "rope-freq-base",
-			Usage: "RoPE base frequency",
+			Name:     "rope-freq-base",
+			Category: "RoPE/YaRN Overrides",
+			Usage:    "RoPE base frequency",
 		},
 		&cli.Float64Flag{
-			Name:  "rope-freq-scale",
-			Usage: "RoPE frequency scaling factor",
+			Name:     "rope-freq-scale",
+			Category: "RoPE/YaRN Overrides",
+			Usage:    "RoPE frequency scaling factor",
 		},
 		&cli.Int64Flag{
-			Name:  "yarn-orig-ctx",
-			Usage: "YaRN original context size",
+			Name:     "yarn-orig-ctx",
+			Category: "RoPE/YaRN Overrides",
+			Usage:    "YaRN original context size",
 		},
 		&cli.Float64Flag{
-			Name:  "yarn-ext-factor",
-			Usage: "YaRN extrapolation mix factor",
-			Value: -1.0,
+			Name:     "yarn-ext-factor",
+			Category: "RoPE/YaRN Overrides",
+			Usage:    "YaRN extrapolation mix factor",
+			Value:    -1.0,
 		},
 		&cli.Float64Flag{
-			Name:  "yarn-attn-factor",
-			Usage: "YaRN attention factor",
-			Value: -1.0,
+			Name:     "yarn-attn-factor",
+			Category: "RoPE/YaRN Overrides",
+			Usage:    "YaRN attention factor",
+			Value:    -1.0,
 		},
 		&cli.Float64Flag{
-			Name:  "yarn-beta-slow",
-			Usage: "YaRN beta slow",
-			Value: -1.0,
+			Name:     "yarn-beta-slow",
+			Category: "RoPE/YaRN Overrides",
+			Usage:    "YaRN beta slow",
+			Value:    -1.0,
 		},
 		&cli.Float64Flag{
-			Name:  "yarn-beta-fast",
-			Usage: "YaRN beta fast",
-			Value: -1.0,
+			Name:     "yarn-beta-fast",
+			Category: "RoPE/YaRN Overrides",
+			Usage:    "YaRN beta fast",
+			Value:    -1.0,
 		},
 		&cli.StringFlag{
 			Name:        "hf-config",
+			Category:    "Model Configuration",
 			Usage:       "explicit path to hf config.json",
 			Destination: &hfConfigFile,
 		},
 		&cli.StringFlag{
 			Name:        "stream-mode",
+			Category:    "Generation",
 			Usage:       "streaming output mode: instant, smooth, typewriter, quiet",
 			Value:       "smooth",
 			Destination: &streamMode,
@@ -257,11 +280,13 @@ func runCmd() *cli.Command {
 		},
 		&cli.BoolFlag{
 			Name:        "no-swa",
+			Category:    "Model Configuration",
 			Usage:       "disable sliding window attention (force full-size KV cache)",
 			Destination: &noSWA,
 		},
 		&cli.StringFlag{
 			Name:        "cuda-weight-mode",
+			Category:    "Performance",
 			Usage:       "cuda weight loading mode: auto, quant, dequant",
 			Value:       "auto",
 			Destination: &cudaWeightMode,
@@ -311,10 +336,12 @@ func runCmd() *cli.Command {
 	)
 
 	return &cli.Command{
-		Name:  "run",
-		Usage: "Run inference for LLM models",
-		Flags: flags,
+		Name:    "run",
+		Aliases: []string{"chat"},
+		Usage:   "Run inference for LLM models",
+		Flags:   flags,
 		Action: func(ctx context.Context, c *cli.Command) error {
+			defer cliux.CloseInteractive()
 			log := logger.FromContext(ctx)
 
 			// Apply config file defaults for flags not explicitly set
@@ -659,6 +686,7 @@ func runCmd() *cli.Command {
 					}
 					trimmed := strings.TrimSpace(input)
 					if trimmed == "/exit" || trimmed == "/quit" {
+						cliux.CloseInteractive()
 						break
 					}
 					if trimmed == "" {
@@ -666,10 +694,71 @@ func runCmd() *cli.Command {
 					}
 					if trimmed == "/help" {
 						fmt.Println("Commands:")
-						fmt.Println("  /help    - show this help")
-						fmt.Println("  /clear   - clear conversation history")
-						fmt.Println("  /stats   - show generation statistics")
-						fmt.Println("  /exit    - exit interactive mode")
+						fmt.Println("  /help           - show this help")
+						fmt.Println("  /clear          - clear conversation history")
+						fmt.Println("  /stats          - show generation statistics")
+						fmt.Println("  /system <text>  - update the system prompt")
+						fmt.Println("  /set <k> <v>    - update sampling params (temp, top_k, top_p, min_p, penalty)")
+						fmt.Println("  /exit           - exit interactive mode")
+						continue
+					}
+					if strings.HasPrefix(trimmed, "/system") {
+						parts := strings.Fields(trimmed)
+						if len(parts) < 2 {
+							fmt.Println("Usage: /system <text>")
+							continue
+						}
+						newSys := strings.TrimSpace(trimmed[len(parts[0]):])
+						system = newSys
+						// Find and update system message if it exists
+						found := false
+						for i, m := range msgs {
+							if m.Role == "system" {
+								msgs[i].Content = newSys
+								found = true
+								break
+							}
+						}
+						if !found {
+							msgs = append([]tokenizer.Message{{Role: "system", Content: newSys}}, msgs...)
+						}
+						fmt.Println("System prompt updated.")
+						continue
+					}
+					if strings.HasPrefix(trimmed, "/set") {
+						parts := strings.Fields(trimmed)
+						if len(parts) != 3 {
+							fmt.Println("Usage: /set <param> <value>")
+							fmt.Println("Available parameters: temp, top_k, top_p, min_p, penalty")
+							continue
+						}
+						key, valStr := parts[1], parts[2]
+						val, err := strconv.ParseFloat(valStr, 64)
+						if err != nil {
+							fmt.Printf("Invalid value: %s\n", valStr)
+							continue
+						}
+						switch key {
+						case "temp", "temperature":
+							temp = val
+							baseOpts.Temperature = &temp
+						case "top_k", "topk":
+							topK = int(val)
+							baseOpts.TopK = &topK
+						case "top_p", "topp":
+							topP = val
+							baseOpts.TopP = &topP
+						case "min_p", "minp":
+							minP = val
+							baseOpts.MinP = &minP
+						case "penalty", "repeat_penalty":
+							repeatPenalty = val
+							baseOpts.RepeatPenalty = &repeatPenalty
+						default:
+							fmt.Printf("Unknown parameter: %s\n", key)
+							continue
+						}
+						fmt.Printf("Updated %s to %g\n", key, val)
 						continue
 					}
 					if trimmed == "/clear" {

@@ -125,3 +125,19 @@ func LoadConfig() Config {
 	}
 	return cfg
 }
+
+// SaveConfig writes the config file to disk.
+func SaveConfig(cfg Config) error {
+	path := configPath()
+	if path == "" {
+		return os.ErrNotExist
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}

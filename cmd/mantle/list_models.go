@@ -48,18 +48,19 @@ func listModelsCmd() *cli.Command {
 				return nil
 			}
 
-			fmt.Printf("Models in %s:\n\n", dir)
+			table := cliux.NewTable("NAME", "SIZE", "ARCH", "QUANT")
 			for _, m := range models {
 				name := filepath.Base(m)
 				info, err := os.Stat(m)
 				if err != nil {
-					fmt.Printf("  %s\n", name)
+					table.AddRow(name, "?", "?", "?")
 					continue
 				}
 				size := cliux.FormatModelSize(info.Size())
 
 				// Try to get model info from MCF header
 				arch := ""
+				quant := "none"
 				if mf, err := mcf.Open(m); err == nil {
 					cfgBytes := mf.SectionData(mf.Section(mcf.SectionHFConfigJSON))
 					if len(cfgBytes) > 0 {
@@ -68,16 +69,25 @@ func listModelsCmd() *cli.Command {
 							arch = cfg.ModelType
 						}
 					}
+
+					quantBytes := mf.SectionData(mf.Section(mcf.SectionQuantInfo))
+					if len(quantBytes) > 0 {
+						if qi, err := mcf.ParseQuantInfoSection(quantBytes); err == nil {
+							// For summary, check first tensor's quant method
+							if qi.Count() > 0 {
+								if r, err := qi.Record(0); err == nil {
+									quant = dtypeName(mcf.TensorDType(r.Method))
+								}
+							}
+						}
+					}
 					_ = mf.Close()
 				}
 
-				if arch != "" {
-					fmt.Printf("  %-40s %8s  (%s)\n", name, size, arch)
-				} else {
-					fmt.Printf("  %-40s %8s\n", name, size)
-				}
+				table.AddRow(name, size, arch, quant)
 			}
-			fmt.Printf("\n%d model(s) found\n", len(models))
+			fmt.Println(table.String())
+			fmt.Printf("%d model(s) found\n", len(models))
 			return nil
 		},
 	}

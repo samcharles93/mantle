@@ -752,7 +752,7 @@ func clamp(v, minVal, maxVal float32) float32 {
 
 func shapeToU64(shape []int) ([]uint64, error) {
 	if len(shape) == 0 {
-		return nil, errors.New("empty shape")
+		return []uint64{}, nil
 	}
 	out := make([]uint64, len(shape))
 	for i, v := range shape {

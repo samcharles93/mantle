@@ -8,6 +8,8 @@ require golang.org/x/sys v0.41.0
 
 require github.com/goccy/go-json v0.10.5
 
+require github.com/chzyer/readline v1.5.1
+
 require (
 	github.com/google/uuid v1.6.0
 	github.com/labstack/echo/v5 v5.0.4
