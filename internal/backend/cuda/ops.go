@@ -2603,11 +2603,11 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []fl
 	return true
 }
 
-func (o *Ops) AttentionInnerProjection(projOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32) bool {
+func (o *Ops) AttentionInnerProjection(projOut []float32, layer, kvLayer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32) bool {
 	if !useAttentionInnerFastPath() {
 		return false
 	}
-	if o == nil || layer == nil || layer.Wo == nil {
+	if o == nil || layer == nil || kvLayer == nil || layer.Wo == nil {
 		return false
 	}
 	if len(projOut) < layer.Wo.R || len(q) < nHead*headDim || len(k) < kvStride || len(v) < kvStride {
@@ -2616,10 +2616,12 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *instance.Layer,
 	if pos < 0 || start < 0 || start > pos || kvStride <= 0 || headDim <= 0 || nHead <= 0 || kvHeads <= 0 {
 		return false
 	}
-	cacheLen := layer.AttnCache.CacheLen
+	cacheLen := kvLayer.AttnCache.CacheLen
 	if cacheLen <= 0 {
 		return false
 	}
+
+	storeKV := layer == kvLayer
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -2630,7 +2632,7 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *instance.Layer,
 		actualCacheLen = o.effectiveContextLen
 	}
 
-	cache, err := o.ensureAttnCache(layer, kvStride, actualCacheLen)
+	cache, err := o.ensureAttnCache(kvLayer, kvStride, actualCacheLen)
 	if err != nil {
 		return false
 	}
@@ -2665,59 +2667,66 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *instance.Layer,
 	}
 
 	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), nHead*headDim), q[:nHead*headDim])
-	if !cache.useQ8K {
-		for i := range kvStride {
-			o.kTmpU16[i] = instance.Float32ToFloat16(k[i])
-		}
-	} else {
-		o.kTmpQ8Scale[0] = quantizeQ8(k, o.kTmpQ8[:kvStride])
-	}
-	if !cache.useQ8V {
-		for i := range kvStride {
-			o.vTmpU16[i] = instance.Float32ToFloat16(v[i])
-		}
-	} else {
-		o.vTmpQ8Scale[0] = quantizeQ8(v, o.vTmpQ8[:kvStride])
-	}
 
 	cachePos := pos
 	if cacheLen > 0 {
 		cachePos = pos % cacheLen
 	}
-	if cache.useQ8K {
-		scaleOffset := int64(cachePos) * int64(unsafe.Sizeof(float32(0)))
-		kvBytes := int64(kvStride)
-		dstOffset := int64(cachePos * kvStride)
-		if err := native.MemcpyH2DAsyncAt(cache.kQ8, dstOffset, unsafe.Pointer(&o.kTmpQ8[0]), kvBytes, o.stream); err != nil {
-			return false
+
+	// Only store K/V into cache for non-shared layers.
+	// Shared-KV layers reuse K/V already stored by the source layer.
+	if storeKV {
+		if !cache.useQ8K {
+			for i := range kvStride {
+				o.kTmpU16[i] = instance.Float32ToFloat16(k[i])
+			}
+		} else {
+			o.kTmpQ8Scale[0] = quantizeQ8(k, o.kTmpQ8[:kvStride])
 		}
-		if err := native.MemcpyH2DAsyncAt(cache.kQ8Scales, scaleOffset, unsafe.Pointer(&o.kTmpQ8Scale[0]), int64(unsafe.Sizeof(float32(0))), o.stream); err != nil {
-			return false
+		if !cache.useQ8V {
+			for i := range kvStride {
+				o.vTmpU16[i] = instance.Float32ToFloat16(v[i])
+			}
+		} else {
+			o.vTmpQ8Scale[0] = quantizeQ8(v, o.vTmpQ8[:kvStride])
 		}
-	} else {
-		kvBytes := int64(kvStride) * 2
-		dstOffset := int64(cachePos*kvStride) * 2
-		if err := native.MemcpyH2DAsyncAt(cache.kF16, dstOffset, unsafe.Pointer(&o.kTmpU16[0]), kvBytes, o.stream); err != nil {
-			return false
+
+		if cache.useQ8K {
+			scaleOffset := int64(cachePos) * int64(unsafe.Sizeof(float32(0)))
+			kvBytes := int64(kvStride)
+			dstOffset := int64(cachePos * kvStride)
+			if err := native.MemcpyH2DAsyncAt(cache.kQ8, dstOffset, unsafe.Pointer(&o.kTmpQ8[0]), kvBytes, o.stream); err != nil {
+				return false
+			}
+			if err := native.MemcpyH2DAsyncAt(cache.kQ8Scales, scaleOffset, unsafe.Pointer(&o.kTmpQ8Scale[0]), int64(unsafe.Sizeof(float32(0))), o.stream); err != nil {
+				return false
+			}
+		} else {
+			kvBytes := int64(kvStride) * 2
+			dstOffset := int64(cachePos*kvStride) * 2
+			if err := native.MemcpyH2DAsyncAt(cache.kF16, dstOffset, unsafe.Pointer(&o.kTmpU16[0]), kvBytes, o.stream); err != nil {
+				return false
+			}
+		}
+		if cache.useQ8V {
+			scaleOffset := int64(cachePos) * int64(unsafe.Sizeof(float32(0)))
+			kvBytes := int64(kvStride)
+			dstOffset := int64(cachePos * kvStride)
+			if err := native.MemcpyH2DAsyncAt(cache.vQ8, dstOffset, unsafe.Pointer(&o.vTmpQ8[0]), kvBytes, o.stream); err != nil {
+				return false
+			}
+			if err := native.MemcpyH2DAsyncAt(cache.vQ8Scales, scaleOffset, unsafe.Pointer(&o.vTmpQ8Scale[0]), int64(unsafe.Sizeof(float32(0))), o.stream); err != nil {
+				return false
+			}
+		} else {
+			kvBytes := int64(kvStride) * 2
+			dstOffset := int64(cachePos*kvStride) * 2
+			if err := native.MemcpyH2DAsyncAt(cache.vF16, dstOffset, unsafe.Pointer(&o.vTmpU16[0]), kvBytes, o.stream); err != nil {
+				return false
+			}
 		}
 	}
-	if cache.useQ8V {
-		scaleOffset := int64(cachePos) * int64(unsafe.Sizeof(float32(0)))
-		kvBytes := int64(kvStride)
-		dstOffset := int64(cachePos * kvStride)
-		if err := native.MemcpyH2DAsyncAt(cache.vQ8, dstOffset, unsafe.Pointer(&o.vTmpQ8[0]), kvBytes, o.stream); err != nil {
-			return false
-		}
-		if err := native.MemcpyH2DAsyncAt(cache.vQ8Scales, scaleOffset, unsafe.Pointer(&o.vTmpQ8Scale[0]), int64(unsafe.Sizeof(float32(0))), o.stream); err != nil {
-			return false
-		}
-	} else {
-		kvBytes := int64(kvStride) * 2
-		dstOffset := int64(cachePos*kvStride) * 2
-		if err := native.MemcpyH2DAsyncAt(cache.vF16, dstOffset, unsafe.Pointer(&o.vTmpU16[0]), kvBytes, o.stream); err != nil {
-			return false
-		}
-	}
+
 	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), qBytes, o.stream); err != nil {
 		return false
 	}
@@ -2816,26 +2825,11 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer *instance.Layer,
 
 	// Keep projection result on device for residual add fast path.
 	// Runtime can force host visibility via FlushBlockResult when needed.
-	if len(layer.PostAttnNorm) > 0 {
-		// Upload norm weight if not already present
-		wDev, err := o.deviceNormWeight(layer.PostAttnNorm)
-		if err != nil {
-			return false
-		}
-		// Ensure temporary buffer for norm result
-		if err := o.ensureActTmp(int(projBytes)); err != nil {
-			return false
-		}
-		if err := o.rmsNormDevice(o.zDev, wDev, o.aDev, projDim, epsilon); err != nil {
-			return false
-		}
-		o.setLastResult(o.aDev, projOut, projDim)
-	} else {
-		o.setLastResult(o.zDev, projOut, projDim)
-	}
+	o.setLastResult(o.zDev, projOut, projDim)
 	runtime.KeepAlive(projOut)
 	return true
 }
+
 
 func (o *Ops) Softmax(x []float32) {
 	if len(x) <= 1 {
@@ -3427,6 +3421,15 @@ func (o *Ops) ensureQuantMat(w *model.Mat) (deviceQuantMat, error) {
 		runtime.KeepAlive(w)
 		return info, nil
 	}
+	if w.DType == mcf.DTypeK4 && len(w.Raw) > 0 {
+		info, err := o.ensureQuantMatK4Raw(w)
+		if err != nil {
+			return deviceQuantMat{}, err
+		}
+		o.qweights[w] = info
+		runtime.KeepAlive(w)
+		return info, nil
+	}
 	if w.Quant == nil && mcf.DTypeRequiresAligned64(w.DType) && len(w.Raw) > 0 {
 		qc, err := model.BuildQuantCache(w)
 		if err != nil {
@@ -3702,6 +3705,27 @@ func (o *Ops) ensureQuantMatQ4Raw(w *model.Mat) (deviceQuantMat, error) {
 		format:       quantMatFormatQ4Raw,
 		q:            qBuf,
 		scales:       sBuf,
+		rows:         w.R,
+		cols:         w.C,
+		blocksPerRow: v.blocksPerRow,
+	}, nil
+}
+
+func (o *Ops) ensureQuantMatK4Raw(w *model.Mat) (deviceQuantMat, error) {
+	v, err := parseK4PayloadView(w)
+	if err != nil {
+		return deviceQuantMat{}, err
+	}
+	qBuf, superBuf, subBuf, err := o.uploadK4PayloadBuffers(v)
+	if err != nil {
+		return deviceQuantMat{}, err
+	}
+
+	return deviceQuantMat{
+		format:       quantMatFormatK4Raw,
+		q:            qBuf,
+		superScales:  superBuf,
+		subScales:    subBuf,
 		rows:         w.R,
 		cols:         w.C,
 		blocksPerRow: v.blocksPerRow,

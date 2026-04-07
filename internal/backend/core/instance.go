@@ -13,12 +13,15 @@ type Instance struct {
 	OutputNorm         []float32
 	Output             *Mat
 	Layers             []Layer
+	Gemma4PerLayer     *Gemma4PerLayerInputModel
 	MaxContext         int
 	Pos                int
 	RMSEpsilon         float32
 	HeadDim            int
 	HeadCount          int
 	MaxHeadKV          int
+	MaxQDim            int
+	MaxKVStride        int
 	RopeInvFreq        []float64
 	RopeAttnScale      float32
 	RopeInvFreqLocal   []float64
@@ -43,12 +46,22 @@ type Instance struct {
 
 // Layer represents a single transformer layer with all its parameters.
 type Layer struct {
-	IsRecurrent bool
-	HeadKV      int
-	AttnType    string
-	AttnWindow  int
-	NoRoPE      bool // skip RoPE positional encoding for this layer
-	FusedQGate  bool // Q and Attention Gate are fused into a single weight matrix (2*qDim rows)
+	IsRecurrent    bool
+	HeadKV         int
+	HeadDim        int
+	KVHeadDim      int
+	AttnType       string
+	AttnWindow     int
+	AttnScale      float32
+	NoRoPE         bool // skip RoPE positional encoding for this layer
+	FusedQGate     bool // Q and Attention Gate are fused into a single weight matrix (2*qDim rows)
+	ValueFromKey   bool
+	ApplyVNorm     bool
+	SharedKVSource int
+	StoreFullKV    bool
+	RopeInvFreq    []float64
+	RopeAttnScale  float32
+	LayerScale     float32
 
 	AttnNorm     []float32
 	PostAttnNorm []float32
@@ -84,10 +97,47 @@ type Layer struct {
 	AttnCache AttnCache
 
 	// MoE support
-	MoE *MoELayer
+	MoE       *MoELayer
+	Gemma4MoE *Gemma4MoELayer
+	Gemma4PLE *Gemma4PLELayer
 
 	// Mamba support
 	Mamba *MambaLayer
+}
+
+type Gemma4PerLayerInputModel struct {
+	Embeddings      *Mat
+	Projection      *Mat
+	ProjectionNorm  []float32
+	HiddenSize      int
+	LayerCount      int
+	EmbeddingScale  float32
+	ProjectionScale float32
+	InputScale      float32
+}
+
+type Gemma4PLELayer struct {
+	InputGate  *Mat
+	Projection *Mat
+	PostNorm   []float32
+}
+
+type Gemma4MoEExpert struct {
+	GateUp *Mat
+	Down   *Mat
+}
+
+type Gemma4MoELayer struct {
+	RouterProj           *Mat
+	RouterScale          []float32
+	RouterPerExpertScale []float32
+	PreNorm2             []float32
+	PostNorm1            []float32
+	PostNorm2            []float32
+	Experts              []Gemma4MoEExpert
+	TopK                 int
+	Intermediate         int
+	ScalarRootSize       float32
 }
 
 // MoEExpert represents a single expert in mixture of experts.
@@ -163,36 +213,40 @@ type DeltaNetLayer struct {
 
 // ScratchBuffers holds temporary buffers for computation.
 type ScratchBuffers struct {
-	X         []float32
-	Tmp       []float32
-	Tmp2      []float32
-	Q         []float32
-	K         []float32
-	V         []float32
-	AttnOut   []float32
-	AttnProj  []float32
-	AttnGate  []float32
-	Scores    []float32
-	FfnUp     []float32
-	FfnGate   []float32
-	FfnAct    []float32
-	MoeAccum  []float32
-	RouterRaw []float32
-	RouterSel []float32
-	RouterIdx []int
-	RouterW   []float32
-	ScProj    []float32
-	ScBx      []float32
-	ScConv    []float32
-	DeltaQKV  []float32
-	DeltaA    []float32
-	DeltaB    []float32
-	DeltaZ    []float32
-	DeltaQ    []float32
-	DeltaK    []float32
-	DeltaV    []float32
-	DeltaOut  []float32
-	Logits    []float32
+	X             []float32
+	Tmp           []float32
+	Tmp2          []float32
+	Q             []float32
+	K             []float32
+	V             []float32
+	AttnOut       []float32
+	AttnProj      []float32
+	AttnGate      []float32
+	Scores        []float32
+	FfnUp         []float32
+	FfnGate       []float32
+	FfnAct        []float32
+	MoeAccum      []float32
+	RouterRaw     []float32
+	RouterSel     []float32
+	RouterIdx     []int
+	RouterW       []float32
+	RouterTop     []float32
+	ScProj        []float32
+	ScBx          []float32
+	ScConv        []float32
+	DeltaQKV      []float32
+	DeltaA        []float32
+	DeltaB        []float32
+	DeltaZ        []float32
+	DeltaQ        []float32
+	DeltaK        []float32
+	DeltaV        []float32
+	DeltaOut      []float32
+	Logits        []float32
+	PerLayerTok   []float32
+	PerLayerProj  []float32
+	PerLayerInput []float32
 
 	MambaIn   []float32
 	MambaProj []float32

@@ -30,7 +30,11 @@ func TestCachedEngineProviderListModelsFromDir(t *testing.T) {
 func TestCachedEngineProviderListModelsIncludesDefaultModel(t *testing.T) {
 	t.Parallel()
 
-	provider := NewCachedEngineProvider(EngineProviderConfig{DefaultModelPath: "/models/custom-model.mcf"})
+	dir := t.TempDir()
+	provider := NewCachedEngineProvider(EngineProviderConfig{
+		DefaultModelPath: "/models/custom-model.mcf",
+		ModelsPath:       dir, // Use empty temp dir to isolate from environment
+	})
 	models, err := provider.ListModels()
 	if err != nil {
 		t.Fatalf("ListModels() error = %v", err)
