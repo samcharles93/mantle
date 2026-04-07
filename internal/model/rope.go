@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"math"
 	"strings"
 )
@@ -216,6 +217,144 @@ func ApplyRopeScaling(invFreq []float64, base float64, ctxLen int, rs *RopeScali
 	}
 
 	return attnFactor
+}
+
+func LayerRoPEForConfig(cfg *HFConfig, layerType string, headDim int) ([]float64, float32, error) {
+	if cfg == nil {
+		return nil, 1, fmt.Errorf("nil config")
+	}
+	if headDim <= 0 {
+		return nil, 1, fmt.Errorf("invalid head_dim %d", headDim)
+	}
+	if headDim%2 != 0 {
+		return nil, 1, fmt.Errorf("head_dim must be even, got %d", headDim)
+	}
+
+	rp := ropeParamsForLayerType(cfg, layerType)
+	base := cfg.RopeTheta
+	if rp != nil && rp.RopeTheta > 0 {
+		base = rp.RopeTheta
+	}
+	if base <= 0 {
+		base = 10_000
+	}
+
+	ropeType := "default"
+	if rp != nil {
+		ropeType = strings.ToLower(strings.TrimSpace(rp.RopeType))
+		if ropeType == "" {
+			ropeType = strings.ToLower(strings.TrimSpace(rp.Type))
+		}
+	}
+
+	switch ropeType {
+	case "", "default":
+		rotaryDim := rotaryDimForHeadDim(headDim, partialRotaryFactor(cfg, rp))
+		invFreq := makeDefaultInvFreq(base, rotaryDim)
+		return invFreq, 1, nil
+	case "proportional":
+		return makeProportionalInvFreq(base, headDim, partialRotaryFactor(cfg, rp)), 1, nil
+	default:
+		rotaryDim := rotaryDimForHeadDim(headDim, partialRotaryFactor(cfg, rp))
+		invFreq := makeDefaultInvFreq(base, rotaryDim)
+		attnScale := float32(1)
+		if rs := ropeScalingForLayerType(cfg, rp); rs != nil {
+			attnScale = float32(ApplyRopeScaling(invFreq, base, cfg.MaxPosition, rs))
+		}
+		return invFreq, attnScale, nil
+	}
+}
+
+func ropeParamsForLayerType(cfg *HFConfig, layerType string) *ropeParams {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.RopeParametersByType) > 0 {
+		if rp, ok := cfg.RopeParametersByType[strings.ToLower(strings.TrimSpace(layerType))]; ok && rp != nil {
+			return rp
+		}
+	}
+	return cfg.RopeParameters
+}
+
+func ropeScalingForLayerType(cfg *HFConfig, rp *ropeParams) *RopeScaling {
+	if rp == nil {
+		return RopeScalingForConfig(cfg)
+	}
+	return ropeScalingFromValues(
+		cfg.MaxPosition,
+		rp.RopeType,
+		rp.Type,
+		rp.Factor,
+		rp.OriginalMaxPositionEmbeddings,
+		rp.LowFreqFactor,
+		rp.HighFreqFactor,
+		rp.AttentionFactor,
+		rp.BetaFast,
+		rp.BetaSlow,
+		rp.MScale,
+		rp.MScaleAllDim,
+		rp.Truncate,
+	)
+}
+
+func partialRotaryFactor(cfg *HFConfig, rp *ropeParams) float64 {
+	switch {
+	case rp != nil && rp.PartialRotaryFactor > 0:
+		return rp.PartialRotaryFactor
+	case cfg != nil && cfg.RopeParameters != nil && cfg.RopeParameters.PartialRotaryFactor > 0:
+		return cfg.RopeParameters.PartialRotaryFactor
+	case cfg != nil && cfg.RopeScaling != nil && cfg.RopeScaling.PartialRotaryFactor > 0:
+		return cfg.RopeScaling.PartialRotaryFactor
+	default:
+		return 1
+	}
+}
+
+func rotaryDimForHeadDim(headDim int, factor float64) int {
+	rotaryDim := int(float64(headDim) * factor)
+	if rotaryDim <= 0 || rotaryDim > headDim {
+		rotaryDim = headDim
+	}
+	if rotaryDim%2 != 0 {
+		rotaryDim--
+	}
+	if rotaryDim <= 0 {
+		rotaryDim = headDim
+	}
+	return rotaryDim
+}
+
+func makeDefaultInvFreq(base float64, rotaryDim int) []float64 {
+	if base <= 0 {
+		base = 10_000
+	}
+	if rotaryDim <= 0 {
+		return nil
+	}
+	invFreq := make([]float64, rotaryDim/2)
+	for i := range invFreq {
+		power := float64(2*i) / float64(rotaryDim)
+		invFreq[i] = 1.0 / math.Pow(base, power)
+	}
+	return invFreq
+}
+
+func makeProportionalInvFreq(base float64, headDim int, factor float64) []float64 {
+	if base <= 0 {
+		base = 10_000
+	}
+	if headDim <= 0 {
+		return nil
+	}
+	rotaryDim := rotaryDimForHeadDim(headDim, factor)
+	ropeAngles := rotaryDim / 2
+	invFreq := make([]float64, headDim/2)
+	for i := range ropeAngles {
+		power := float64(2*i) / float64(headDim)
+		invFreq[i] = 1.0 / math.Pow(base, power)
+	}
+	return invFreq
 }
 
 func applyLlama3Scaling(invFreq []float64, factor float64, origCtx float64, lowFactor float64, highFactor float64) {

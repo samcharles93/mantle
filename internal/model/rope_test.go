@@ -16,6 +16,7 @@ func TestRopeScalingLinear(t *testing.T) {
 	rs := RopeScalingForConfig(cfg)
 	if rs == nil {
 		t.Fatalf("expected rope scaling")
+		return
 	}
 	if rs.Type != "linear" {
 		t.Fatalf("unexpected rope scaling type: %q", rs.Type)
@@ -90,5 +91,45 @@ func TestRotaryDimForConfigPartialFactor(t *testing.T) {
 	}
 	if got := RotaryDimForConfig(cfg); got != 64 {
 		t.Fatalf("RotaryDimForConfig()=%d want 64", got)
+	}
+}
+
+func TestLayerRoPEForConfigProportionalUsesFullHeadDimExponent(t *testing.T) {
+	cfg := &HFConfig{
+		MaxPosition: 131072,
+		RopeParametersByType: map[string]*ropeParams{
+			"full_attention": {
+				RopeType:            "proportional",
+				RopeTheta:           1_000_000,
+				PartialRotaryFactor: 0.25,
+			},
+		},
+	}
+
+	invFreq, attnScale, err := LayerRoPEForConfig(cfg, "full_attention", 512)
+	if err != nil {
+		t.Fatalf("LayerRoPEForConfig: %v", err)
+	}
+	if attnScale != 1 {
+		t.Fatalf("attnScale=%v want 1", attnScale)
+	}
+	if got, want := len(invFreq), 256; got != want {
+		t.Fatalf("len(invFreq)=%d want %d", got, want)
+	}
+	if invFreq[0] != 1 {
+		t.Fatalf("invFreq[0]=%g want 1", invFreq[0])
+	}
+
+	wantFirstTail := 1 / math.Pow(1_000_000, 2.0/512.0)
+	if math.Abs(invFreq[1]-wantFirstTail) > 1e-12 {
+		t.Fatalf("invFreq[1]=%g want %g", invFreq[1], wantFirstTail)
+	}
+	if math.Abs(invFreq[63]-(1/math.Pow(1_000_000, 126.0/512.0))) > 1e-12 {
+		t.Fatalf("invFreq[63]=%g unexpected", invFreq[63])
+	}
+	for i := 64; i < len(invFreq); i++ {
+		if invFreq[i] != 0 {
+			t.Fatalf("expected zero tail at %d, got %g", i, invFreq[i])
+		}
 	}
 }

@@ -11,16 +11,18 @@ type HFConfig struct {
 	ModelType     string   `json:"model_type"`
 	Architectures []string `json:"architectures"`
 
-	BlockDim            int          `json:"block_dim"`
-	ConvLCache          int          `json:"conv_L_cache"`
-	LayerTypes          []string     `json:"layer_types"`
-	NormEps             float64      `json:"norm_eps"`
-	MaxPosition         int          `json:"max_position_embeddings"`
-	NumAttentionHeads   int          `json:"num_attention_heads"`
-	NumKeyValueHeads    int          `json:"num_key_value_heads"`
-	RopeScaling         *ropeScaling `json:"rope_scaling"`
-	RopeParameters      *ropeParams  `json:"rope_parameters"`
-	NoRopeLayerInterval int          `json:"no_rope_layer_interval"`
+	BlockDim               int                    `json:"block_dim"`
+	ConvLCache             int                    `json:"conv_L_cache"`
+	LayerTypes             []string               `json:"layer_types"`
+	NormEps                float64                `json:"norm_eps"`
+	MaxPosition            int                    `json:"max_position_embeddings"`
+	NumAttentionHeads      int                    `json:"num_attention_heads"`
+	NumKeyValueHeads       int                    `json:"num_key_value_heads"`
+	NumGlobalKeyValueHeads int                    `json:"num_global_key_value_heads"`
+	RopeScaling            *ropeScaling           `json:"rope_scaling"`
+	RopeParameters         *ropeParams            `json:"rope_parameters"`
+	RopeParametersByType   map[string]*ropeParams `json:"-"`
+	NoRopeLayerInterval    int                    `json:"no_rope_layer_interval"`
 
 	// MoE specific fields.
 	MoEIntermediateSize  int                        `json:"moe_intermediate_size"`
@@ -31,27 +33,41 @@ type HFConfig struct {
 	SlidingWindowPattern SlidingWindowPatternConfig `json:"sliding_window_pattern"`
 	SharedKVLayers       int                        `json:"shared_kv_layers"`
 	SharedKVLayersAlt    int                        `json:"attention.shared_kv_layers"`
+	NumKVSharedLayers    int                        `json:"num_kv_shared_layers"`
 	GlobalAttnEveryN     int                        `json:"global_attn_every_n_layers"`
 	AttentionBias        bool                       `json:"attention_bias"`
 	AttnOutputGate       bool                       `json:"attn_output_gate"`
+	AttentionKEqualV     bool                       `json:"attention_k_eq_v"`
 	MuPEnabled           bool                       `json:"mup_enabled"`
+	EnableMoEBlock       bool                       `json:"enable_moe_block"`
+	TopKExperts          int                        `json:"top_k_experts"`
+	UseDoubleWideMLP     bool                       `json:"use_double_wide_mlp"`
 
-	HiddenSize          int     `json:"hidden_size"`
-	IntermediateSize    FlexInt `json:"intermediate_size"`
-	FeedForwardLength   []int   `json:"feed_forward_length"`
-	NumHiddenLayers     int     `json:"num_hidden_layers"`
-	HeadDim             int     `json:"head_dim"`
-	LinearConvKernel    int     `json:"linear_conv_kernel_dim"`
-	LinearKeyHeadDim    int     `json:"linear_key_head_dim"`
-	LinearValueHeadDim  int     `json:"linear_value_head_dim"`
-	LinearNumKeyHeads   int     `json:"linear_num_key_heads"`
-	LinearNumValueHeads int     `json:"linear_num_value_heads"`
-	RMSNormEps          float64 `json:"rms_norm_eps"`
-	LayerNormEps        float64 `json:"layer_norm_eps"`
-	VocabSize           int     `json:"vocab_size"`
-	RopeTheta           float64 `json:"rope_theta"`
-	RopeLocalBaseFreq   float64 `json:"rope_local_base_freq"`
-	HiddenActivation    string  `json:"hidden_activation"`
+	HiddenSize              int       `json:"hidden_size"`
+	GlobalHeadDim           int       `json:"global_head_dim"`
+	HiddenSizePerLayerInput int       `json:"hidden_size_per_layer_input"`
+	VocabSizePerLayerInput  int       `json:"vocab_size_per_layer_input"`
+	ActivationSparsity      []float64 `json:"activation_sparsity_pattern"`
+	AltUpActiveIdx          int       `json:"altup_active_idx"`
+	AltUpCoefClip           float64   `json:"altup_coef_clip"`
+	AltUpCorrectScale       bool      `json:"altup_correct_scale"`
+	AltUpNumInputs          int       `json:"altup_num_inputs"`
+	LaurelRank              int       `json:"laurel_rank"`
+	IntermediateSize        FlexInt   `json:"intermediate_size"`
+	FeedForwardLength       []int     `json:"feed_forward_length"`
+	NumHiddenLayers         int       `json:"num_hidden_layers"`
+	HeadDim                 int       `json:"head_dim"`
+	LinearConvKernel        int       `json:"linear_conv_kernel_dim"`
+	LinearKeyHeadDim        int       `json:"linear_key_head_dim"`
+	LinearValueHeadDim      int       `json:"linear_value_head_dim"`
+	LinearNumKeyHeads       int       `json:"linear_num_key_heads"`
+	LinearNumValueHeads     int       `json:"linear_num_value_heads"`
+	RMSNormEps              float64   `json:"rms_norm_eps"`
+	LayerNormEps            float64   `json:"layer_norm_eps"`
+	VocabSize               int       `json:"vocab_size"`
+	RopeTheta               float64   `json:"rope_theta"`
+	RopeLocalBaseFreq       float64   `json:"rope_local_base_freq"`
+	HiddenActivation        string    `json:"hidden_activation"`
 
 	AttnLogitSoftcapping  float64 `json:"attn_logit_softcapping"`
 	FinalLogitSoftcapping float64 `json:"final_logit_softcapping"`
@@ -211,6 +227,33 @@ type ArchNames struct {
 	FfnGate func(layer int) string
 	FfnDown func(layer int) string
 
+	PerLayerEmbedding       string
+	PerLayerModelProjection string
+	PerLayerProjectionNorm  string
+	PerLayerInputGate       func(layer int) string
+	PerLayerInputProj       func(layer int) string
+	PostPerLayerInputNorm   func(layer int) string
+	LayerScalar             func(layer int) string
+	AltUpProjection         func(index int) string
+	AltUpUnembedProjection  func(index int) string
+	AltUpCorrectOutputScale func(layer int) string
+	AltUpCorrectionCoefs    func(layer int) string
+	AltUpPredictionCoefs    func(layer int) string
+	AltUpModalityRouter     func(layer int) string
+	AltUpRouterNorm         func(layer int) string
+	LaurelLeft              func(layer int) string
+	LaurelRight             func(layer int) string
+	LaurelPostNorm          func(layer int) string
+
+	Gemma4RouterProj           func(layer int) string
+	Gemma4RouterScale          func(layer int) string
+	Gemma4RouterPerExpertScale func(layer int) string
+	Gemma4ExpertsGateUp        func(layer int) string
+	Gemma4ExpertsDown          func(layer int) string
+	Gemma4PreFfnNorm2          func(layer int) string
+	Gemma4PostFfnNorm1         func(layer int) string
+	Gemma4PostFfnNorm2         func(layer int) string
+
 	// MoE tensors (optional).
 	MoERouter     func(layer int) string
 	MoEExpertBias func(layer int) string
@@ -263,11 +306,18 @@ func LoadHFConfigBytes(raw []byte) (*HFConfig, error) {
 	if err := mergeTextConfigMissing(&cfg, raw); err != nil {
 		return nil, err
 	}
+	if err := parseRopeParameters(&cfg, raw); err != nil {
+		return nil, err
+	}
+	synthesizeGemma3nRopeParameters(&cfg)
 	if cfg.GlobalAttnEveryN == 0 && cfg.SlidingWindowPattern.EveryN > 0 {
 		cfg.GlobalAttnEveryN = cfg.SlidingWindowPattern.EveryN
 	}
 	if cfg.SharedKVLayers == 0 && cfg.SharedKVLayersAlt > 0 {
 		cfg.SharedKVLayers = cfg.SharedKVLayersAlt
+	}
+	if cfg.SharedKVLayers == 0 && cfg.NumKVSharedLayers > 0 {
+		cfg.SharedKVLayers = cfg.NumKVSharedLayers
 	}
 	if cfg.HiddenSize == 0 && cfg.BlockDim > 0 {
 		cfg.HiddenSize = cfg.BlockDim
@@ -319,6 +369,9 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	if dst.NumKeyValueHeads == 0 && textCfg.NumKeyValueHeads > 0 {
 		dst.NumKeyValueHeads = textCfg.NumKeyValueHeads
 	}
+	if dst.NumGlobalKeyValueHeads == 0 && textCfg.NumGlobalKeyValueHeads > 0 {
+		dst.NumGlobalKeyValueHeads = textCfg.NumGlobalKeyValueHeads
+	}
 	if dst.RopeScaling == nil && textCfg.RopeScaling != nil {
 		dst.RopeScaling = textCfg.RopeScaling
 	}
@@ -327,6 +380,33 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	}
 	if dst.HiddenSize == 0 && textCfg.HiddenSize > 0 {
 		dst.HiddenSize = textCfg.HiddenSize
+	}
+	if dst.GlobalHeadDim == 0 && textCfg.GlobalHeadDim > 0 {
+		dst.GlobalHeadDim = textCfg.GlobalHeadDim
+	}
+	if dst.HiddenSizePerLayerInput == 0 && textCfg.HiddenSizePerLayerInput > 0 {
+		dst.HiddenSizePerLayerInput = textCfg.HiddenSizePerLayerInput
+	}
+	if dst.VocabSizePerLayerInput == 0 && textCfg.VocabSizePerLayerInput > 0 {
+		dst.VocabSizePerLayerInput = textCfg.VocabSizePerLayerInput
+	}
+	if len(dst.ActivationSparsity) == 0 && len(textCfg.ActivationSparsity) > 0 {
+		dst.ActivationSparsity = append([]float64(nil), textCfg.ActivationSparsity...)
+	}
+	if dst.AltUpActiveIdx == 0 && textCfg.AltUpActiveIdx > 0 {
+		dst.AltUpActiveIdx = textCfg.AltUpActiveIdx
+	}
+	if dst.AltUpCoefClip == 0 && textCfg.AltUpCoefClip > 0 {
+		dst.AltUpCoefClip = textCfg.AltUpCoefClip
+	}
+	if !dst.AltUpCorrectScale && textCfg.AltUpCorrectScale {
+		dst.AltUpCorrectScale = true
+	}
+	if dst.AltUpNumInputs == 0 && textCfg.AltUpNumInputs > 0 {
+		dst.AltUpNumInputs = textCfg.AltUpNumInputs
+	}
+	if dst.LaurelRank == 0 && textCfg.LaurelRank > 0 {
+		dst.LaurelRank = textCfg.LaurelRank
 	}
 	if dst.IntermediateSize == 0 && textCfg.IntermediateSize > 0 {
 		dst.IntermediateSize = textCfg.IntermediateSize
@@ -408,6 +488,9 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	if dst.SharedKVLayersAlt == 0 && textCfg.SharedKVLayersAlt > 0 {
 		dst.SharedKVLayersAlt = textCfg.SharedKVLayersAlt
 	}
+	if dst.NumKVSharedLayers == 0 && textCfg.NumKVSharedLayers > 0 {
+		dst.NumKVSharedLayers = textCfg.NumKVSharedLayers
+	}
 	if dst.GlobalAttnEveryN == 0 && textCfg.GlobalAttnEveryN > 0 {
 		dst.GlobalAttnEveryN = textCfg.GlobalAttnEveryN
 	}
@@ -417,8 +500,20 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	if !dst.AttnOutputGate && textCfg.AttnOutputGate {
 		dst.AttnOutputGate = true
 	}
+	if !dst.AttentionKEqualV && textCfg.AttentionKEqualV {
+		dst.AttentionKEqualV = true
+	}
 	if !dst.MuPEnabled && textCfg.MuPEnabled {
 		dst.MuPEnabled = true
+	}
+	if !dst.EnableMoEBlock && textCfg.EnableMoEBlock {
+		dst.EnableMoEBlock = true
+	}
+	if dst.TopKExperts == 0 && textCfg.TopKExperts > 0 {
+		dst.TopKExperts = textCfg.TopKExperts
+	}
+	if !dst.UseDoubleWideMLP && textCfg.UseDoubleWideMLP {
+		dst.UseDoubleWideMLP = true
 	}
 
 	if dst.NumLocalExperts == 0 && textCfg.NumLocalExperts > 0 {
@@ -441,6 +536,140 @@ func mergeTextConfigMissing(dst *HFConfig, raw []byte) error {
 	}
 
 	return nil
+}
+
+func parseRopeParameters(dst *HFConfig, raw []byte) error {
+	if dst == nil || len(raw) == 0 {
+		return nil
+	}
+
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return err
+	}
+
+	parseInto := func(msg json.RawMessage) error {
+		if len(msg) == 0 {
+			return nil
+		}
+		flat, byType, err := decodeRopeParameters(msg)
+		if err != nil {
+			return err
+		}
+		if dst.RopeParameters == nil && flat != nil {
+			dst.RopeParameters = flat
+		}
+		if len(dst.RopeParametersByType) == 0 && len(byType) > 0 {
+			dst.RopeParametersByType = byType
+		}
+		return nil
+	}
+
+	if err := parseInto(top["rope_parameters"]); err != nil {
+		return err
+	}
+	if textRaw, ok := top["text_config"]; ok && len(textRaw) > 0 {
+		var textTop map[string]json.RawMessage
+		if err := json.Unmarshal(textRaw, &textTop); err != nil {
+			return err
+		}
+		if err := parseInto(textTop["rope_parameters"]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func synthesizeGemma3nRopeParameters(cfg *HFConfig) {
+	if cfg == nil || !isGemma3nConfig(cfg) {
+		return
+	}
+	if cfg.RopeParametersByType == nil {
+		cfg.RopeParametersByType = map[string]*ropeParams{}
+	}
+	if cfg.RopeParameters == nil {
+		cfg.RopeParameters = &ropeParams{
+			RopeType:  "default",
+			RopeTheta: max(cfg.RopeTheta, 1_000_000),
+		}
+	}
+	if _, ok := cfg.RopeParametersByType["full_attention"]; !ok {
+		cfg.RopeParametersByType["full_attention"] = &ropeParams{
+			RopeType:  "default",
+			RopeTheta: max(cfg.RopeTheta, 1_000_000),
+		}
+	}
+	if _, ok := cfg.RopeParametersByType["sliding_attention"]; !ok {
+		cfg.RopeParametersByType["sliding_attention"] = &ropeParams{
+			RopeType:  "default",
+			RopeTheta: max(cfg.RopeLocalBaseFreq, 10_000),
+		}
+	}
+}
+
+func isGemma3nConfig(cfg *HFConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	modelType := strings.ToLower(strings.TrimSpace(cfg.ModelType))
+	if strings.Contains(modelType, "gemma3n") {
+		return true
+	}
+	for _, arch := range cfg.Architectures {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(arch)), "gemma3n") {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeRopeParameters(raw json.RawMessage) (*ropeParams, map[string]*ropeParams, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil, nil
+	}
+
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, nil, err
+	}
+
+	isFlat := false
+	for _, key := range []string{
+		"type",
+		"rope_type",
+		"factor",
+		"original_max_position_embeddings",
+		"rope_theta",
+		"partial_rotary_factor",
+	} {
+		if _, ok := obj[key]; ok {
+			isFlat = true
+			break
+		}
+	}
+	if isFlat {
+		var flat ropeParams
+		if err := json.Unmarshal(raw, &flat); err != nil {
+			return nil, nil, err
+		}
+		return &flat, nil, nil
+	}
+
+	byType := make(map[string]*ropeParams, len(obj))
+	for key, msg := range obj {
+		if len(msg) == 0 || string(msg) == "null" {
+			continue
+		}
+		var rp ropeParams
+		if err := json.Unmarshal(msg, &rp); err != nil {
+			return nil, nil, err
+		}
+		byType[strings.ToLower(strings.TrimSpace(key))] = &rp
+	}
+	if len(byType) == 0 {
+		return nil, nil, nil
+	}
+	return nil, byType, nil
 }
 
 func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
@@ -466,8 +695,8 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 		return false
 	}
 
-	// Most MoE models are not supported yet. AFMoE is handled explicitly.
-	if hasMoE(cfg) && !hasArch("afmoe") {
+	// Most MoE models are not supported yet. AFMoE and Gemma4 are handled explicitly.
+	if hasMoE(cfg) && !hasArch("afmoe") && !hasArch("gemma4") {
 		return nil, fmt.Errorf("moe models are not supported by this runtime")
 	}
 
@@ -482,9 +711,14 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 		return qwen3Spec(), nil
 	case hasArch("afmoe"):
 		return afmoeSpec(), nil
+	case hasArch("gemma4"):
+		if cfg.EmbeddingMultiplier == 0 && cfg.HiddenSize > 0 {
+			cfg.EmbeddingMultiplier = float64(RoundFloat32ToBF16(float32(math.Sqrt(float64(cfg.HiddenSize)))))
+		}
+		return gemma4Spec(), nil
 	case hasArch("gemma3n"):
 		if cfg.EmbeddingMultiplier == 0 && cfg.HiddenSize > 0 {
-			cfg.EmbeddingMultiplier = math.Sqrt(float64(cfg.HiddenSize))
+			cfg.EmbeddingMultiplier = float64(RoundFloat32ToBF16(float32(math.Sqrt(float64(cfg.HiddenSize)))))
 		}
 		return gemma3nSpec(), nil
 	case hasArch("gemma3forconditionalgeneration"):
@@ -531,6 +765,9 @@ func hasMoE(cfg *HFConfig) bool {
 		return true
 	}
 	if cfg.NumExpertsPerTok > 0 || cfg.MoENumExperts > 0 || cfg.MoENumExpertsUsed > 0 {
+		return true
+	}
+	if cfg.EnableMoEBlock || cfg.TopKExperts > 0 {
 		return true
 	}
 	for _, lt := range cfg.LayerTypes {
