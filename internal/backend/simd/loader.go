@@ -186,11 +186,29 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	if headDim <= 0 {
 		return nil, fmt.Errorf("invalid head_dim %d", headDim)
 	}
-	qDim := headCount * headDim
-
-	headKVArr := buildHeadKV(cfg, spec, blockCount)
-	if len(headKVArr) != blockCount {
-		return nil, fmt.Errorf("head kv array length mismatch: %d != %d", len(headKVArr), blockCount)
+	layerCfgs, layerTypes, err := buildLayerLoadConfigs(cfg, spec, blockCount, headDim)
+	if err != nil {
+		return nil, err
+	}
+	headKVArr := make([]int, blockCount)
+	maxHeadDim := headDim
+	maxHeadKV := 0
+	maxKVStride := 0
+	maxRotaryDim := 0
+	for i, lc := range layerCfgs {
+		headKVArr[i] = lc.HeadKV
+		if lc.HeadDim > maxHeadDim {
+			maxHeadDim = lc.HeadDim
+		}
+		if lc.HeadKV > maxHeadKV {
+			maxHeadKV = lc.HeadKV
+		}
+		if kvStride := lc.HeadKV * lc.HeadDim; kvStride > maxKVStride {
+			maxKVStride = kvStride
+		}
+		if rotaryDim := len(lc.RopeInvFreq) * 2; rotaryDim > maxRotaryDim {
+			maxRotaryDim = rotaryDim
+		}
 	}
 
 	ffnLength := int(cfg.IntermediateSize)
@@ -238,35 +256,12 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		ropeLocalBase = ropeBase
 	}
 	ropeScaling := model.RopeScalingForConfig(cfg)
-	rotaryDim := model.RotaryDimForConfig(cfg)
+	rotaryDim := max(maxRotaryDim, model.RotaryDimForConfig(cfg))
 	routeScale := cfg.RouteScale
 	if routeScale == 0 {
 		routeScale = 1
 	}
 	numDenseLayers := min(max(cfg.NumDenseLayers, 0), blockCount)
-	layerTypes := []string(nil)
-	if len(cfg.LayerTypes) == blockCount {
-		layerTypes = make([]string, blockCount)
-		copy(layerTypes, cfg.LayerTypes)
-	} else if len(cfg.SlidingWindowPattern.Pattern) == blockCount && cfg.SlidingWindow > 0 {
-		layerTypes = make([]string, blockCount)
-		for i := range cfg.SlidingWindowPattern.Pattern {
-			if cfg.SlidingWindowPattern.Pattern[i] {
-				layerTypes[i] = "sliding_attention"
-			} else {
-				layerTypes[i] = "full_attention"
-			}
-		}
-	} else if cfg.GlobalAttnEveryN > 0 && cfg.SlidingWindow > 0 {
-		layerTypes = make([]string, blockCount)
-		for i := range blockCount {
-			if (i+1)%cfg.GlobalAttnEveryN == 0 {
-				layerTypes[i] = "full_attention"
-			} else {
-				layerTypes[i] = "sliding_attention"
-			}
-		}
-	}
 
 	modelCfg := &core.ModelConfig{
 		Arch: spec.Name,
@@ -275,7 +270,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			EmbeddingLength:        cfg.HiddenSize,
 			FFNLength:              ffnLength,
 			HeadCount:              headCount,
-			HeadDim:                headDim,
+			HeadDim:                maxHeadDim,
 			RotaryDim:              rotaryDim,
 			HeadCountKV:            headKVArr,
 			RMSEpsilon:             rmsEps,
@@ -327,28 +322,25 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		modelCfg.Config.CacheTypeV = opts.CacheTypeV
 	}
 
-	maxHeadKV := 0
-	for _, v := range headKVArr {
-		if v > maxHeadKV {
-			maxHeadKV = v
-		}
-	}
-
 	layers := make([]core.Layer, blockCount)
 	for i := range blockCount {
 		layer := &layers[i]
-		layer.HeadKV = headKVArr[i]
+		layer.HeadKV = layerCfgs[i].HeadKV
+		layer.HeadDim = layerCfgs[i].HeadDim
+		layer.KVHeadDim = layerCfgs[i].HeadDim
+		layer.AttnScale = layerCfgs[i].AttnScale
+		layer.ValueFromKey = layerCfgs[i].ValueFromKey
+		layer.ApplyVNorm = layerCfgs[i].ApplyVNorm
+		layer.SharedKVSource = layerCfgs[i].SharedKVSource
+		layer.StoreFullKV = layerCfgs[i].StoreFullKV
+		layer.RopeInvFreq = layerCfgs[i].RopeInvFreq
+		layer.RopeAttnScale = layerCfgs[i].RopeAttnScale
+		layer.LayerScale = 1
 		layer.IsRecurrent = layer.HeadKV == 0
-		layer.AttnType = "full_attention"
+		layer.AttnType = layerCfgs[i].AttnType
+		layer.AttnWindow = layerCfgs[i].AttnWindow
 		if cfg.NoRopeLayerInterval > 0 && (i+1)%cfg.NoRopeLayerInterval == 0 {
 			layer.NoRoPE = true
-		}
-
-		if len(layerTypes) == blockCount && layerTypes[i] != "" {
-			layer.AttnType = layerTypes[i]
-		}
-		if layer.AttnType == "sliding_attention" && cfg.SlidingWindow > 0 {
-			layer.AttnWindow = cfg.SlidingWindow
 		}
 		isMoELayer := spec.Name == "afmoe" && cfg.NumExperts > 0 && i >= numDenseLayers
 
@@ -475,6 +467,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 				}
 			}
 		} else {
+			qDim := headCount * layer.HeadDim
 			if spec.HasQKNorm {
 				qNorm, used, err := loadVecCandidates(src, names.QNormCandidates(i))
 				if err != nil {
@@ -498,8 +491,14 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 				if used == "" || usedK == "" {
 					return nil, fmt.Errorf("layer %d: could not resolve q/k norm tensors", i)
 				}
+				if len(layer.AttnQNorm) != layer.HeadDim {
+					return nil, fmt.Errorf("layer %d: q norm len %d incompatible with head_dim=%d", i, len(layer.AttnQNorm), layer.HeadDim)
+				}
+				if len(layer.AttnKNorm) != layer.HeadDim {
+					return nil, fmt.Errorf("layer %d: k norm len %d incompatible with head_dim=%d", i, len(layer.AttnKNorm), layer.HeadDim)
+				}
 			}
-			layer.Wq, layer.AttnGate, err = loadAttentionQAndGate(src, cfg, names.Wq(i), qDim, cfg.HiddenSize, headDim)
+			layer.Wq, layer.AttnGate, err = loadAttentionQAndGate(src, cfg, names.Wq(i), qDim, cfg.HiddenSize, layer.HeadDim)
 			if err != nil {
 				return nil, err
 			}
@@ -507,9 +506,16 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			if err != nil {
 				return nil, err
 			}
-			layer.Wv, err = loadMat(src, names.Wv(i))
-			if err != nil {
-				return nil, err
+			if !layer.ValueFromKey || names.Wv == nil {
+				layer.Wv, err = loadMat(src, names.Wv(i))
+				if err != nil {
+					return nil, err
+				}
+			} else if _, ok := src.TensorShape(names.Wv(i)); ok {
+				layer.Wv, err = loadMat(src, names.Wv(i))
+				if err != nil && !isTensorMissing(err) {
+					return nil, err
+				}
 			}
 			layer.Wo, err = loadMat(src, names.Wo(i))
 			if err != nil {
@@ -536,17 +542,21 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 				// 2*qDim rows and split the output into Q and gate.
 				layer.FusedQGate = true
 			} else if layer.Wq.R != qDim {
-				return nil, fmt.Errorf("layer %d: q_proj shape [%d %d] incompatible with hidden=%d head_dim=%d heads=%d", i, layer.Wq.R, layer.Wq.C, hidden, headDim, headCount)
+				return nil, fmt.Errorf("layer %d: q_proj shape [%d %d] incompatible with hidden=%d head_dim=%d heads=%d", i, layer.Wq.R, layer.Wq.C, hidden, layer.HeadDim, headCount)
 			}
-			wantKV := layer.HeadKV * headDim
+			wantKV := layer.HeadKV * layer.HeadDim
 			if layer.Wk.C != hidden || layer.Wk.R != wantKV {
-				return nil, fmt.Errorf("layer %d: k_proj shape [%d %d] incompatible with hidden=%d head_dim=%d kv_heads=%d", i, layer.Wk.R, layer.Wk.C, hidden, headDim, layer.HeadKV)
+				return nil, fmt.Errorf("layer %d: k_proj shape [%d %d] incompatible with hidden=%d head_dim=%d kv_heads=%d", i, layer.Wk.R, layer.Wk.C, hidden, layer.HeadDim, layer.HeadKV)
 			}
-			if layer.Wv.C != hidden || layer.Wv.R != wantKV {
-				return nil, fmt.Errorf("layer %d: v_proj shape [%d %d] incompatible with hidden=%d head_dim=%d kv_heads=%d", i, layer.Wv.R, layer.Wv.C, hidden, headDim, layer.HeadKV)
+			if layer.ValueFromKey {
+				if layer.Wv != nil && (layer.Wv.C != hidden || layer.Wv.R != wantKV) {
+					return nil, fmt.Errorf("layer %d: v_proj shape [%d %d] incompatible with hidden=%d head_dim=%d kv_heads=%d", i, layer.Wv.R, layer.Wv.C, hidden, layer.HeadDim, layer.HeadKV)
+				}
+			} else if layer.Wv == nil || layer.Wv.C != hidden || layer.Wv.R != wantKV {
+				return nil, fmt.Errorf("layer %d: v_proj shape incompatible with hidden=%d head_dim=%d kv_heads=%d", i, hidden, layer.HeadDim, layer.HeadKV)
 			}
 			if layer.Wo.R != hidden || layer.Wo.C != qDim {
-				return nil, fmt.Errorf("layer %d: o_proj shape [%d %d] incompatible with hidden=%d head_dim=%d heads=%d", i, layer.Wo.R, layer.Wo.C, hidden, headDim, headCount)
+				return nil, fmt.Errorf("layer %d: o_proj shape [%d %d] incompatible with hidden=%d head_dim=%d heads=%d", i, layer.Wo.R, layer.Wo.C, hidden, layer.HeadDim, headCount)
 			}
 			if names.AttnGate != nil && layer.AttnGate == nil {
 				layer.AttnGate, err = loadMat(src, names.AttnGate(i))
@@ -567,6 +577,41 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 				}
 				layer.MoE = moe
 			}
+			if spec.Name == "gemma4" {
+				if names.LayerScalar != nil {
+					layerScalar, err := loadVec(src, names.LayerScalar(i))
+					if err != nil {
+						return nil, err
+					}
+					if len(layerScalar) != 1 {
+						return nil, fmt.Errorf("layer %d: gemma4 layer scalar len %d incompatible with 1", i, len(layerScalar))
+					}
+					layer.LayerScale = layerScalar[0]
+				}
+				if cfg.HiddenSizePerLayerInput > 0 {
+					ple := &core.Gemma4PLELayer{}
+					ple.InputGate, err = loadMat(src, names.PerLayerInputGate(i))
+					if err != nil {
+						return nil, err
+					}
+					ple.Projection, err = loadMat(src, names.PerLayerInputProj(i))
+					if err != nil {
+						return nil, err
+					}
+					ple.PostNorm, err = loadVec(src, names.PostPerLayerInputNorm(i))
+					if err != nil {
+						return nil, err
+					}
+					layer.Gemma4PLE = ple
+				}
+				if cfg.EnableMoEBlock {
+					gemma4MoE, err := loadGemma4MoELayer(src, cfg, names, i)
+					if err != nil {
+						return nil, err
+					}
+					layer.Gemma4MoE = gemma4MoE
+				}
+			}
 			if names.MambaInProj != nil {
 				mamba, err := loadMambaLayer(src, cfg, names, i, modelCfg)
 				if err != nil {
@@ -579,11 +624,11 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 					layer.Mamba = mamba
 				}
 			}
-			kvStride := layer.HeadKV * headDim
+			kvStride := layer.HeadKV * layer.HeadDim
 
 			// Initialize cache based on type
 			cacheLen := maxContext
-			if layer.AttnType == "sliding_attention" && layer.AttnWindow > 0 {
+			if layer.AttnType == "sliding_attention" && layer.AttnWindow > 0 && !layer.StoreFullKV {
 				if layer.AttnWindow < cacheLen {
 					cacheLen = layer.AttnWindow
 				}
@@ -624,26 +669,34 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		}
 	}
 
+	gemma4PerLayer, err := loadGemma4PerLayerInputModel(src, cfg, names, blockCount)
+	if err != nil {
+		return nil, err
+	}
+
 	muPScale := float32(1)
 	if modelCfg.Config.MuPEnabled && modelCfg.Config.EmbeddingLength > 0 {
 		muPScale = float32(math.Sqrt(float64(modelCfg.Config.EmbeddingLength)))
 	}
 
 	coreInst := &core.Instance{
-		Config:        modelCfg,
-		Embeddings:    emb,
-		OutputNorm:    outNorm,
-		Output:        output,
-		Layers:        layers,
-		MaxContext:    maxContext,
-		Pos:           0,
-		RMSEpsilon:    float32(rmsEps),
-		HeadDim:       headDim,
-		HeadCount:     headCount,
-		MaxHeadKV:     maxHeadKV,
-		MuPScale:      muPScale,
-		RopeLocalOnly: spec.RopeLocalOnly,
-		TilingConfig:  core.TilingConfig(opts.TilingConfig),
+		Config:         modelCfg,
+		Embeddings:     emb,
+		OutputNorm:     outNorm,
+		Output:         output,
+		Layers:         layers,
+		Gemma4PerLayer: gemma4PerLayer,
+		MaxContext:     maxContext,
+		Pos:            0,
+		RMSEpsilon:     float32(rmsEps),
+		HeadDim:        maxHeadDim,
+		HeadCount:      headCount,
+		MaxHeadKV:      maxHeadKV,
+		MaxQDim:        headCount * maxHeadDim,
+		MaxKVStride:    maxKVStride,
+		MuPScale:       muPScale,
+		RopeLocalOnly:  spec.RopeLocalOnly,
+		TilingConfig:   core.TilingConfig(opts.TilingConfig),
 	}
 	m := (*Instance)(coreInst)
 	m.SetHostCapabilities(opts.HostCaps)
@@ -724,58 +777,8 @@ func numElementsModel(shape []int) (int, error) {
 	return n, nil
 }
 
-func loadMatRows(src tensorSource, name string, rowStart, rowCount int) (*core.Mat, error) {
-	payload, err := src.ReadTensor(name)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", name, err)
-	}
-	shape := payload.Shape
-	if len(shape) != 2 {
-		return nil, fmt.Errorf("%s: expected 2D tensor", name)
-	}
-	r := shape[0]
-	c := shape[1]
-	if r <= 0 || c <= 0 {
-		return nil, fmt.Errorf("%s: invalid shape %v", name, shape)
-	}
-	if rowStart < 0 || rowCount <= 0 || rowStart+rowCount > r {
-		return nil, fmt.Errorf("%s: invalid row slice start=%d count=%d shape=%v", name, rowStart, rowCount, shape)
-	}
-	switch payload.DType {
-	case mcf.DTypeF32:
-		data, err := decodeTensorF32(payload)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
-		}
-		start := rowStart * c
-		end := (rowStart + rowCount) * c
-		out := append([]float32(nil), data[start:end]...)
-		m := core.NewMatFromData(rowCount, c, out)
-		return &m, nil
-	case mcf.DTypeBF16, mcf.DTypeF16:
-		rowBytes, err := safeMulInt(c, 2)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
-		}
-		start := rowStart * rowBytes
-		end := (rowStart + rowCount) * rowBytes
-		m, err := core.NewMatFromRaw(rowCount, c, payload.DType, payload.Raw[start:end])
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
-		}
-		return &m, nil
-	default:
-		return nil, fmt.Errorf("%s: row slicing unsupported for dtype %d", name, payload.DType)
-	}
-}
 
-func loadInterleavedHeadBlocks(src tensorSource, name string, headDim, headCount, hidden int) (*core.Mat, *core.Mat, error) {
-	payload, err := src.ReadTensor(name)
-	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", name, err)
-	}
-	return loadInterleavedHeadBlocksFromPayload(name, payload, headDim, headCount, hidden)
-}
+
 
 func loadInterleavedHeadBlocksFromPayload(name string, payload tensorPayload, headDim, headCount, hidden int) (*core.Mat, *core.Mat, error) {
 	shape := payload.Shape
@@ -852,6 +855,7 @@ func loadInterleavedHeadBlocksFromPayload(name string, payload tensorPayload, he
 func loadAttentionQAndGate(src tensorSource, cfg *model.HFConfig, qName string, qDim, hidden, headDim int) (*core.Mat, *core.Mat, error) {
 	if cfg != nil && cfg.AttnOutputGate {
 		if shape, ok := src.TensorShape(qName); ok && len(shape) == 2 && shape[0] == 2*qDim && shape[1] == hidden {
+			// Fused Q+Gate projection with interleaved per-head layout.
 			// Read the raw payload to check the dtype before committing to a split path.
 			payload, err := src.ReadTensor(qName)
 			if err != nil {
@@ -862,16 +866,12 @@ func loadAttentionQAndGate(src tensorSource, cfg *model.HFConfig, qName string, 
 			// possible without re-encoding, so fall through to loading the
 			// full fused mat and splitting the output at inference time.
 			if !mcf.DTypeRequiresAligned64(payload.DType) {
-				wq, err := loadMatRows(src, qName, 0, qDim)
-				if err != nil {
-					return nil, nil, err
-				}
-				gate, err := loadMatRows(src, qName, qDim, qDim)
-				if err != nil {
-					return nil, nil, err
-				}
-				return wq, gate, nil
+				headCount := qDim / headDim
+				return loadInterleavedHeadBlocksFromPayload(qName, payload, headDim, headCount, hidden)
 			}
+			// Non-quantized fused Q+Gate: use interleaved head block splitting.
+			headCount := qDim / headDim
+			return loadInterleavedHeadBlocksFromPayload(qName, payload, headDim, headCount, hidden)
 		}
 	}
 	wq, err := loadMat(src, qName)
@@ -1464,37 +1464,6 @@ func blockCountForConfig(cfg *model.HFConfig, spec *model.ArchSpec) (int, error)
 	return 0, fmt.Errorf("could not determine layer count from config")
 }
 
-func buildHeadKV(cfg *model.HFConfig, spec *model.ArchSpec, blockCount int) []int {
-	if blockCount <= 0 {
-		return nil
-	}
-	headCount := cfg.NumAttentionHeads
-	if headCount <= 0 {
-		return nil
-	}
-	kvHeads := cfg.NumKeyValueHeads
-	if kvHeads <= 0 {
-		kvHeads = headCount
-	}
-
-	if spec.UseLayerTypes && len(cfg.LayerTypes) == blockCount {
-		out := make([]int, blockCount)
-		for i, t := range cfg.LayerTypes {
-			if t == "full_attention" {
-				out[i] = kvHeads
-			} else {
-				out[i] = 0
-			}
-		}
-		return out
-	}
-
-	out := make([]int, blockCount)
-	for i := range out {
-		out[i] = kvHeads
-	}
-	return out
-}
 
 func rmsEpsilonForConfig(cfg *model.HFConfig) float64 {
 	if cfg == nil {
@@ -1522,48 +1491,72 @@ func initInstanceScratch(m *Instance) {
 	ffn := m.Config.Config.FFNLength
 	numExperts := m.Config.Config.NumExperts
 	topK := m.Config.Config.NumExpertsPerTok
+	for i := range m.Layers {
+		if gm := m.Layers[i].Gemma4MoE; gm != nil {
+			if len(gm.Experts) > numExperts {
+				numExperts = len(gm.Experts)
+			}
+			if gm.TopK > topK {
+				topK = gm.TopK
+			}
+			if need := 2 * gm.Intermediate; need > ffn {
+				ffn = need
+			}
+		}
+		if gp := m.Layers[i].Gemma4PLE; gp != nil && gp.InputGate != nil && gp.InputGate.R > ffn {
+			ffn = gp.InputGate.R
+		}
+	}
 	deltaQKV := 2*m.Config.Config.DeltaKeyDim + m.Config.Config.DeltaValueDim
 	deltaValue := m.Config.Config.DeltaValueDim
 	deltaHeads := m.Config.Config.DeltaNumValueHeads
-	kv := m.MaxHeadKV * m.HeadDim
+	kv := m.MaxKVStride
 	if kv < 1 {
 		kv = m.HeadDim
 	}
-	qDim := m.HeadCount * m.HeadDim
+	qDim := m.MaxQDim
 	if qDim < 1 {
 		qDim = embd
 	}
+	perLayerTotal := 0
+	if m.Gemma4PerLayer != nil {
+		perLayerTotal = m.Gemma4PerLayer.LayerCount * m.Gemma4PerLayer.HiddenSize
+	}
 	m.Scratch = ScratchBuffers{
-		X:         make([]float32, embd),
-		Tmp:       make([]float32, embd),
-		Tmp2:      make([]float32, embd),
-		Q:         make([]float32, qDim),
-		K:         make([]float32, kv),
-		V:         make([]float32, kv),
-		AttnOut:   make([]float32, qDim),
-		AttnProj:  make([]float32, embd),
-		AttnGate:  make([]float32, 2*qDim),
-		Scores:    make([]float32, m.MaxContext),
-		FfnUp:     make([]float32, ffn),
-		FfnGate:   make([]float32, ffn),
-		FfnAct:    make([]float32, ffn),
-		MoeAccum:  make([]float32, embd),
-		RouterRaw: make([]float32, numExperts),
-		RouterSel: make([]float32, numExperts),
-		RouterIdx: make([]int, topK),
-		RouterW:   make([]float32, topK),
-		ScProj:    make([]float32, embd*3),
-		ScBx:      make([]float32, embd),
-		ScConv:    make([]float32, embd),
-		DeltaQKV:  make([]float32, max(deltaQKV, 1)),
-		DeltaA:    make([]float32, max(deltaHeads, 1)),
-		DeltaB:    make([]float32, max(deltaHeads, 1)),
-		DeltaZ:    make([]float32, max(deltaValue, 1)),
-		DeltaQ:    make([]float32, max(m.Config.Config.DeltaKeyDim, 1)),
-		DeltaK:    make([]float32, max(m.Config.Config.DeltaKeyDim, 1)),
-		DeltaV:    make([]float32, max(deltaValue, 1)),
-		DeltaOut:  make([]float32, max(deltaValue, 1)),
-		Logits:    make([]float32, m.Config.Config.VocabSize),
+		X:             make([]float32, embd),
+		Tmp:           make([]float32, embd),
+		Tmp2:          make([]float32, embd),
+		Q:             make([]float32, qDim),
+		K:             make([]float32, kv),
+		V:             make([]float32, kv),
+		AttnOut:       make([]float32, qDim),
+		AttnProj:      make([]float32, embd),
+		AttnGate:      make([]float32, 2*qDim),
+		Scores:        make([]float32, m.MaxContext),
+		FfnUp:         make([]float32, ffn),
+		FfnGate:       make([]float32, ffn),
+		FfnAct:        make([]float32, ffn),
+		MoeAccum:      make([]float32, embd),
+		RouterRaw:     make([]float32, numExperts),
+		RouterSel:     make([]float32, numExperts),
+		RouterIdx:     make([]int, topK),
+		RouterW:       make([]float32, topK),
+		RouterTop:     make([]float32, topK),
+		ScProj:        make([]float32, embd*3),
+		ScBx:          make([]float32, embd),
+		ScConv:        make([]float32, embd),
+		DeltaQKV:      make([]float32, max(deltaQKV, 1)),
+		DeltaA:        make([]float32, max(deltaHeads, 1)),
+		DeltaB:        make([]float32, max(deltaHeads, 1)),
+		DeltaZ:        make([]float32, max(deltaValue, 1)),
+		DeltaQ:        make([]float32, max(m.Config.Config.DeltaKeyDim, 1)),
+		DeltaK:        make([]float32, max(m.Config.Config.DeltaKeyDim, 1)),
+		DeltaV:        make([]float32, max(deltaValue, 1)),
+		DeltaOut:      make([]float32, max(deltaValue, 1)),
+		Logits:        make([]float32, m.Config.Config.VocabSize),
+		PerLayerTok:   make([]float32, perLayerTotal),
+		PerLayerProj:  make([]float32, perLayerTotal),
+		PerLayerInput: make([]float32, perLayerTotal),
 	}
 	if m.Config.Config.MambaInner > 0 && m.Config.Config.MambaHeadCount > 0 {
 		inner := m.Config.Config.MambaInner
@@ -1679,25 +1672,7 @@ func adjustGemmaNorms(m *Instance, cfg *model.HFConfig) {
 	if m == nil || cfg == nil {
 		return
 	}
-	// Gemma and Qwen3.5 use one-centered RMSNorm parameters.
-	needsOneCenteredNorms := false
-	mt := strings.ToLower(cfg.ModelType)
-	if strings.Contains(mt, "gemma") {
-		needsOneCenteredNorms = true
-	}
-	if strings.Contains(mt, "qwen3_5") {
-		needsOneCenteredNorms = true
-	}
-	// Also check architecture list if model_type is generic
-	for _, arch := range cfg.Architectures {
-		at := strings.ToLower(arch)
-		if strings.Contains(at, "gemma") || strings.Contains(at, "qwen3_5") {
-			needsOneCenteredNorms = true
-			break
-		}
-	}
-
-	if !needsOneCenteredNorms {
+	if !needsOneCenteredRMSNorm(cfg) {
 		return
 	}
 
@@ -1719,4 +1694,23 @@ func adjustGemmaNorms(m *Instance, cfg *model.HFConfig) {
 		addOne(l.AttnQNorm)
 		addOne(l.AttnKNorm)
 	}
+}
+
+func needsOneCenteredRMSNorm(cfg *model.HFConfig) bool {
+	if cfg == nil {
+		return false
+	}
+
+	modelTags := append([]string{cfg.ModelType}, cfg.Architectures...)
+	oneCentered := false
+	for _, raw := range modelTags {
+		tag := strings.ToLower(strings.TrimSpace(raw))
+		switch {
+		case strings.Contains(tag, "gemma4"), strings.Contains(tag, "gemma3n"), strings.Contains(tag, "qwen3_5"):
+			return false
+		case tag == "gemma", strings.Contains(tag, "gemma2"), strings.Contains(tag, "gemma3"):
+			oneCentered = true
+		}
+	}
+	return oneCentered
 }

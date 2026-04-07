@@ -1,6 +1,8 @@
 package simd
 
-import instance "github.com/samcharles93/mantle/internal/backend/core"
+import (
+	instance "github.com/samcharles93/mantle/internal/backend/core"
+)
 
 // Ops defines the matvec operations used by the runtime.
 type Ops interface {
@@ -91,6 +93,7 @@ func (o *DefaultOps) IncrementalAttention(attnOut []float32, layer *instance.Lay
 		o.scratch = o.scratch[:winLen]
 	}
 	RunAttnHeads(&ctx, o.scratch, 0, nHead)
+
 	return true
 }
 
