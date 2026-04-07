@@ -52,14 +52,37 @@ func ResolvePackOut(inDir, outFlag string) (string, bool, error) {
 // ResolveRunModelPath selects the model path from flags, env, or interactive choice.
 func ResolveRunModelPath(modelFlag string, modelsPath string, stdin io.Reader, stderr io.Writer) (string, error) {
 	modelFlag = strings.TrimSpace(modelFlag)
-	if modelFlag != "" {
-		return filepath.Clean(modelFlag), nil
-	}
-
 	modelsDir := strings.TrimSpace(modelsPath)
 	if modelsDir == "" {
 		modelsDir = strings.TrimSpace(os.Getenv(EnvMantleModelsDir))
 	}
+
+	if modelFlag != "" {
+		// If it's a direct path that exists, use it
+		clean := filepath.Clean(modelFlag)
+		if _, err := os.Stat(clean); err == nil {
+			return clean, nil
+		}
+
+		// If it's just a filename and we have a modelsDir, try looking there
+		if modelsDir != "" && !filepath.IsAbs(modelFlag) && !strings.Contains(modelFlag, string(filepath.Separator)) {
+			joined := filepath.Join(modelsDir, modelFlag)
+			if _, err := os.Stat(joined); err == nil {
+				return joined, nil
+			}
+			// Also try appending .mcf if not present
+			if !strings.HasSuffix(strings.ToLower(modelFlag), ".mcf") {
+				joinedMCF := filepath.Join(modelsDir, modelFlag+".mcf")
+				if _, err := os.Stat(joinedMCF); err == nil {
+					return joinedMCF, nil
+				}
+			}
+		}
+
+		// Otherwise return as-is (Action will fail on Stat)
+		return filepath.Clean(modelFlag), nil
+	}
+
 	if modelsDir == "" {
 		return "", fmt.Errorf("--model or --models-path is required unless %s is set", EnvMantleModelsDir)
 	}
