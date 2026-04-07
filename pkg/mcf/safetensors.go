@@ -132,10 +132,6 @@ func OpenSafetensorsFile(path string) (*SafetensorsFile, error) {
 			return nil, fmt.Errorf("safetensors: tensor %q: out-of-bounds data range", name)
 		}
 
-		if len(th.Shape) == 0 {
-			_ = f.Close()
-			return nil, fmt.Errorf("safetensors: tensor %q: empty shape", name)
-		}
 		for _, d := range th.Shape {
 			if d <= 0 {
 				_ = f.Close()

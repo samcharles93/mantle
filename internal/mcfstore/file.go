@@ -244,7 +244,7 @@ func (f *File) validateTensorRange(off, size uint64) error {
 
 func shapeToInt(shape []uint64) ([]int, error) {
 	if len(shape) == 0 {
-		return nil, errors.New("empty shape")
+		return []int{}, nil
 	}
 	out := make([]int, len(shape))
 	for i, v := range shape {
@@ -261,7 +261,7 @@ func shapeToInt(shape []uint64) ([]int, error) {
 
 func numElements(shape []int) (int, error) {
 	if len(shape) == 0 {
-		return 0, errors.New("empty shape")
+		return 1, nil
 	}
 	n := 1
 	maxInt := int(^uint(0) >> 1)
@@ -279,7 +279,7 @@ func numElements(shape []int) (int, error) {
 
 func numElementsU64(shape []int) (uint64, error) {
 	if len(shape) == 0 {
-		return 0, errors.New("empty shape")
+		return 1, nil
 	}
 	var n uint64 = 1
 	for _, d := range shape {

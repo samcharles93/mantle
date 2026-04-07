@@ -76,6 +76,37 @@ func TestTensorMissing(t *testing.T) {
 	}
 }
 
+func TestOpenAndReadScalarTensorF32(t *testing.T) {
+	t.Parallel()
+
+	modelPath := filepath.Join(t.TempDir(), "scalar.mcf")
+	if err := writeTestMCF(modelPath, "scale", nil, []float32{2.5}); err != nil {
+		t.Fatalf("write mcf: %v", err)
+	}
+
+	f, err := Open(modelPath)
+	if err != nil {
+		t.Fatalf("open mcfstore: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Tensor("scale")
+	if err != nil {
+		t.Fatalf("tensor metadata: %v", err)
+	}
+	if len(info.Shape) != 0 {
+		t.Fatalf("shape mismatch: got %v want scalar rank-0", info.Shape)
+	}
+
+	vals, _, err := f.ReadTensorF32("scale")
+	if err != nil {
+		t.Fatalf("read tensor f32: %v", err)
+	}
+	if len(vals) != 1 || vals[0] != 2.5 {
+		t.Fatalf("values=%v want [2.5]", vals)
+	}
+}
+
 func writeTestMCF(path, tensorName string, shape []uint64, vals []float32) error {
 	out, err := os.Create(path)
 	if err != nil {

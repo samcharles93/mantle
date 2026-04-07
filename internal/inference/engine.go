@@ -195,6 +195,7 @@ afterPrompt:
 	genStart := time.Now()
 	var streamingOverhead time.Duration
 	next, sampleErr := safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
+	logGenerationSampleDebug(next, g.StopTokens, logitsVec)
 	if sampleErr != nil {
 		flush()
 		return g.ContextTokens, stats, sampleErr

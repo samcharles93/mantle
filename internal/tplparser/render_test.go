@@ -56,6 +56,52 @@ func TestRenderTemplateSignatureFallback(t *testing.T) {
 	}
 }
 
+func TestRenderArchGemma4(t *testing.T) {
+	t.Parallel()
+
+	out, ok, err := Render(RenderOptions{
+		Arch:                "gemma4",
+		BOSToken:            "<bos>",
+		AddBOS:              false,
+		AddGenerationPrompt: true,
+		Messages: []Message{
+			{Role: "system", Content: "rules"},
+			{Role: "user", Content: "hello"},
+			{
+				Role:    "assistant",
+				Content: "ok",
+				ToolCalls: []ToolCall{
+					{
+						Function: ToolCallFunction{
+							Name:      "lookup",
+							Arguments: map[string]any{"q": "hi"},
+						},
+					},
+				},
+			},
+			{Role: "tool", Name: "lookup", Content: map[string]any{"result": "done"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("render error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected renderer match")
+	}
+	if !strings.HasPrefix(out, "<bos><|turn>system\nrules<turn|>\n") {
+		t.Fatalf("unexpected prefix: %q", out)
+	}
+	if !strings.Contains(out, "<|turn>model\nok<|tool_call>call:lookup{{q:<escape>hi<escape>}}<tool_call|><turn|>\n") {
+		t.Fatalf("missing gemma4 tool call rendering: %q", out)
+	}
+	if !strings.Contains(out, "<|turn>user\n<|tool_response>response:lookup{result:<escape>done<escape>}<tool_response|><turn|>\n") {
+		t.Fatalf("missing gemma4 tool response rendering: %q", out)
+	}
+	if !strings.HasSuffix(out, "<|turn>model\n") {
+		t.Fatalf("expected generation prompt suffix: %q", out)
+	}
+}
+
 func TestRenderUnsupported(t *testing.T) {
 	t.Parallel()
 

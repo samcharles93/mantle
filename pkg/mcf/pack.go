@@ -479,7 +479,7 @@ func safetensorsDTypeInfo(dt string) (TensorDType, int, error) {
 
 func shapeToU64(shape []int64) ([]uint64, uint64, error) {
 	if len(shape) == 0 {
-		return nil, 0, errors.New("empty shape")
+		return []uint64{}, 1, nil
 	}
 	out := make([]uint64, len(shape))
 	var n uint64 = 1

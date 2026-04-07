@@ -24,6 +24,8 @@ func renderByArchDefault(opts RenderOptions) (string, bool, error) {
 		return renderGemma3(opts)
 	case "gemma3_text", "gemma3", "gemma3n_text", "gemma3n":
 		return renderGemma3(opts)
+	case "gemma4":
+		return renderGemma4(opts)
 	case "qwen3", "qwen3_5":
 		return renderQwen3(opts)
 	case "mistral3":
@@ -36,6 +38,8 @@ func renderByArchDefault(opts RenderOptions) (string, bool, error) {
 func renderByTemplateSignature(opts RenderOptions) (string, bool, error) {
 	tpl := opts.Template
 	switch {
+	case strings.Contains(tpl, "<|turn>") && strings.Contains(tpl, "<turn|>"):
+		return renderGemma4(opts)
 	case strings.Contains(tpl, "<start_of_turn>") && strings.Contains(tpl, "<start_function_declaration>"):
 		return renderGemma3(opts)
 	case strings.Contains(tpl, "[SYSTEM_PROMPT]") && strings.Contains(tpl, "[INST]"):
