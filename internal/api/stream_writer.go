@@ -7,7 +7,6 @@ import (
 
 	"github.com/labstack/echo/v5"
 	"github.com/samcharles93/mantle/internal/inference"
-	"github.com/samcharles93/mantle/internal/reasoning"
 )
 
 type SSEStreamWriter struct {
@@ -21,7 +20,6 @@ type SSEStreamWriter struct {
 	startedItem     bool
 	startedTextPart bool
 	begun           bool
-	splitter        reasoning.Splitter
 	hadReasoning    bool
 }
 
@@ -78,31 +76,44 @@ func (s *SSEStreamWriter) Started() bool {
 	return s.begun
 }
 
-func (s *SSEStreamWriter) EmitToken(delta string) error {
-	contentDelta, reasoningDelta := s.splitter.Push(delta)
-	if reasoningDelta != "" {
-		if err := s.ensureOutputItem(); err != nil {
-			return err
-		}
-		s.hadReasoning = true
-		if err := s.send(map[string]any{
-			"type":            "response.output_reasoning.delta",
-			"item_id":         s.itemID,
-			"output_index":    s.outputIndex,
-			"content_index":   s.contentIndex,
-			"delta":           reasoningDelta,
-			"sequence_number": s.seq,
-		}); err != nil {
-			return err
-		}
-		s.flush()
-		s.seq++
-	}
-
-	if contentDelta == "" {
+func (s *SSEStreamWriter) EmitChunk(chunk inference.StreamChunk) error {
+	switch chunk.Type {
+	case inference.StreamChunkReasoningDelta:
+		return s.emitReasoningDelta(chunk.Delta)
+	case inference.StreamChunkPromptEcho, inference.StreamChunkTextDelta:
+		return s.emitTextDelta(chunk.Delta)
+	default:
 		return nil
 	}
+}
 
+func (s *SSEStreamWriter) emitReasoningDelta(delta string) error {
+	if delta == "" {
+		return nil
+	}
+	if err := s.ensureOutputItem(); err != nil {
+		return err
+	}
+	s.hadReasoning = true
+	if err := s.send(map[string]any{
+		"type":            "response.output_reasoning.delta",
+		"item_id":         s.itemID,
+		"output_index":    s.outputIndex,
+		"content_index":   s.contentIndex,
+		"delta":           delta,
+		"sequence_number": s.seq,
+	}); err != nil {
+		return err
+	}
+	s.flush()
+	s.seq++
+	return nil
+}
+
+func (s *SSEStreamWriter) emitTextDelta(delta string) error {
+	if delta == "" {
+		return nil
+	}
 	if !s.startedItem {
 		if err := s.ensureOutputItem(); err != nil {
 			return err
@@ -133,7 +144,7 @@ func (s *SSEStreamWriter) EmitToken(delta string) error {
 		"item_id":         s.itemID,
 		"output_index":    s.outputIndex,
 		"content_index":   s.contentIndex,
-		"delta":           contentDelta,
+		"delta":           delta,
 		"sequence_number": s.seq,
 	}); err != nil {
 		return err
