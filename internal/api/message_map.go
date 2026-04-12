@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/samcharles93/mantle/internal/reasoning"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
@@ -24,11 +23,6 @@ func responseItemsToMessages(items []ResponseItem) ([]tokenizer.Message, error) 
 		content, err := responseContentToMessageContent(item)
 		if err != nil {
 			return nil, err
-		}
-		if role == "assistant" {
-			if text, ok := content.(string); ok {
-				content = reasoning.SplitRaw(text).Content
-			}
 		}
 		msg := tokenizer.Message{
 			Role:    role,
