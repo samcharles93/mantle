@@ -19,7 +19,6 @@ import (
 	"github.com/samcharles93/mantle/internal/hostcaps"
 	"github.com/samcharles93/mantle/internal/inference"
 	"github.com/samcharles93/mantle/internal/logger"
-	"github.com/samcharles93/mantle/internal/reasoning"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
@@ -829,19 +828,23 @@ func runCmd() *cli.Command {
 				}
 
 				writer := cliux.NewStreamWriter(log, mode, rawOutput)
-				var split reasoning.Splitter
 				reasoningOpen := false
 				assistantStarted := false
-				result, err := loadResult.Engine.Generate(ctx, &req, func(s string) {
-					contentDelta, reasoningDelta := split.Push(s)
-					if reasoningDelta != "" && reasoningFmt != "none" {
+				result, err := loadResult.Engine.Generate(ctx, &req, func(chunk inference.StreamChunk) {
+					switch chunk.Type {
+					case inference.StreamChunkReasoningDelta:
+						if chunk.Delta == "" {
+							return
+						}
 						if !reasoningOpen {
 							fmt.Print("\x1b[2m")
 							reasoningOpen = true
 						}
-						fmt.Print(reasoningDelta)
-					}
-					if contentDelta != "" {
+						fmt.Print(chunk.Delta)
+					case inference.StreamChunkPromptEcho, inference.StreamChunkTextDelta:
+						if chunk.Delta == "" {
+							return
+						}
 						if reasoningOpen {
 							fmt.Print("\x1b[0m")
 							reasoningOpen = false
@@ -850,7 +853,7 @@ func runCmd() *cli.Command {
 							fmt.Print("\n")
 							assistantStarted = true
 						}
-						writer.Write(contentDelta)
+						writer.Write(chunk.Delta)
 					}
 				})
 				if reasoningOpen {
