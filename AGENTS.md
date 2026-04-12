@@ -86,6 +86,10 @@ Any new dependency is a design change and must be explicitly requested and justi
 
 If a request conflicts with these rules, surface the conflict explicitly and propose a compliant alternative.
 
+## Project Memory
+
+- Before declaring progress on parity closure, run `GOEXPERIMENT=simd go test ./internal/backend/simd ./cmd/mantle`, then `GOEXPERIMENT=simd go build -o bin/mantle ./cmd/mantle`, then regenerate the relevant `bin/mantle trace` outputs.
+
 ## Required workflow before marking work complete
 
 - Run formatting:
