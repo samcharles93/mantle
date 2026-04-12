@@ -59,14 +59,12 @@ func (s *InferenceService) SetReasoningDefaults(format string, budget int) {
 	if format != "" {
 		s.defaultReasoningFormat = format
 	}
-	if budget == -1 || budget == 0 {
-		s.defaultReasoningBudget = budget
-	}
+	s.defaultReasoningBudget = budget
 }
 
 type StreamWriter interface {
 	Begin(resp ResponsesResponse) error
-	EmitToken(delta string) error
+	EmitChunk(chunk inference.StreamChunk) error
 	Complete(resp ResponsesResponse, result *inference.Result) error
 	Failed(resp ResponsesResponse, err error) error
 	Incomplete(resp ResponsesResponse, err error) error
@@ -120,9 +118,9 @@ func (s *InferenceService) CreateResponse(ctx context.Context, req *ResponsesReq
 	err = s.provider.WithEngine(ctx, req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
 		reqOpts := toInferenceRequest(req, msgs, defaults, s.defaultReasoningFormat, s.defaultReasoningBudget,
 			s.defaultTemperature, s.defaultTopP, s.defaultTopK, s.defaultRepeat, s.defaultMaxContext, s.defaultSteps, s.defaultSeed)
-		result, genErr := engine.Generate(ctx, &reqOpts, func(tok string) {
+		result, genErr := engine.Generate(ctx, &reqOpts, func(chunk inference.StreamChunk) {
 			if stream != nil {
-				_ = stream.EmitToken(tok)
+				_ = stream.EmitChunk(chunk)
 			}
 		})
 		if genErr != nil {
