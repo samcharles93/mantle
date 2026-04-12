@@ -1,10 +1,11 @@
 package tplparser
 
 type Message struct {
-	Role      string     `json:"role"`
-	Content   any        `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	Name      string     `json:"name,omitempty"`
+	Role       string     `json:"role"`
+	Content    any        `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	Name       string     `json:"name,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 type ToolCall struct {
