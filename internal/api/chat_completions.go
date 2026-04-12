@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -238,8 +237,11 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 
 	err := s.service.provider.WithEngine(c.Request().Context(), req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
 		inferReq := chatToInferenceRequest(&req, msgs, defaults)
-		_, err := engine.Generate(c.Request().Context(), &inferReq, func(tok string) {
-			chunk := ChatCompletionChunk{
+		_, err := engine.Generate(c.Request().Context(), &inferReq, func(streamChunk inference.StreamChunk) {
+			if streamChunk.Type != inference.StreamChunkTextDelta && streamChunk.Type != inference.StreamChunkPromptEcho {
+				return
+			}
+			sseChunk := ChatCompletionChunk{
 				ID:      completionID,
 				Object:  "chat.completion.chunk",
 				Created: created,
@@ -247,11 +249,11 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 				Choices: []ChatChoice{
 					{
 						Index: 0,
-						Delta: &ChatMessage{Content: tok},
+						Delta: &ChatMessage{Content: streamChunk.Delta},
 					},
 				},
 			}
-			_ = sendSSEChunk(res, chunk)
+			_ = sendSSEChunk(res, sseChunk)
 			flusher.Flush()
 		})
 		return err
@@ -298,7 +300,9 @@ func chatMessagesToTokenizerMessages(msgs []ChatMessage) ([]tokenizer.Message, e
 	out := make([]tokenizer.Message, 0, len(msgs))
 	for _, m := range msgs {
 		msg := tokenizer.Message{
-			Role: m.Role,
+			Role:       m.Role,
+			Name:       m.Name,
+			ToolCallID: m.ToolCallID,
 		}
 
 		switch content := m.Content.(type) {
@@ -307,20 +311,7 @@ func chatMessagesToTokenizerMessages(msgs []ChatMessage) ([]tokenizer.Message, e
 		case nil:
 			msg.Content = ""
 		case []any:
-			// Multi-part content (text + images)
-			var textParts []string
-			for _, part := range content {
-				pm, ok := part.(map[string]any)
-				if !ok {
-					continue
-				}
-				if typ, _ := pm["type"].(string); typ == "text" {
-					if text, ok := pm["text"].(string); ok {
-						textParts = append(textParts, text)
-					}
-				}
-			}
-			msg.Content = joinStrings(textParts, "\n")
+			msg.Content = content
 		default:
 			// Try JSON marshal/unmarshal as fallback
 			b, err := json.Marshal(content)
@@ -333,18 +324,6 @@ func chatMessagesToTokenizerMessages(msgs []ChatMessage) ([]tokenizer.Message, e
 		out = append(out, msg)
 	}
 	return out, nil
-}
-
-func joinStrings(parts []string, sep string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	var result strings.Builder
-	result.WriteString(parts[0])
-	for _, p := range parts[1:] {
-		result.WriteString(sep + p)
-	}
-	return result.String()
 }
 
 func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message, defaults inference.GenDefaults) inference.Request {

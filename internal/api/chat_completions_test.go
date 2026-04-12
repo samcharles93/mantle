@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/labstack/echo/v5"
+	"github.com/samcharles93/mantle/internal/inference"
 )
 
 func TestChatCompletionsBasic(t *testing.T) {
@@ -94,6 +97,41 @@ func TestChatCompletionsStreaming(t *testing.T) {
 	}
 	if !strings.Contains(respBody, "chat.completion.chunk") {
 		t.Fatal("expected chat.completion.chunk objects in streaming response")
+	}
+}
+
+func TestChatCompletionsStreamingOmitsReasoningChunks(t *testing.T) {
+	t.Parallel()
+
+	provider := testProvider{
+		engine: testEngine{
+			chunks: []inference.StreamChunk{
+				{Type: inference.StreamChunkReasoningDelta, Delta: "secret"},
+				{Type: inference.StreamChunkTextDelta, Delta: "visible"},
+			},
+			result: &inference.Result{
+				Text:          "visible",
+				ReasoningText: "secret",
+			},
+		},
+	}
+	service := NewInferenceService(provider)
+	server := NewServer(NewResponseStore(), service)
+	e := echo.New()
+	server.Register(e)
+
+	body := `{"model":"mantle","messages":[{"role":"user","content":"hello"}],"stream":true}`
+	rec := doJSON(t, e, http.MethodPost, "/v1/chat/completions", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	respBody := rec.Body.String()
+	if !strings.Contains(respBody, "visible") {
+		t.Fatalf("expected visible content in stream, got %s", respBody)
+	}
+	if strings.Contains(respBody, "secret") {
+		t.Fatalf("expected reasoning to be omitted from chat stream, got %s", respBody)
 	}
 }
 
@@ -193,7 +231,11 @@ func TestChatMessageContentTypes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("multi-part content: %v", err)
 	}
-	if result[0].Content != "hello\nworld" {
-		t.Fatalf("expected 'hello\\nworld', got %v", result[0].Content)
+	contentArr, ok := result[0].Content.([]any)
+	if !ok {
+		t.Fatalf("expected []any content for multi-part, got %T", result[0].Content)
+	}
+	if len(contentArr) != 2 {
+		t.Fatalf("expected 2 content parts, got %d", len(contentArr))
 	}
 }
