@@ -9,12 +9,10 @@ import (
 	core "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/logits"
 	"github.com/samcharles93/mantle/internal/mcfstore"
-	"github.com/samcharles93/mantle/internal/reasoning"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
 type EngineImpl struct {
-	mcfFile          *mcfstore.File
 	model            core.Model
 	tokenizer        tokenizer.Tokenizer
 	tokenizerConfig  tokenizer.TokenizerConfig
@@ -22,10 +20,11 @@ type EngineImpl struct {
 	hfConfigJSON     []byte
 	chatTemplatePath string
 	stopTokens       []int
+	mcfFile          *mcfstore.File
 
 	generator   *Generator
-	lastPrompt  string // rendered prompt text from last Generate() call
-	lastGenText string // text generated in last Generate() call
+	lastPrompt  string
+	lastGenText string
 }
 
 func (e *EngineImpl) Close() error {
@@ -67,7 +66,10 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 	}
 
 	if req.EchoPrompt && stream != nil && prompt != "" {
-		stream(prompt)
+		stream(StreamChunk{
+			Type:  StreamChunkPromptEcho,
+			Delta: prompt,
+		})
 	}
 
 	// Build token sequence, reusing cached tokens when possible.
@@ -104,7 +106,7 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		return nil, err
 	}
 
-	sampler := logits.NewSampler(logits.SamplerConfig{
+	cfg := logits.SamplerConfig{
 		Seed:          req.Seed,
 		Temperature:   float32(req.Temperature),
 		TopK:          int(req.TopK),
@@ -112,7 +114,9 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		MinP:          float32(req.MinP),
 		RepeatPenalty: float32(req.RepeatPenalty),
 		RepeatLastN:   int(req.RepeatLastN),
-	})
+	}
+
+	sampler := logits.NewSampler(cfg)
 
 	if e.generator == nil {
 		e.generator = &Generator{
@@ -127,18 +131,23 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 	}
 
 	gen := e.generator
-
-	var sb strings.Builder
-	streamWrapper := func(tok string) {
-		sb.WriteString(tok)
-		if stream != nil {
-			stream(tok)
+	processor := newStreamProcessor(req.ReasoningFormat, req.ReasoningBudget)
+	emitChunks := func(chunks []StreamChunk) {
+		if stream == nil {
+			return
+		}
+		for _, chunk := range chunks {
+			if chunk.Delta == "" {
+				continue
+			}
+			stream(chunk)
 		}
 	}
 
-	_, stats, err := gen.RunWithContext(ctx, ids, req.Steps, func(s string) {
-		streamWrapper(s)
+	_, stats, err := gen.RunWithContext(ctx, ids, req.Steps, func(raw string) {
+		emitChunks(processor.Push(raw))
 	})
+	emitChunks(processor.Flush())
 	if err != nil {
 		return nil, err
 	}
@@ -146,36 +155,14 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		return nil, err
 	}
 
-	rawText := sb.String()
-	if len(gen.ContextTokens) >= len(ids) {
-		genIDs := gen.ContextTokens[len(ids):]
-		if len(genIDs) > 0 {
-			decoded, decErr := safeDecode(e.tokenizer, genIDs)
-			if decErr == nil {
-				rawText = decoded
-			}
-		} else {
-			rawText = ""
-		}
-	}
-	contentText := rawText
-	reasoningText := ""
-	switch strings.ToLower(strings.TrimSpace(req.ReasoningFormat)) {
-	case "none":
-		// Keep raw output untouched.
-	default:
-		split := reasoning.SplitRaw(rawText)
-		contentText = split.Content
-		reasoningText = split.Reasoning
-	}
+	result := processor.Result()
 
 	e.lastPrompt = prompt
-	e.lastGenText = contentText
+	e.lastGenText = result.Text
 
 	return &Result{
-		Text:          contentText,
-		ReasoningText: reasoningText,
-		RawText:       rawText,
+		Text:          result.Text,
+		ReasoningText: result.ReasoningText,
 		Stats:         stats,
 	}, nil
 }
@@ -189,6 +176,21 @@ func (e *EngineImpl) ResetContext() {
 	e.lastGenText = ""
 }
 
+func (e *EngineImpl) Capabilities() EngineCapabilities {
+	caps := EngineCapabilities{
+		Arch:           e.arch,
+		SupportsVision: false,
+		SupportsTools:  len(e.stopTokens) > 0,
+	}
+	if rt, ok := e.model.(interface{ ModelConfig() *core.ModelConfig }); ok {
+		if mc := rt.ModelConfig(); mc != nil {
+			caps.MaxContext = mc.Config.ContextLength
+			caps.VocabSize = mc.Config.VocabSize
+		}
+	}
+	return caps
+}
+
 func safeEncode(tok tokenizer.Tokenizer, prompt string) (ids []int, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -196,15 +198,6 @@ func safeEncode(tok tokenizer.Tokenizer, prompt string) (ids []int, err error) {
 		}
 	}()
 	return tok.Encode(prompt)
-}
-
-func safeDecode(tok tokenizer.Tokenizer, ids []int) (text string, err error) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			err = fmt.Errorf("panic in Decode: %v", rec)
-		}
-	}()
-	return tok.Decode(ids)
 }
 
 func (e *EngineImpl) renderPrompt(req *Request) (string, error) {
