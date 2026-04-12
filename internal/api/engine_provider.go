@@ -24,9 +24,17 @@ type EngineProviderConfig struct {
 }
 
 type CachedEngineProvider struct {
-	cfg   EngineProviderConfig
+	cfg     EngineProviderConfig
+	mu      sync.Mutex
+	cache   map[string]*engineEntry
+	loading map[string]*loadGate
+}
+
+type loadGate struct {
 	mu    sync.Mutex
-	cache map[string]*engineEntry
+	done  bool
+	entry *engineEntry
+	err   error
 }
 
 type engineEntry struct {
@@ -39,8 +47,9 @@ const envMantleModelsDir = "MANTLE_MODELS_DIR"
 
 func NewCachedEngineProvider(cfg EngineProviderConfig) *CachedEngineProvider {
 	return &CachedEngineProvider{
-		cfg:   cfg,
-		cache: make(map[string]*engineEntry),
+		cfg:     cfg,
+		cache:   make(map[string]*engineEntry),
+		loading: make(map[string]*loadGate),
 	}
 }
 
@@ -65,26 +74,50 @@ func (p *CachedEngineProvider) WithEngine(ctx context.Context, modelID string, f
 func (p *CachedEngineProvider) getOrLoad(ctx context.Context, path string) (*engineEntry, error) {
 	p.mu.Lock()
 	entry, ok := p.cache[path]
-	p.mu.Unlock()
 	if ok {
+		p.mu.Unlock()
 		return entry, nil
+	}
+
+	gate, loading := p.loading[path]
+	if !loading {
+		gate = &loadGate{}
+		p.loading[path] = gate
+	}
+	p.mu.Unlock()
+
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+
+	if gate.done {
+		if gate.err != nil {
+			return nil, gate.err
+		}
+		return gate.entry, nil
 	}
 
 	result, err := p.cfg.Loader.Load(ctx, path, p.cfg.MaxContext)
 	if err != nil {
+		gate.err = err
+		gate.done = true
+		p.mu.Lock()
+		delete(p.loading, path)
+		p.mu.Unlock()
 		return nil, err
 	}
+
 	newEntry := &engineEntry{
 		engine:   result.Engine,
 		defaults: result.GenerationDefaults,
 	}
+	gate.entry = newEntry
+	gate.done = true
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if existing, ok := p.cache[path]; ok {
-		return existing, nil
-	}
 	p.cache[path] = newEntry
+	delete(p.loading, path)
+	p.mu.Unlock()
+
 	return newEntry, nil
 }
 
