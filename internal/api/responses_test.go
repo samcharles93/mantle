@@ -27,22 +27,38 @@ func (p testProvider) WithEngine(ctx context.Context, modelID string, fn func(en
 }
 
 type testEngine struct {
-	text string
-	err  error
+	text   string
+	chunks []inference.StreamChunk
+	result *inference.Result
+	err    error
 }
 
 func (e testEngine) Generate(ctx context.Context, req *inference.Request, stream inference.StreamFunc) (*inference.Result, error) {
 	if e.err != nil {
 		return nil, e.err
 	}
-	if stream != nil && e.text != "" {
-		stream(e.text)
+	if stream != nil {
+		for _, chunk := range e.chunks {
+			stream(chunk)
+		}
+		if len(e.chunks) == 0 && e.text != "" {
+			stream(inference.StreamChunk{
+				Type:  inference.StreamChunkTextDelta,
+				Delta: e.text,
+			})
+		}
+	}
+	if e.result != nil {
+		return e.result, nil
 	}
 	return &inference.Result{Text: e.text}, nil
 }
 
 func (e testEngine) ResetContext() {}
 func (e testEngine) Close() error  { return nil }
+func (e testEngine) Capabilities() inference.EngineCapabilities {
+	return inference.EngineCapabilities{}
+}
 
 func newTestEcho() *echo.Echo {
 	provider := testProvider{
@@ -365,4 +381,84 @@ func TestSSEEventFraming(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestResponsesStreamingPreservesStructuredChunkOrder(t *testing.T) {
+	t.Parallel()
+
+	provider := testProvider{
+		engine: testEngine{
+			chunks: []inference.StreamChunk{
+				{Type: inference.StreamChunkTextDelta, Delta: "A"},
+				{Type: inference.StreamChunkReasoningDelta, Delta: "R"},
+				{Type: inference.StreamChunkTextDelta, Delta: "B"},
+			},
+			result: &inference.Result{
+				Text:          "AB",
+				ReasoningText: "R",
+			},
+		},
+	}
+	service := NewInferenceService(provider)
+	server := NewServer(NewResponseStore(), service)
+	e := echo.New()
+	server.Register(e)
+
+	rec := doJSON(t, e, http.MethodPost, "/v1/responses", `{"input":"hello","stream":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	idxTextA := strings.Index(body, `"delta":"A"`)
+	idxReasoning := strings.Index(body, `"type":"response.output_reasoning.delta"`)
+	idxReasoningDelta := strings.Index(body, `"delta":"R"`)
+	idxTextB := strings.Index(body, `"delta":"B"`)
+	if idxTextA < 0 || idxReasoning < 0 || idxReasoningDelta < 0 || idxTextB < 0 {
+		t.Fatalf("expected structured deltas in body: %s", body)
+	}
+	if !(idxTextA < idxReasoning && idxReasoningDelta < idxTextB) {
+		t.Fatalf("delta order mismatch in body: %s", body)
+	}
+	if !strings.Contains(body, `"type":"response.output_reasoning.done"`) {
+		t.Fatalf("expected reasoning.done event in body: %s", body)
+	}
+}
+
+func TestSetReasoningDefaultsAllowsPositiveBudget(t *testing.T) {
+	t.Parallel()
+
+	engine := &captureEngine{}
+	service := NewInferenceService(testProvider{engine: engine})
+	service.SetReasoningDefaults("auto", 7)
+	server := NewServer(NewResponseStore(), service)
+	e := echo.New()
+	server.Register(e)
+
+	rec := doJSON(t, e, http.MethodPost, "/v1/responses", `{"input":"hello"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if engine.req == nil {
+		t.Fatal("expected request to be captured")
+	}
+	if engine.req.ReasoningBudget != 7 {
+		t.Fatalf("reasoning budget got %d want 7", engine.req.ReasoningBudget)
+	}
+}
+
+type captureEngine struct {
+	req *inference.Request
+}
+
+func (e *captureEngine) Generate(_ context.Context, req *inference.Request, _ inference.StreamFunc) (*inference.Result, error) {
+	copyReq := *req
+	e.req = &copyReq
+	return &inference.Result{}, nil
+}
+
+func (e *captureEngine) ResetContext() {}
+func (e *captureEngine) Close() error  { return nil }
+func (e *captureEngine) Capabilities() inference.EngineCapabilities {
+	return inference.EngineCapabilities{}
 }
