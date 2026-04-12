@@ -175,15 +175,18 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	stopTokens := BuildStopTokens(tokCfgParsed, genDefaults.EOSTokenIDs)
 	log.Debug("stop tokens resolved", "stop_tokens", stopTokens, "gen_eos_ids", genDefaults.EOSTokenIDs, "tokenizer_eos", tokCfgParsed.EOSTokenID)
 
+	cfgBytesCopy := make([]byte, len(cfgBytes))
+	copy(cfgBytesCopy, cfgBytes)
+
 	engine := &EngineImpl{
-		mcfFile:          mcfFile,
 		model:            modelRuntime,
 		tokenizer:        hfTok,
 		tokenizerConfig:  tokCfgParsed,
 		arch:             modelConfig.Arch,
-		hfConfigJSON:     cfgBytes,
+		hfConfigJSON:     cfgBytesCopy,
 		chatTemplatePath: l.ChatTemplatePath,
 		stopTokens:       stopTokens,
+		mcfFile:          mcfFile,
 	}
 
 	return &LoadResult{
@@ -191,7 +194,7 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 		Runtime:            modelRuntime,
 		Tokenizer:          hfTok,
 		TokenizerConfig:    tokCfgParsed,
-		HFConfigJSON:       cfgBytes,
+		HFConfigJSON:       cfgBytesCopy,
 		GenerationDefaults: genDefaults,
 		Arch:               modelConfig.Arch,
 	}, nil
