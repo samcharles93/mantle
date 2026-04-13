@@ -32,6 +32,7 @@ extern cudaError_t cudaMallocHost(void** ptr, unsigned long long size);
 extern cudaError_t cudaFreeHost(void* ptr);
 extern cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device);
 extern cudaError_t cudaMemAdvise(const void* devPtr, unsigned long long count, int advice, int device);
+extern cudaError_t cudaMemPrefetchAsync(const void* devPtr, unsigned long long count, int dstDevice, cudaStream_t stream);
 
 #define MANTLE_CUDA_MEMCPY_HOST_TO_DEVICE 1
 #define MANTLE_CUDA_MEMCPY_DEVICE_TO_HOST 2
@@ -214,6 +215,10 @@ static int mantleCudaMemAdvise(const void* devPtr, unsigned long long count, int
 	return (int)cudaMemAdvise(devPtr, count, advice, device);
 }
 
+static int mantleCudaMemPrefetchAsync(const void* devPtr, unsigned long long count, int dstDevice, cudaStream_t stream) {
+	return (int)cudaMemPrefetchAsync(devPtr, count, dstDevice, stream);
+}
+
 static int mantleCublasCreate(cublasHandle_t* out) {
 	cublasStatus_t st = cublasCreate_v2(out);
 	return (int)st;
@@ -346,6 +351,7 @@ type BlasHandle struct {
 type DeviceBuffer struct {
 	ptr     unsafe.Pointer
 	managed bool
+	nbytes  int64
 }
 
 type HostBuffer struct {
@@ -499,7 +505,7 @@ func AllocDevice(bytes int64) (DeviceBuffer, error) {
 			if managedErr := cudaErr(C.mantleCudaMallocManaged((*unsafe.Pointer)(&ptr), C.ulonglong(bytes))); managedErr == nil {
 				managedFallback.Store(true)
 				recordDeviceAlloc(bytes, true)
-				return DeviceBuffer{ptr: ptr, managed: true}, nil
+				return DeviceBuffer{ptr: ptr, managed: true, nbytes: bytes}, nil
 			} else {
 				return DeviceBuffer{}, fmt.Errorf("cuda alloc failed (%d bytes): device OOM and managed alloc failed: %w", bytes, managedErr)
 			}
@@ -507,7 +513,7 @@ func AllocDevice(bytes int64) (DeviceBuffer, error) {
 		return DeviceBuffer{}, err
 	}
 	recordDeviceAlloc(bytes, false)
-	return DeviceBuffer{ptr: ptr, managed: false}, nil
+	return DeviceBuffer{ptr: ptr, managed: false, nbytes: bytes}, nil
 }
 
 func AllocManaged(bytes int64) (DeviceBuffer, error) {
@@ -519,7 +525,7 @@ func AllocManaged(bytes int64) (DeviceBuffer, error) {
 		return DeviceBuffer{}, err
 	}
 	recordDeviceAlloc(bytes, true)
-	return DeviceBuffer{ptr: ptr, managed: true}, nil
+	return DeviceBuffer{ptr: ptr, managed: true, nbytes: bytes}, nil
 }
 
 func MemAdvise(buf DeviceBuffer, bytes int64, advice int, device int) error {
@@ -527,6 +533,15 @@ func MemAdvise(buf DeviceBuffer, bytes int64, advice int, device int) error {
 		return nil
 	}
 	return cudaErr(C.mantleCudaMemAdvise(buf.ptr, C.ulonglong(bytes), C.int(advice), C.int(device)))
+}
+
+// MemPrefetchAsync asynchronously prefetches managed memory to the specified device.
+func MemPrefetchAsync(buf DeviceBuffer, bytes int64, device int, stream Stream) error {
+	if buf.ptr == nil {
+		return nil
+	}
+	recordPrefetch()
+	return cudaErr(C.mantleCudaMemPrefetchAsync(buf.ptr, C.ulonglong(bytes), C.int(device), stream.ptr))
 }
 
 func ResetManagedFallbackFlag() {
@@ -550,6 +565,14 @@ func (b DeviceBuffer) Ptr() unsafe.Pointer {
 
 func (b DeviceBuffer) Managed() bool {
 	return b.managed
+}
+
+func (b DeviceBuffer) Nbytes() int64 {
+	return b.nbytes
+}
+
+func DeviceBufferFromRaw(ptr unsafe.Pointer) DeviceBuffer {
+	return DeviceBuffer{ptr: ptr}
 }
 
 func AllocHostPinned(bytes int64) (HostBuffer, error) {

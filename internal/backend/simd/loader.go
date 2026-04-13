@@ -777,9 +777,6 @@ func numElementsModel(shape []int) (int, error) {
 	return n, nil
 }
 
-
-
-
 func loadInterleavedHeadBlocksFromPayload(name string, payload tensorPayload, headDim, headCount, hidden int) (*core.Mat, *core.Mat, error) {
 	shape := payload.Shape
 	if len(shape) != 2 {
@@ -1463,7 +1460,6 @@ func blockCountForConfig(cfg *model.HFConfig, spec *model.ArchSpec) (int, error)
 	}
 	return 0, fmt.Errorf("could not determine layer count from config")
 }
-
 
 func rmsEpsilonForConfig(cfg *model.HFConfig) float64 {
 	if cfg == nil {

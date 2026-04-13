@@ -57,15 +57,15 @@ func prepareTokenRuntimeState(m *Instance, tok int) (*tokenRuntimeState, func(),
 	}
 
 	state := &tokenRuntimeState{
-		x:              x,
-		perLayerInputs: prepareGemma4PerLayerInputs(m, tok, x),
-		ops:            m.Ops(),
-		debug:          newLayerStateDebugger(),
+		x:     x,
+		ops:   m.Ops(),
+		debug: newLayerStateDebugger(),
 	}
 	if d, ok := state.ops.(DeviceStateOps); ok {
 		state.ds = d
 		state.ds.BeginToken(x)
 	}
+	state.perLayerInputs = prepareGemma4PerLayerInputs(m, tok, x, state.ops, state.ds)
 	if f, ok := state.ops.(blockFlusher); ok {
 		state.bf = f
 	}
@@ -86,6 +86,8 @@ func runDecoderLayers(m *Instance, rt *tokenRuntimeState) error {
 
 	for i := range m.Layers {
 		layer := &m.Layers[i]
+
+		prefetchLayer(ops, i+1)
 
 		if err := rt.debug.logPreNormX(rt, i); err != nil {
 			return err
@@ -127,12 +129,14 @@ func runDecoderLayers(m *Instance, rt *tokenRuntimeState) error {
 		}
 		addResidual(ds, x, opOut)
 		if usesGemma4BF16Rounding(layer) {
-			syncDeviceSlice(ops, x)
-			if err := consumeFastPathError(ops); err != nil {
-				return fmt.Errorf("attention residual bf16 sync failed: %w", err)
+			if !deviceRoundBF16InPlace(ops, x) {
+				syncDeviceSlice(ops, x)
+				if err := consumeFastPathError(ops); err != nil {
+					return fmt.Errorf("attention residual bf16 sync failed: %w", err)
+				}
+				roundBF16SliceInPlace(x)
+				markHostStateDirty(ds, x)
 			}
-			roundBF16SliceInPlace(x)
-			markHostStateDirty(ds, x)
 		}
 		if err := consumeFastPathError(ops); err != nil {
 			return fmt.Errorf("attention residual fast path failed: %w", err)

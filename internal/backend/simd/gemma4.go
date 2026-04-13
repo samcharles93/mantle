@@ -235,12 +235,12 @@ func loadMatStack3D(src tensorSource, name string, outer, rows, cols int) ([]*co
 	}
 }
 
-func prepareGemma4PerLayerInputs(m *Instance, tok int, x []float32) []float32 {
-	_, projected := computeGemma4PerLayerInputs(m, tok, x)
+func prepareGemma4PerLayerInputs(m *Instance, tok int, x []float32, ops Ops, ds DeviceStateOps) []float32 {
+	_, projected := computeGemma4PerLayerInputs(m, tok, x, ops, ds)
 	return projected
 }
 
-func computeGemma4PerLayerInputs(m *Instance, tok int, x []float32) (raw, projected []float32) {
+func computeGemma4PerLayerInputs(m *Instance, tok int, x []float32, ops Ops, ds DeviceStateOps) (raw, projected []float32) {
 	if m == nil || m.Gemma4PerLayer == nil {
 		return nil, nil
 	}
@@ -250,7 +250,13 @@ func computeGemma4PerLayerInputs(m *Instance, tok int, x []float32) (raw, projec
 	tokBuf := m.Scratch.PerLayerTok[:totalDim]
 	inputs := m.Scratch.PerLayerInput[:totalDim]
 
-	m.Ops().MatVec(proj, perLayer.Projection, x)
+	projFast := false
+	if ds != nil {
+		projFast = ds.DeviceMatVec(proj, perLayer.Projection, x)
+	}
+	if !projFast {
+		ops.MatVec(proj, perLayer.Projection, x)
+	}
 	for i := range proj {
 		proj[i] *= perLayer.ProjectionScale
 	}
@@ -370,12 +376,14 @@ func runGemma4FFNBlock(m *Instance, layer *Layer, x, normed, perLayerInput []flo
 			trace.FfnOut = cloneVec(m.Scratch.Tmp[:len(x)])
 		}
 		addResidual(ds, x, m.Scratch.Tmp)
-		syncDeviceSlice(ops, x)
-		if err := consumeFastPathError(ops); err != nil {
-			return fmt.Errorf("gemma4 moe residual bf16 sync failed: %w", err)
+		if !deviceRoundBF16InPlace(ops, x) {
+			syncDeviceSlice(ops, x)
+			if err := consumeFastPathError(ops); err != nil {
+				return fmt.Errorf("gemma4 moe residual bf16 sync failed: %w", err)
+			}
+			roundBF16SliceInPlace(x)
+			markHostStateDirty(ds, x)
 		}
-		roundBF16SliceInPlace(x)
-		markHostStateDirty(ds, x)
 	} else {
 		ffnOut := denseOut
 		if len(layer.PostFfnNorm) > 0 {
@@ -387,12 +395,14 @@ func runGemma4FFNBlock(m *Instance, layer *Layer, x, normed, perLayerInput []flo
 			trace.FfnOut = cloneVec(ffnOut[:len(x)])
 		}
 		addResidual(ds, x, ffnOut[:len(x)])
-		syncDeviceSlice(ops, x)
-		if err := consumeFastPathError(ops); err != nil {
-			return fmt.Errorf("gemma4 ffn residual bf16 sync failed: %w", err)
+		if !deviceRoundBF16InPlace(ops, x) {
+			syncDeviceSlice(ops, x)
+			if err := consumeFastPathError(ops); err != nil {
+				return fmt.Errorf("gemma4 ffn residual bf16 sync failed: %w", err)
+			}
+			roundBF16SliceInPlace(x)
+			markHostStateDirty(ds, x)
 		}
-		roundBF16SliceInPlace(x)
-		markHostStateDirty(ds, x)
 	}
 	if trace != nil {
 		trace.PostFfnHidden = cloneVec(x)
@@ -424,12 +434,14 @@ func runGemma4FFNBlock(m *Instance, layer *Layer, x, normed, perLayerInput []flo
 			trace.PerLayerResidual = cloneVec(m.Scratch.Tmp[:len(x)])
 		}
 		addResidual(ds, x, m.Scratch.Tmp[:len(x)])
-		syncDeviceSlice(ops, x)
-		if err := consumeFastPathError(ops); err != nil {
-			return fmt.Errorf("gemma4 ple residual bf16 sync failed: %w", err)
+		if !deviceRoundBF16InPlace(ops, x) {
+			syncDeviceSlice(ops, x)
+			if err := consumeFastPathError(ops); err != nil {
+				return fmt.Errorf("gemma4 ple residual bf16 sync failed: %w", err)
+			}
+			roundBF16SliceInPlace(x)
+			markHostStateDirty(ds, x)
 		}
-		roundBF16SliceInPlace(x)
-		markHostStateDirty(ds, x)
 	}
 
 	if layer.LayerScale != 0 && layer.LayerScale != 1 {

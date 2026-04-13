@@ -66,3 +66,29 @@ func syncDeviceSlice(ops Ops, x []float32) {
 		s.SyncDeviceSlice(x)
 	}
 }
+
+// layerPrefetcher is an optional extension that allows prefetching managed
+// layer weights to device memory ahead of execution, hiding PCIe latency
+// behind compute.
+type layerPrefetcher interface {
+	PrefetchLayer(layerIdx int)
+}
+
+func prefetchLayer(ops Ops, layerIdx int) {
+	if pf, ok := ops.(layerPrefetcher); ok {
+		pf.PrefetchLayer(layerIdx)
+	}
+}
+
+// deviceBF16Rounder is an optional extension that performs in-place BF16
+// rounding on device-resident buffers, avoiding D2H+H2D round-trips.
+type deviceBF16Rounder interface {
+	DeviceRoundBF16InPlace(x []float32) bool
+}
+
+func deviceRoundBF16InPlace(ops Ops, x []float32) bool {
+	if r, ok := ops.(deviceBF16Rounder); ok {
+		return r.DeviceRoundBF16InPlace(x)
+	}
+	return false
+}

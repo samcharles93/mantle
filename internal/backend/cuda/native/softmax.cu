@@ -414,8 +414,11 @@ extern "C"
                              const float *__restrict__ x, float *__restrict__ y,
                              int rows, int blocks_per_row, int cols)
   {
-    const int row = blockIdx.x;
     const int tid = threadIdx.x;
+    const int lane = tid & (WARP_SIZE - 1);
+    const int warp = tid / WARP_SIZE;
+    const int warps_per_block = blockDim.x / WARP_SIZE;
+    const int row = blockIdx.x * warps_per_block + warp;
     if (row >= rows)
       return;
 
@@ -423,44 +426,121 @@ extern "C"
     float sum = 0.0f;
     const int row_block_base = row * blocks_per_row;
     const int row_super_base = row * super_blocks_per_row;
-    for (int b = 0; b < blocks_per_row; b++)
+    const int full_blocks = min(blocks_per_row, cols >> 5);
+
+    for (int b = 0; b < full_blocks; b++)
     {
       const float super_scale =
-          f16_to_f32(super_scales_f16[row_super_base + (b / 8)]);
-      const uint8_t u6 = sub_scales[row_block_base + b] & 0x3F;
+          f16_to_f32(__ldg(super_scales_f16 + row_super_base + (b >> 3)));
+      const uint8_t u6 = __ldg(sub_scales + row_block_base + b) & 0x3F;
       if (super_scale == 0.0f || u6 == 0)
       {
         continue;
       }
       const float s = super_scale * (static_cast<float>(u6) * (1.0f / 32.0f));
-      const int col_base = b * 32;
-      const int n = min(32, cols - col_base);
-      if (n <= 0)
-        break;
-
       const uint8_t *qb = q_data + (row_block_base + b) * 16;
-      for (int i = tid; i < n; i += blockDim.x)
+      const uint8_t packed = __ldg(qb + (lane >> 1));
+      const int8_t qv = decode_q4_nibble(packed, lane);
+      const float xv = __ldg(x + b * 32 + lane);
+      sum = fmaf(s * static_cast<float>(qv), xv, sum);
+    }
+
+    if (full_blocks < blocks_per_row)
+    {
+      const int rem = cols - (full_blocks << 5);
+      if (rem > 0 && lane < rem)
       {
-        const uint8_t packed = qb[i >> 1];
-        const int8_t qv = decode_q4_nibble(packed, i);
-        sum += (s * static_cast<float>(qv)) * x[col_base + i];
+        const float super_scale =
+            f16_to_f32(__ldg(super_scales_f16 + row_super_base + (full_blocks >> 3)));
+        const uint8_t u6 = __ldg(sub_scales + row_block_base + full_blocks) & 0x3F;
+        if (super_scale != 0.0f && u6 != 0)
+        {
+          const float s = super_scale * (static_cast<float>(u6) * (1.0f / 32.0f));
+          const uint8_t *qb = q_data + (row_block_base + full_blocks) * 16;
+          const uint8_t packed = __ldg(qb + (lane >> 1));
+          const int8_t qv = decode_q4_nibble(packed, lane);
+          const float xv = __ldg(x + full_blocks * 32 + lane);
+          sum = fmaf(s * static_cast<float>(qv), xv, sum);
+        }
       }
     }
 
-    __shared__ float shared[256];
-    shared[tid] = sum;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+    const float warp_sum = warp_reduce_sum(sum);
+    if (lane == 0)
     {
-      if (tid < stride)
-      {
-        shared[tid] += shared[tid + stride];
-      }
-      __syncthreads();
+      y[row] = warp_sum;
     }
-    if (tid == 0)
+  }
+
+  __global__ void quant_matvec_k4_f32_xshared_kernel(
+      const uint8_t *__restrict__ q_data,
+      const uint16_t *__restrict__ super_scales_f16,
+      const uint8_t *__restrict__ sub_scales,
+      const float *__restrict__ x, float *__restrict__ y,
+      int rows, int blocks_per_row, int cols)
+  {
+    extern __shared__ float shared_x[];
+
+    const int tid = threadIdx.x;
+    for (int i = tid; i < cols; i += blockDim.x)
     {
-      y[row] = shared[0];
+      shared_x[i] = __ldg(x + i);
+    }
+    __syncthreads();
+
+    const int lane = tid & (WARP_SIZE - 1);
+    const int warp = tid / WARP_SIZE;
+    const int warps_per_block = blockDim.x / WARP_SIZE;
+    const int row = blockIdx.x * warps_per_block + warp;
+    if (row >= rows)
+      return;
+
+    const int super_blocks_per_row = (blocks_per_row + 7) / 8;
+    float sum = 0.0f;
+    const int row_block_base = row * blocks_per_row;
+    const int row_super_base = row * super_blocks_per_row;
+    const int full_blocks = min(blocks_per_row, cols >> 5);
+
+    for (int b = 0; b < full_blocks; b++)
+    {
+      const float super_scale =
+          f16_to_f32(__ldg(super_scales_f16 + row_super_base + (b >> 3)));
+      const uint8_t u6 = __ldg(sub_scales + row_block_base + b) & 0x3F;
+      if (super_scale == 0.0f || u6 == 0)
+      {
+        continue;
+      }
+      const float s = super_scale * (static_cast<float>(u6) * (1.0f / 32.0f));
+      const uint8_t *qb = q_data + (row_block_base + b) * 16;
+      const uint8_t packed = __ldg(qb + (lane >> 1));
+      const int8_t qv = decode_q4_nibble(packed, lane);
+      sum = fmaf(s * static_cast<float>(qv), shared_x[b * 32 + lane], sum);
+    }
+
+    if (full_blocks < blocks_per_row)
+    {
+      const int rem = cols - (full_blocks << 5);
+      if (rem > 0 && lane < rem)
+      {
+        const float super_scale =
+            f16_to_f32(__ldg(super_scales_f16 + row_super_base + (full_blocks >> 3)));
+        const uint8_t u6 = __ldg(sub_scales + row_block_base + full_blocks) & 0x3F;
+        if (super_scale != 0.0f && u6 != 0)
+        {
+          const float s = super_scale * (static_cast<float>(u6) * (1.0f / 32.0f));
+          const uint8_t *qb = q_data + (row_block_base + full_blocks) * 16;
+          const uint8_t packed = __ldg(qb + (lane >> 1));
+          const int8_t qv = decode_q4_nibble(packed, lane);
+          sum = fmaf(s * static_cast<float>(qv),
+                     shared_x[(full_blocks * 32) + lane], sum);
+        }
+      }
+    }
+
+    const float warp_sum = warp_reduce_sum(sum);
+    if (lane == 0)
+    {
+      y[row] = warp_sum;
     }
   }
 
@@ -950,19 +1030,31 @@ extern "C"
   }
 
   int mantleCudaQuantMatVecK4F32(const uint8_t *qData,
-                                 const uint16_t *superScalesF16,
-                                 const uint8_t *subScales, const float *x,
-                                 float *y, int rows, int blocksPerRow, int cols,
-                                 cudaStream_t stream)
+                                  const uint16_t *superScalesF16,
+                                  const uint8_t *subScales, const float *x,
+                                  float *y, int rows, int blocksPerRow, int cols,
+                                  cudaStream_t stream)
   {
     if (!qData || !superScalesF16 || !subScales || !x || !y || rows <= 0 ||
         blocksPerRow <= 0 || cols <= 0)
       return cudaErrorInvalidValue;
     const int threads = 256;
+    const int warps_per_block = threads / WARP_SIZE;
     dim3 block(threads);
-    dim3 grid(rows);
-    quant_matvec_k4_f32_kernel<<<grid, block, 0, stream>>>(
-        qData, superScalesF16, subScales, x, y, rows, blocksPerRow, cols);
+    dim3 grid((rows + warps_per_block - 1) / warps_per_block);
+    const size_t shared_x_bytes = static_cast<size_t>(cols) * sizeof(float);
+    const bool use_xshared =
+        shared_x_bytes > 0 && shared_x_bytes <= QUANT_MATVEC_X_SHARED_LIMIT;
+    if (use_xshared)
+    {
+      quant_matvec_k4_f32_xshared_kernel<<<grid, block, shared_x_bytes, stream>>>(
+          qData, superScalesF16, subScales, x, y, rows, blocksPerRow, cols);
+    }
+    else
+    {
+      quant_matvec_k4_f32_kernel<<<grid, block, 0, stream>>>(
+          qData, superScalesF16, subScales, x, y, rows, blocksPerRow, cols);
+    }
     return (int)cudaGetLastError();
   }
 

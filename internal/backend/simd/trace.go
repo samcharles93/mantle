@@ -139,7 +139,7 @@ func (m *Instance) traceForwardToken(tok int) ([]float32, *tokenTrace, error) {
 	}
 	tt.HiddenStates[0] = cloneVec(x)
 
-	rawPerLayer, projectedPerLayer := computeGemma4PerLayerInputs(m, tok, x)
+	rawPerLayer, projectedPerLayer := computeGemma4PerLayerInputs(m, tok, x, m.Ops(), nil)
 	if rawPerLayer != nil && projectedPerLayer != nil && m.Gemma4PerLayer != nil {
 		tt.PerLayerInputsRaw = splitRows(rawPerLayer, m.Gemma4PerLayer.LayerCount, m.Gemma4PerLayer.HiddenSize)
 		tt.PerLayerInputsProj = splitRows(projectedPerLayer, m.Gemma4PerLayer.LayerCount, m.Gemma4PerLayer.HiddenSize)
