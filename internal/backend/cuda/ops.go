@@ -20,23 +20,25 @@ import (
 )
 
 type Ops struct {
-	stream native.Stream
-	blas   native.BlasHandle
+	stream         native.Stream
+	prefetchStream native.Stream
+	blas           native.BlasHandle
 
-	mu             sync.Mutex
-	fastPathErr    error
-	weights        map[*model.Mat]deviceMat
-	qweights       map[*model.Mat]deviceQuantMat
-	offloadedMats  map[*model.Mat]struct{} // weights intentionally kept on CPU
-	gpuLayers      int                     // -1 auto, 0 all layers on CPU, N first N layers on GPU
-	normWeights    map[uintptr]native.DeviceBuffer
-	attnCaches     map[*model.Layer]deviceAttnCache
-	f16Dequant     map[*model.Mat]native.DeviceBuffer // Cached F16 dequantized weights
-	convKernels    map[*model.Mat]native.DeviceBuffer // Cached conv kernel weights on device
-	convStates     map[*model.Layer]convDeviceState   // Per-layer conv state on device
-	convStateReady map[*model.Layer]bool              // conv state already resident on device
-	quantGraphs    map[quantGraphKey]native.GraphExec // Cached CUDA Graph executables for quant kernels
-	ffnQuantGraphs map[ffnQuantGraphKey]native.GraphExec
+	mu               sync.Mutex
+	fastPathErr      error
+	weights          map[*model.Mat]deviceMat
+	qweights         map[*model.Mat]deviceQuantMat
+	offloadedMats    map[*model.Mat]struct{} // weights intentionally kept on CPU
+	gpuLayers        int                     // -1 auto, 0 all layers on CPU, N first N layers on GPU
+	normWeights      map[uintptr]native.DeviceBuffer
+	attnCaches       map[*model.Layer]deviceAttnCache
+	f16Dequant       map[*model.Mat]native.DeviceBuffer // Cached F16 dequantized weights
+	convKernels      map[*model.Mat]native.DeviceBuffer // Cached conv kernel weights on device
+	convStates       map[*model.Layer]convDeviceState   // Per-layer conv state on device
+	convStateReady   map[*model.Layer]bool              // conv state already resident on device
+	quantGraphs      map[quantGraphKey]native.GraphExec // Cached CUDA Graph executables for quant kernels
+	ffnQuantGraphs   map[ffnQuantGraphKey]native.GraphExec
+	managedLayerBufs map[int]managedLayerRange
 
 	// Dynamic KV cache bounding: effective context length for allocation (0 = use layer max)
 	effectiveContextLen int
@@ -93,6 +95,12 @@ type Ops struct {
 	vTmpQ8      []int8
 	kTmpQ8Scale []float32
 	vTmpQ8Scale []float32
+
+	// device-resident scratch buffer tracking for BF16 rounding optimization.
+	// Maps host slice pointer -> device buffer + validity flag.
+	scratchDevBufs  map[uintptr]native.DeviceBuffer
+	scratchDevBytes map[uintptr]int
+	scratchDevValid map[uintptr]bool
 }
 
 type deviceMat struct {
@@ -111,6 +119,11 @@ type deviceQuantMat struct {
 	rows         int
 	cols         int
 	blocksPerRow int
+}
+
+type managedLayerRange struct {
+	start unsafe.Pointer
+	bytes int64
 }
 
 type deviceAttnCache struct {
@@ -185,20 +198,24 @@ const (
 
 func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 	return &Ops{
-		stream:         stream,
-		blas:           blas,
-		weights:        make(map[*model.Mat]deviceMat),
-		qweights:       make(map[*model.Mat]deviceQuantMat),
-		offloadedMats:  make(map[*model.Mat]struct{}),
-		gpuLayers:      -1,
-		normWeights:    make(map[uintptr]native.DeviceBuffer),
-		attnCaches:     make(map[*model.Layer]deviceAttnCache),
-		f16Dequant:     make(map[*model.Mat]native.DeviceBuffer),
-		convKernels:    make(map[*model.Mat]native.DeviceBuffer),
-		convStates:     make(map[*model.Layer]convDeviceState),
-		convStateReady: make(map[*model.Layer]bool),
-		quantGraphs:    make(map[quantGraphKey]native.GraphExec),
-		ffnQuantGraphs: make(map[ffnQuantGraphKey]native.GraphExec),
+		stream:           stream,
+		blas:             blas,
+		weights:          make(map[*model.Mat]deviceMat),
+		qweights:         make(map[*model.Mat]deviceQuantMat),
+		offloadedMats:    make(map[*model.Mat]struct{}),
+		gpuLayers:        -1,
+		normWeights:      make(map[uintptr]native.DeviceBuffer),
+		attnCaches:       make(map[*model.Layer]deviceAttnCache),
+		f16Dequant:       make(map[*model.Mat]native.DeviceBuffer),
+		convKernels:      make(map[*model.Mat]native.DeviceBuffer),
+		convStates:       make(map[*model.Layer]convDeviceState),
+		convStateReady:   make(map[*model.Layer]bool),
+		quantGraphs:      make(map[quantGraphKey]native.GraphExec),
+		ffnQuantGraphs:   make(map[ffnQuantGraphKey]native.GraphExec),
+		managedLayerBufs: make(map[int]managedLayerRange),
+		scratchDevBufs:   make(map[uintptr]native.DeviceBuffer),
+		scratchDevBytes:  make(map[uintptr]int),
+		scratchDevValid:  make(map[uintptr]bool),
 	}
 }
 
@@ -626,6 +643,7 @@ func (o *Ops) PreloadModelWeights(m *core.Instance) error {
 				o.markLayerOffloadedLocked(layer)
 				offloadedLayers++
 			} else {
+				o.recordManagedLayerBufs(i, layer)
 				managedLayers++
 			}
 			continue
@@ -637,6 +655,7 @@ func (o *Ops) PreloadModelWeights(m *core.Instance) error {
 					o.markLayerOffloadedLocked(layer)
 					offloadedLayers++
 				} else {
+					o.recordManagedLayerBufs(i, layer)
 					managedLayers++
 				}
 				forceOffloadRemainder = true
@@ -660,6 +679,14 @@ func (o *Ops) PreloadModelWeights(m *core.Instance) error {
 		fmt.Fprintf(os.Stderr, "CUDA preload usage estimate: %d MiB / %d MiB budget\n", usedBytes/1024/1024, uploadBudget/1024/1024)
 	}
 
+	if len(o.managedLayerBufs) > 0 {
+		ps, err := native.NewStream()
+		if err != nil {
+			return fmt.Errorf("prefetch stream create failed: %w", err)
+		}
+		o.prefetchStream = ps
+	}
+
 	return nil
 }
 
@@ -670,6 +697,53 @@ func (o *Ops) preloadLayerManaged(layer *model.Layer) error {
 		}
 	}
 	return nil
+}
+
+func (o *Ops) recordManagedLayerBufs(layerIdx int, layer *model.Layer) {
+	var lo, hi uintptr
+	for _, mat := range layerMats(layer) {
+		if mat == nil {
+			continue
+		}
+		if dm, ok := o.weights[mat]; ok && dm.buf.Managed() {
+			p := uintptr(dm.buf.Ptr())
+			end := p + uintptr(dm.buf.Nbytes())
+			if lo == 0 || p < lo {
+				lo = p
+			}
+			if end > hi {
+				hi = end
+			}
+		}
+		if qm, ok := o.qweights[mat]; ok {
+			for _, b := range []native.DeviceBuffer{qm.q, qm.scales, qm.superScales, qm.subScales} {
+				if b.Ptr() != nil && b.Managed() {
+					p := uintptr(b.Ptr())
+					end := p + uintptr(b.Nbytes())
+					if lo == 0 || p < lo {
+						lo = p
+					}
+					if end > hi {
+						hi = end
+					}
+				}
+			}
+		}
+	}
+	if lo != 0 && hi > lo {
+		o.managedLayerBufs[layerIdx] = managedLayerRange{
+			start: unsafe.Pointer(lo),
+			bytes: int64(hi - lo),
+		}
+	}
+}
+
+func (o *Ops) PrefetchLayer(layerIdx int) {
+	r, ok := o.managedLayerBufs[layerIdx]
+	if !ok || o.prefetchStream.Ptr() == nil {
+		return
+	}
+	_ = native.MemPrefetchAsync(native.DeviceBufferFromRaw(r.start), r.bytes, 0, o.prefetchStream)
 }
 
 func (o *Ops) ensureManagedMat(mat *model.Mat) error {
@@ -886,6 +960,52 @@ func (o *Ops) SyncDeviceSlice(x []float32) {
 		}
 		return
 	}
+}
+
+// DeviceRoundBF16InPlace performs in-place BF16 rounding on device-resident
+// data, avoiding a D2H+H2D round-trip for the rounding step.
+func (o *Ops) DeviceRoundBF16InPlace(x []float32) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(x) == 0 {
+		return false
+	}
+	n := len(x)
+	ptr := uintptr(unsafe.Pointer(&x[0]))
+
+	// Check if x matches the persistent token state (x buffer)
+	if o.xHostLen == n && ptr == o.xHostPtr {
+		if o.xHostDirty {
+			bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
+			if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&x[0]), bytes); err != nil {
+				o.recordFastPathErrorLocked(fmt.Errorf("cuda: device bf16 round upload failed (%d bytes): %w", bytes, err))
+				return false
+			}
+			o.xHostDirty = false
+			o.xDevDirty = false
+		}
+		if err := native.RoundBF16InPlaceF32(o.xPersistDev, n, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: device bf16 round failed (n=%d): %w", n, err))
+			return false
+		}
+		o.xDevDirty = true
+		o.xHostDirty = false
+		o.clearNormDeviceView()
+		return true
+	}
+
+	// Check if x matches the RMSNorm device view (normDev)
+	if o.normDevValid && o.normHostLen == n && ptr == o.normHostPtr {
+		// normDev already contains the data; no need to upload.
+		if err := native.RoundBF16InPlaceF32(o.normDev, n, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: device bf16 round normDev failed (n=%d): %w", n, err))
+			return false
+		}
+		// Keep normDevValid true, host slice is now stale but downstream ops will use device input
+		return true
+	}
+
+	return false
 }
 
 // DeviceAdd implements instance.DeviceStateOps.
@@ -1240,6 +1360,14 @@ func (o *Ops) Close() error {
 	o.xDevDirty = false
 	o.greedyResultValid = false
 	o.clearNormDeviceView()
+
+	if o.prefetchStream.Ptr() != nil {
+		if e := o.prefetchStream.Destroy(); e != nil && err == nil {
+			err = e
+		}
+		o.prefetchStream = native.Stream{}
+	}
+	o.managedLayerBufs = nil
 
 	return err
 }
@@ -2830,7 +2958,6 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer, kvLayer *instan
 	return true
 }
 
-
 func (o *Ops) Softmax(x []float32) {
 	if len(x) <= 1 {
 		return
@@ -3879,6 +4006,44 @@ func (o *Ops) ensureNormDeviceVec(bytes int) error {
 	return nil
 }
 
+// ensureScratchDevBuf ensures a device buffer exists for a scratch host slice.
+// Returns the device buffer and true if successful, or nil and false on failure.
+// Requires o.mu locked.
+func (o *Ops) ensureScratchDevBuf(ptr uintptr, n int) (native.DeviceBuffer, bool) {
+	bytes := int64(n) * 4
+	if buf, ok := o.scratchDevBufs[ptr]; ok {
+		if o.scratchDevBytes[ptr] >= int(bytes) {
+			return buf, true
+		}
+		// Need to reallocate - free old buffer first
+		if err := buf.Free(); err != nil {
+			return native.DeviceBuffer{}, false
+		}
+	}
+	devBuf, err := native.AllocDevice(bytes)
+	if err != nil {
+		return native.DeviceBuffer{}, false
+	}
+	o.scratchDevBufs[ptr] = devBuf
+	o.scratchDevBytes[ptr] = int(bytes)
+	o.scratchDevValid[ptr] = true
+	return devBuf, true
+}
+
+// uploadScratch uploads a scratch buffer to device if dirty.
+func (o *Ops) uploadScratch(ptr uintptr, n int, hostPtr unsafe.Pointer) bool {
+	buf, ok := o.ensureScratchDevBuf(ptr, n)
+	if !ok {
+		return false
+	}
+	bytes := int64(n) * 4
+	if err := native.MemcpyH2D(buf, hostPtr, bytes); err != nil {
+		return false
+	}
+	o.scratchDevValid[ptr] = true
+	return true
+}
+
 func (o *Ops) ensureActTmp(bytes int) error {
 	if bytes > o.aDevBytes {
 		if err := o.flushIfPending(o.aDev); err != nil {
@@ -4264,8 +4429,10 @@ func estimateMatBytes(mat *model.Mat, mode cudaWeightMode) int64 {
 	}
 	if shouldPreferQuantWeights(mat, mode) {
 		if len(mat.Raw) > 0 {
-			// Q4 always uploads raw payload by default.
-			if mat.DType == mcf.DTypeQ4 {
+			// Q4 and K4 upload raw payloads directly via native CUDA
+			// kernels, so the estimate must reflect the actual raw
+			// payload size rather than the expanded quant-cache footprint.
+			if mat.DType == mcf.DTypeQ4 || mat.DType == mcf.DTypeK4 {
 				return int64(len(mat.Raw))
 			}
 			// Cached int8 upload footprint used by default quant path.

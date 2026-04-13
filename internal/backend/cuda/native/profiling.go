@@ -19,6 +19,7 @@ type PerfCounters struct {
 	GraphLaunches          int64
 	GraphFailures          int64
 	FlushIfPendingCalls    int64
+	PrefetchCalls          int64
 	H2DBytes               int64
 	D2HBytes               int64
 	ManagedAllocs          int64
@@ -43,6 +44,7 @@ func GetPerfCounters() PerfCounters {
 		GraphLaunches:          globalPerfCounters.GraphLaunches,
 		GraphFailures:          globalPerfCounters.GraphFailures,
 		FlushIfPendingCalls:    globalPerfCounters.FlushIfPendingCalls,
+		PrefetchCalls:          globalPerfCounters.PrefetchCalls,
 		H2DBytes:               globalPerfCounters.H2DBytes,
 		D2HBytes:               globalPerfCounters.D2HBytes,
 		ManagedAllocs:          globalPerfCounters.ManagedAllocs,
@@ -119,6 +121,12 @@ func recordFlushIfPending() {
 	}
 }
 
+func recordPrefetch() {
+	if perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.PrefetchCalls, 1)
+	}
+}
+
 func recordH2D(bytes int64) {
 	if perfEnabled() {
 		atomic.AddInt64(&globalPerfCounters.H2DBytes, bytes)
@@ -167,3 +175,6 @@ func RecordGraphFailure() { recordGraphFailure() }
 
 // RecordFlushIfPending records a forced D2H flush triggered by buffer reuse.
 func RecordFlushIfPending() { recordFlushIfPending() }
+
+// RecordPrefetch records a managed memory prefetch operation.
+func RecordPrefetch() { recordPrefetch() }

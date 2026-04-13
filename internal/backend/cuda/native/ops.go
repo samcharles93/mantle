@@ -39,6 +39,10 @@ extern int mantleCudaShortConvDepthwise(
 	int embd,
 	int klen,
 	cudaStream_t stream);
+extern int mantleCudaRoundBF16InPlaceF32(
+	float* data,
+	int n,
+	cudaStream_t stream);
 
 
 
@@ -84,6 +88,13 @@ static int mantleCudaShortConvDepthwiseWrapper(
 	int klen,
 	cudaStream_t stream) {
 	return mantleCudaShortConvDepthwise(proj, conv_w, state, out, embd, klen, stream);
+}
+
+static int mantleCudaRoundBF16InPlaceF32Wrapper(
+	float* data,
+	int n,
+	cudaStream_t stream) {
+	return mantleCudaRoundBF16InPlaceF32(data, n, stream);
 }
 */
 import "C"
@@ -201,6 +212,24 @@ func ConvertF32ToBF16(in, out DeviceBuffer, n int, stream Stream) error {
 		stream.ptr,
 	)); err != nil {
 		return fmt.Errorf("native.ConvertF32ToBF16(n=%d): %w", n, err)
+	}
+	return nil
+}
+
+func RoundBF16InPlaceF32(buf DeviceBuffer, n int, stream Stream) error {
+	if buf.ptr == nil {
+		return fmt.Errorf("native.RoundBF16InPlaceF32: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.RoundBF16InPlaceF32: %w", err)
+	}
+	if err := cudaErr(C.mantleCudaRoundBF16InPlaceF32Wrapper(
+		(*C.float)(buf.ptr),
+		nC,
+		stream.ptr,
+	)); err != nil {
+		return fmt.Errorf("native.RoundBF16InPlaceF32(n=%d): %w", n, err)
 	}
 	return nil
 }
