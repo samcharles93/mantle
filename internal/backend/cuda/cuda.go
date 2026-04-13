@@ -287,6 +287,7 @@ func (r *cudaRuntime) emitPerfSummary() {
 	fmt.Fprintf(os.Stderr, "Graph launches: %d\n", decode.GraphLaunches)
 	fmt.Fprintf(os.Stderr, "Graph failures: %d\n", decode.GraphFailures)
 	fmt.Fprintf(os.Stderr, "FlushIfPending: %d\n", decode.FlushIfPendingCalls)
+	fmt.Fprintf(os.Stderr, "Prefetch calls: %d\n", decode.PrefetchCalls)
 	fmt.Fprintf(os.Stderr, "H2D bytes: %d MB\n", decode.H2DBytes/1024/1024)
 	fmt.Fprintf(os.Stderr, "D2H bytes: %d MB\n", decode.D2HBytes/1024/1024)
 	fmt.Fprintf(os.Stderr, "Device allocs: %d (%.1f MB)\n", decode.DeviceAllocs, float64(decode.DeviceBytes)/1024/1024)
