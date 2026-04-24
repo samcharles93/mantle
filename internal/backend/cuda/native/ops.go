@@ -45,6 +45,16 @@ extern int mantleCudaShortConvDepthwise(
 	int embd,
 	int klen,
 	cudaStream_t stream);
+extern int mantleCudaMambaDepthwiseConv(
+	const float* in,
+	const float* conv_w,
+	const float* bias,
+	float* state,
+	float* out,
+	int channels,
+	int klen,
+	int has_bias,
+	cudaStream_t stream);
 extern int mantleCudaRoundBF16InPlaceF32(
 	float* data,
 	int n,
