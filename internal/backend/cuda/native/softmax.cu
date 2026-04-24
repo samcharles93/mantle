@@ -621,6 +621,20 @@ extern "C"
     out[idx] = (g * s) * u;
   }
 
+  __global__ void gelu_mul_f32_kernel(const float *__restrict__ gate,
+                                      const float *__restrict__ up,
+                                      float *__restrict__ out, int n)
+  {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n)
+      return;
+    const float g = gate[idx];
+    const float u = up[idx];
+    const float inner = 0.7978845608028654f * (g + 0.044715f * g * g * g);
+    const float act = 0.5f * g * (1.0f + static_cast<float>(tanh(static_cast<double>(inner))));
+    out[idx] = act * u;
+  }
+
   __global__ void convert_f32_to_f16_kernel(const float *__restrict__ in,
                                             uint16_t *__restrict__ out, int n)
   {
@@ -1098,6 +1112,17 @@ extern "C"
     const int threads = 256;
     const int blocks = (n + threads - 1) / threads;
     silu_mul_f32_kernel<<<blocks, threads, 0, stream>>>(gate, up, out, n);
+    return (int)cudaGetLastError();
+  }
+
+  int mantleCudaGeluMulF32(const float *gate, const float *up, float *out, int n,
+                           cudaStream_t stream)
+  {
+    if (!gate || !up || !out || n <= 0)
+      return cudaErrorInvalidValue;
+    const int threads = 256;
+    const int blocks = (n + threads - 1) / threads;
+    gelu_mul_f32_kernel<<<blocks, threads, 0, stream>>>(gate, up, out, n);
     return (int)cudaGetLastError();
   }
 
