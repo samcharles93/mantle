@@ -257,19 +257,33 @@ func computeGemma4PerLayerInputs(m *Instance, tok int, x []float32, ops Ops, ds 
 	if !projFast {
 		ops.MatVec(proj, perLayer.Projection, x)
 	}
-	for i := range proj {
-		proj[i] *= perLayer.ProjectionScale
-	}
 	perLayer.Embeddings.RowTo(tokBuf, tok)
 	if perLayer.EmbeddingScale != 1 {
 		for i := range tokBuf {
 			tokBuf[i] *= perLayer.EmbeddingScale
 		}
 	}
+	for i := range proj {
+		proj[i] *= perLayer.ProjectionScale
+	}
+	if bp, ok := ops.(batchedNormOps); !ok || !bp.RMSNormBatched(inputs, proj, perLayer.ProjectionNorm, m.RMSEpsilon, perLayer.HiddenSize, perLayer.LayerCount) {
+		for layerIdx := range perLayer.LayerCount {
+			start := layerIdx * perLayer.HiddenSize
+			end := start + perLayer.HiddenSize
+			rmsNormWeighted(inputs[start:end], proj[start:end], perLayer.ProjectionNorm, m.RMSEpsilon)
+			Add(inputs[start:end], tokBuf[start:end])
+			if perLayer.InputScale != 1 {
+				s := perLayer.InputScale
+				for i := start; i < end; i++ {
+					inputs[i] *= s
+				}
+			}
+		}
+		return tokBuf, inputs
+	}
 	for layerIdx := range perLayer.LayerCount {
 		start := layerIdx * perLayer.HiddenSize
 		end := start + perLayer.HiddenSize
-		rmsNormWeighted(inputs[start:end], proj[start:end], perLayer.ProjectionNorm, m.RMSEpsilon)
 		Add(inputs[start:end], tokBuf[start:end])
 		if perLayer.InputScale != 1 {
 			s := perLayer.InputScale
@@ -303,6 +317,7 @@ func gemma4GeluTanhExact(x float32) float32 {
 }
 
 func roundBF16SliceInPlace(x []float32) {
+	recordHostBF16Round(len(x))
 	for i := range x {
 		x[i] = roundBF16Value(x[i])
 	}
@@ -322,13 +337,20 @@ func markHostStateDirty(ds DeviceStateOps, x []float32) {
 	}
 }
 
-func gemma4DenseFFN(m *Instance, layer *Layer, normed []float32) []float32 {
+type gatedProjectionResidualFastPath interface {
+	GatedProjectionResidual(x, aux []float32, gate, projection *Mat, postNorm []float32, activation string, eps float32, roundBF16 bool) bool
+}
+
+func roundedDenseFFN(m *Instance, layer *Layer, normed []float32) []float32 {
 	if layer == nil || layer.FfnUp == nil || layer.FfnGate == nil || layer.FfnDown == nil {
 		return FFN(m, layer, normed)
 	}
 
 	ops := m.Ops()
 	normed = roundBF16SliceTo(m.Scratch.AttnOut[:len(normed)], normed)
+	if fp, ok := ops.(ffnFastPath); ok && fp.FFNBlock(layer, normed, m.Scratch.Tmp2[:layer.FfnDown.R]) {
+		return m.Scratch.Tmp2[:layer.FfnDown.R]
+	}
 	ops.MatVec(m.Scratch.FfnUp[:layer.FfnUp.R], layer.FfnUp, normed)
 	ops.MatVec(m.Scratch.FfnGate[:layer.FfnGate.R], layer.FfnGate, normed)
 	roundBF16SliceInPlace(m.Scratch.FfnUp[:layer.FfnUp.R])
@@ -354,10 +376,10 @@ func gemma4DenseFFN(m *Instance, layer *Layer, normed []float32) []float32 {
 
 func runGemma4FFNBlock(m *Instance, layer *Layer, x, normed, perLayerInput []float32, ds DeviceStateOps, trace *gemma4FFNTrace) error {
 	ops := m.Ops()
-	denseOut := gemma4DenseFFN(m, layer, normed)
+	denseOut := roundedDenseFFN(m, layer, normed)
 	syncDeviceSlice(ops, denseOut)
 	if err := consumeFastPathError(ops); err != nil {
-		return fmt.Errorf("gemma4 dense ffn sync failed: %w", err)
+		return fmt.Errorf("rounded dense ffn sync failed: %w", err)
 	}
 
 	if layer.Gemma4MoE != nil {
@@ -409,6 +431,15 @@ func runGemma4FFNBlock(m *Instance, layer *Layer, x, normed, perLayerInput []flo
 	}
 
 	if layer.Gemma4PLE != nil && perLayerInput != nil {
+		if trace == nil {
+			if fp, ok := ops.(gatedProjectionResidualFastPath); ok &&
+				fp.GatedProjectionResidual(x, perLayerInput, layer.Gemma4PLE.InputGate, layer.Gemma4PLE.Projection, layer.Gemma4PLE.PostNorm, layer.FFNActivation, m.RMSEpsilon, true) {
+				if err := consumeFastPathError(ops); err != nil {
+					return fmt.Errorf("gated projection residual fast path failed: %w", err)
+				}
+				goto applyLayerScale
+			}
+		}
 		syncDeviceSlice(ops, x)
 		if err := consumeFastPathError(ops); err != nil {
 			return fmt.Errorf("gemma4 per-layer input sync failed: %w", err)
@@ -444,17 +475,33 @@ func runGemma4FFNBlock(m *Instance, layer *Layer, x, normed, perLayerInput []flo
 		}
 	}
 
-	if layer.LayerScale != 0 && layer.LayerScale != 1 {
-		syncDeviceSlice(ops, x)
-		if err := consumeFastPathError(ops); err != nil {
-			return fmt.Errorf("gemma4 layer scale sync failed: %w", err)
-		}
-		for i := range x {
-			x[i] *= layer.LayerScale
-		}
-		roundBF16SliceInPlace(x)
-		markHostStateDirty(ds, x)
+applyLayerScale:
+	if err := applyRoundedLayerScale(m, layer, x, ds); err != nil {
+		return err
 	}
+	return nil
+}
+
+func applyRoundedLayerScale(m *Instance, layer *Layer, x []float32, ds DeviceStateOps) error {
+	if layer == nil || layer.LayerScale == 0 || layer.LayerScale == 1 {
+		return nil
+	}
+	ops := m.Ops()
+	if deviceScaleBF16InPlace(ops, x, layer.LayerScale) {
+		if err := consumeFastPathError(ops); err != nil {
+			return fmt.Errorf("gemma4 layer scale fast path failed: %w", err)
+		}
+		return nil
+	}
+	syncDeviceSlice(ops, x)
+	if err := consumeFastPathError(ops); err != nil {
+		return fmt.Errorf("gemma4 layer scale sync failed: %w", err)
+	}
+	for i := range x {
+		x[i] *= layer.LayerScale
+	}
+	roundBF16SliceInPlace(x)
+	markHostStateDirty(ds, x)
 	return nil
 }
 
@@ -506,6 +553,7 @@ func gemma4Experts(m *Instance, moe *Gemma4MoELayer, x []float32) []float32 {
 }
 
 func selectGemma4TopK(probabilities []float32, k int, perExpertScale []float32, idxOut []int, topProb []float32, weightOut []float32) {
+	recordHostTopK()
 	if k > len(probabilities) {
 		k = len(probabilities)
 	}
@@ -551,6 +599,7 @@ func selectGemma4TopK(probabilities []float32, k int, perExpertScale []float32, 
 }
 
 func rmsNormNoWeightTo(dst, src []float32, eps float32) {
+	recordHostRMSNormUnit(len(src))
 	var sum float32
 	for _, v := range src {
 		sum += v * v
@@ -562,6 +611,7 @@ func rmsNormNoWeightTo(dst, src []float32, eps float32) {
 }
 
 func rmsNormWeighted(dst, src, weight []float32, eps float32) {
+	recordHostRMSNormWeighted(len(src))
 	var sum float32
 	for _, v := range src {
 		sum += v * v

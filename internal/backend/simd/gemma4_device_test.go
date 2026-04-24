@@ -13,8 +13,10 @@ type gemma4PerLayerDeviceOps struct {
 	endTokenCalled      bool
 	deviceMatVecCalls   int
 	deviceMatVecSawInit bool
+	batchedNormCalls    int
 	matVecCalls         int
 	projOut             []float32
+	deviceScaleCalls    int
 }
 
 func (o *gemma4PerLayerDeviceOps) BeginToken(_ []float32) {
@@ -33,6 +35,16 @@ func (o *gemma4PerLayerDeviceOps) DeviceAdd(_, _ []float32) bool { return false 
 
 func (o *gemma4PerLayerDeviceOps) DeviceRMSNorm(_, _, _ []float32, _ float32) bool { return false }
 
+func (o *gemma4PerLayerDeviceOps) RMSNormBatched(dst, src, weight []float32, eps float32, headDim, nHeads int) bool {
+	o.batchedNormCalls++
+	for head := range nHeads {
+		start := head * headDim
+		end := start + headDim
+		rmsNormWeighted(dst[start:end], src[start:end], weight[:headDim], eps)
+	}
+	return true
+}
+
 func (o *gemma4PerLayerDeviceOps) DeviceMatVec(dst []float32, _ *Mat, _ []float32) bool {
 	o.deviceMatVecCalls++
 	o.deviceMatVecSawInit = o.beginTokenCalled
@@ -45,6 +57,14 @@ func (o *gemma4PerLayerDeviceOps) DeviceMatVecNoCopy(_ *Mat, _ []float32) bool {
 func (o *gemma4PerLayerDeviceOps) DeviceArgMaxLastResult() (int, bool) { return 0, false }
 
 func (o *gemma4PerLayerDeviceOps) DeviceLogitSoftcap(_ []float32, _ float32) bool { return false }
+
+func (o *gemma4PerLayerDeviceOps) DeviceScaleBF16InPlace(x []float32, scale float32) bool {
+	o.deviceScaleCalls++
+	for i := range x {
+		x[i] = roundBF16Value(x[i] * scale)
+	}
+	return true
+}
 
 func (o *gemma4PerLayerDeviceOps) MatVec(dst []float32, _ *Mat, _ []float32) {
 	o.matVecCalls++
@@ -100,6 +120,9 @@ func TestPrepareTokenRuntimeStateUsesDeviceProjectionAfterBeginToken(t *testing.
 	if ops.matVecCalls != 0 {
 		t.Fatalf("MatVec fallback calls = %d, want 0", ops.matVecCalls)
 	}
+	if ops.batchedNormCalls != 1 {
+		t.Fatalf("RMSNormBatched calls = %d, want 1", ops.batchedNormCalls)
+	}
 
 	want := make([]float32, 4)
 	rawTok := []float32{10, 20, 30, 40}
@@ -116,6 +139,31 @@ func TestPrepareTokenRuntimeStateUsesDeviceProjectionAfterBeginToken(t *testing.
 	for i := range want {
 		if got := state.perLayerInputs[i]; got != want[i] {
 			t.Fatalf("perLayerInputs[%d] = %v, want %v", i, got, want[i])
+		}
+	}
+}
+
+func TestApplyRoundedLayerScaleUsesDeviceFastPath(t *testing.T) {
+	ops := &gemma4PerLayerDeviceOps{}
+	m := &Instance{}
+	m.SetOps(ops)
+	layer := &Layer{LayerScale: 0.5}
+	x := []float32{1.1, -2.2, 3.3}
+
+	if err := applyRoundedLayerScale(m, layer, x, nil); err != nil {
+		t.Fatalf("applyRoundedLayerScale returned error: %v", err)
+	}
+	if ops.deviceScaleCalls != 1 {
+		t.Fatalf("DeviceScaleBF16InPlace calls = %d, want 1", ops.deviceScaleCalls)
+	}
+	want := []float32{
+		roundBF16Value(1.1 * 0.5),
+		roundBF16Value(-2.2 * 0.5),
+		roundBF16Value(3.3 * 0.5),
+	}
+	for i := range want {
+		if x[i] != want[i] {
+			t.Fatalf("x[%d] = %v, want %v", i, x[i], want[i])
 		}
 	}
 }

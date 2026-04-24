@@ -84,6 +84,7 @@ func Softmax(x []float32) {
 	if len(x) == 0 {
 		return
 	}
+	recordHostSoftmax(len(x))
 	maxv := x[0]
 	for i := 1; i < len(x); i++ {
 		if x[i] > maxv {

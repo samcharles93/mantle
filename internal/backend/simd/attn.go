@@ -21,6 +21,15 @@ type attentionInnerProjectionFastPath interface {
 	AttentionInnerProjection(projOut []float32, layer, kvLayer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32) bool
 }
 
+// attentionFullPipelineFastPath is implemented by backends (currently CUDA)
+// that can run the full attention block - QKV matvec, bias, RMSNorm(Q,K),
+// RoPE, KV-store, attention inner and Wo projection - end to end on device.
+// The backend returns true iff it successfully produced projOut; otherwise
+// the host path runs unchanged.
+type attentionFullPipelineFastPath interface {
+	QKVAttentionProjection(projOut []float32, layer, kvLayer *Layer, x []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32, invFreq []float64, ropeAttnScale float32, applyRope bool, mirrorHostKV bool) bool
+}
+
 type flashAttentionFastPath interface {
 	FlashAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool
 }
@@ -39,6 +48,34 @@ type incrementalAttentionFastPath interface {
 
 type batchedNormOps interface {
 	RMSNormBatched(dst, src, weight []float32, eps float32, headDim, nHeads int) bool
+}
+
+type attentionCacheHostSyncer interface {
+	SyncAttentionCacheToHost(layer *Layer, pos int)
+}
+
+// layerIsKVSource reports whether any other layer in m consumes the KV cache
+// produced by layer (via SharedKVSource pointing at its index).
+func layerIsKVSource(m *Instance, layer *Layer) bool {
+	baseIdx := -1
+	for i := range m.Layers {
+		if &m.Layers[i] == layer {
+			baseIdx = i
+			break
+		}
+	}
+	if baseIdx < 0 {
+		return false
+	}
+	for i := range m.Layers {
+		if i == baseIdx {
+			continue
+		}
+		if m.Layers[i].SharedKVSource == baseIdx {
+			return true
+		}
+	}
+	return false
 }
 
 // Attention performs multi-head attention with optional RoPE, KV caching, and sliding window.
@@ -76,6 +113,55 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			ReleaseQuantVec(qx)
 		}
 	}()
+
+	// Fused QKV -> RoPE -> KV-store -> attention -> Wo fast path.
+	// Runs the entire attention block on device when supported, skipping
+	// the per-layer Q/K/V D2H + host bias/norm/RoPE + H2D round-trip.
+	// Consumer layers (kvLayer != layer) are accepted; the fast path
+	// internally verifies the source's device cache is current.
+	if !layer.FusedQGate && layer.AttnGate == nil {
+		if fp, ok := ops.(attentionFullPipelineFastPath); ok {
+			applyRoPE := !layer.NoRoPE && (!m.RopeLocalOnly || layer.AttnType != "full_attention")
+			invFreq := layer.RopeInvFreq
+			attnScale := layer.RopeAttnScale
+			if len(invFreq) == 0 {
+				invFreq = m.RopeInvFreq
+				attnScale = m.RopeAttnScale
+				if layer.AttnType == "sliding_attention" && len(m.RopeInvFreqLocal) > 0 {
+					invFreq = m.RopeInvFreqLocal
+					attnScale = m.RopeAttnScaleLocal
+				}
+			}
+			if !applyRoPE || len(invFreq) > 0 {
+				scaleVal := layer.AttnScale
+				if scaleVal == 0 {
+					scaleVal = float32(1.0 / math.Sqrt(float64(headDim)))
+				}
+				startVal := 0
+				if layer.AttnWindow > 0 {
+					startVal = max(pos-layer.AttnWindow+1, 0)
+				}
+				var softcapVal float32
+				if m.Config != nil {
+					softcapVal = m.Config.Config.AttnLogitSoftcap
+				}
+				mirrorHostKV := layerIsKVSource(m, layer)
+				if mirrorHostKV {
+					_, mirrorOnDemand := ops.(attentionCacheHostSyncer)
+					mirrorHostKV = !mirrorOnDemand
+				}
+				if fp.QKVAttentionProjection(
+					m.Scratch.AttnProj, layer, kvLayer, x,
+					pos, startVal, nHead, headDim, kvHeads, kvStride,
+					scaleVal, m.RMSEpsilon, softcapVal,
+					invFreq, attnScale, applyRoPE,
+					mirrorHostKV,
+				) {
+					return m.Scratch.AttnProj
+				}
+			}
+		}
+	}
 
 	if kvLayer == layer && !layer.ValueFromKey && !layer.ApplyVNorm {
 		if fp, ok := ops.(attentionQKVFastPath); ok && fp.MatVecQKV(q, k, v, layer.Wq, layer.Wk, layer.Wv, x) {
@@ -357,6 +443,12 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		cachePos := pos
 		if cacheLen > 0 {
 			cachePos = pos % cacheLen
+		}
+
+		if kvLayer != layer {
+			if syncer, ok := ops.(attentionCacheHostSyncer); ok {
+				syncer.SyncAttentionCacheToHost(kvLayer, pos)
+			}
 		}
 
 		// Ensure host-side cache is allocated if we are falling back to CPU.

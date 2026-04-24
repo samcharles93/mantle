@@ -54,6 +54,11 @@ func (m *Instance) ForwardTokenGreedy(tok int) (int, error) {
 			m.Scratch.Logits[i] *= s
 		}
 	}
+	if softcap := m.Config.Config.FinalLogitSoftcap; softcap > 0 {
+		for i := range m.Scratch.Logits {
+			m.Scratch.Logits[i] = fastTanh(m.Scratch.Logits[i]/softcap) * softcap
+		}
+	}
 
 	m.Pos++
 	return argmaxHost(m.Scratch.Logits), nil

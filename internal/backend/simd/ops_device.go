@@ -86,9 +86,20 @@ type deviceBF16Rounder interface {
 	DeviceRoundBF16InPlace(x []float32) bool
 }
 
+type deviceBF16Scaler interface {
+	DeviceScaleBF16InPlace(x []float32, scale float32) bool
+}
+
 func deviceRoundBF16InPlace(ops Ops, x []float32) bool {
 	if r, ok := ops.(deviceBF16Rounder); ok {
 		return r.DeviceRoundBF16InPlace(x)
+	}
+	return false
+}
+
+func deviceScaleBF16InPlace(ops Ops, x []float32, scale float32) bool {
+	if s, ok := ops.(deviceBF16Scaler); ok {
+		return s.DeviceScaleBF16InPlace(x, scale)
 	}
 	return false
 }
