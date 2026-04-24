@@ -62,6 +62,9 @@ type Layer struct {
 	RopeInvFreq    []float64
 	RopeAttnScale  float32
 	LayerScale     float32
+	FFNActivation  string
+
+	RoundActivationsBF16 bool
 
 	AttnNorm     []float32
 	PostAttnNorm []float32
