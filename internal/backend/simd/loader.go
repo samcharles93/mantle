@@ -336,6 +336,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		layer.RopeInvFreq = layerCfgs[i].RopeInvFreq
 		layer.RopeAttnScale = layerCfgs[i].RopeAttnScale
 		layer.LayerScale = 1
+		layer.FFNActivation = cfg.HiddenActivation
 		layer.IsRecurrent = layer.HeadKV == 0
 		layer.AttnType = layerCfgs[i].AttnType
 		layer.AttnWindow = layerCfgs[i].AttnWindow
@@ -578,6 +579,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 				layer.MoE = moe
 			}
 			if spec.Name == "gemma4" {
+				layer.RoundActivationsBF16 = true
 				if names.LayerScalar != nil {
 					layerScalar, err := loadVec(src, names.LayerScalar(i))
 					if err != nil {
@@ -1617,11 +1619,29 @@ func updateInstanceRoPE(m *Instance) {
 	if localBase == 0 || localBase == m.Config.Config.RopeFreqBase {
 		m.RopeInvFreqLocal = nil
 		m.RopeAttnScaleLocal = m.RopeAttnScale
+		invalidateOpsRoPECaches(m)
 		return
 	}
 	ropeInvFreqLocal, localScale := calc(localBase)
 	m.RopeInvFreqLocal = ropeInvFreqLocal
 	m.RopeAttnScaleLocal = localScale
+	invalidateOpsRoPECaches(m)
+}
+
+// ropeCacheInvalidator is implemented by backends that cache per-layer RoPE
+// tables on device; they must drop those caches whenever the host slices are
+// reallocated.
+type ropeCacheInvalidator interface {
+	InvalidateRoPECaches()
+}
+
+func invalidateOpsRoPECaches(m *Instance) {
+	if m == nil {
+		return
+	}
+	if inv, ok := m.Ops().(ropeCacheInvalidator); ok {
+		inv.InvalidateRoPECaches()
+	}
 }
 
 func toSIMDRopeScaling(rs *model.RopeScaling) *RopeScaling {
