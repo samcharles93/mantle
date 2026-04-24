@@ -44,6 +44,15 @@ func TestSiluMulF32Validation(t *testing.T) {
 	requireErrContains(t, SiluMulF32(dummy, dummy, dummy, int(int64(maxInt32)+1), stream), "native.SiluMulF32")
 }
 
+func TestGeluMulF32Validation(t *testing.T) {
+	dummy := dummyDeviceBuffer()
+	stream := Stream{}
+
+	requireErrContains(t, GeluMulF32(DeviceBuffer{}, dummy, dummy, 1, stream), "native.GeluMulF32")
+	requireErrContains(t, GeluMulF32(dummy, dummy, dummy, 0, stream), "native.GeluMulF32")
+	requireErrContains(t, GeluMulF32(dummy, dummy, dummy, int(int64(maxInt32)+1), stream), "native.GeluMulF32")
+}
+
 func TestAddVectorsF32Validation(t *testing.T) {
 	dummy := dummyDeviceBuffer()
 	stream := Stream{}
@@ -51,6 +60,15 @@ func TestAddVectorsF32Validation(t *testing.T) {
 	requireErrContains(t, AddVectorsF32(DeviceBuffer{}, dummy, 1, stream), "native.AddVectorsF32")
 	requireErrContains(t, AddVectorsF32(dummy, dummy, 0, stream), "native.AddVectorsF32")
 	requireErrContains(t, AddVectorsF32(dummy, dummy, int(int64(maxInt32)+1), stream), "native.AddVectorsF32")
+}
+
+func TestScaleRoundBF16InPlaceF32Validation(t *testing.T) {
+	dummy := dummyDeviceBuffer()
+	stream := Stream{}
+
+	requireErrContains(t, ScaleRoundBF16InPlaceF32(DeviceBuffer{}, 1, 1, stream), "native.ScaleRoundBF16InPlaceF32")
+	requireErrContains(t, ScaleRoundBF16InPlaceF32(dummy, 1, 0, stream), "native.ScaleRoundBF16InPlaceF32")
+	requireErrContains(t, ScaleRoundBF16InPlaceF32(dummy, 1, int(int64(maxInt32)+1), stream), "native.ScaleRoundBF16InPlaceF32")
 }
 
 func TestShortConvDepthwiseValidation(t *testing.T) {

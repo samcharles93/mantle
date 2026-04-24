@@ -16,6 +16,12 @@ extern int mantleCudaSiluMulF32(
 	float* out,
 	int n,
 	cudaStream_t stream);
+extern int mantleCudaGeluMulF32(
+	const float* gate,
+	const float* up,
+	float* out,
+	int n,
+	cudaStream_t stream);
 extern int mantleCudaAddVectorsF32(
 	float* dst,
 	const float* src,
@@ -43,6 +49,11 @@ extern int mantleCudaRoundBF16InPlaceF32(
 	float* data,
 	int n,
 	cudaStream_t stream);
+extern int mantleCudaScaleRoundBF16InPlaceF32(
+	float* data,
+	float scale,
+	int n,
+	cudaStream_t stream);
 
 
 
@@ -55,6 +66,15 @@ static int mantleCudaSiluMulF32Wrapper(
 	return mantleCudaSiluMulF32(gate, up, out, n, stream);
 }
 
+static int mantleCudaGeluMulF32Wrapper(
+	const float* gate,
+	const float* up,
+	float* out,
+	int n,
+	cudaStream_t stream) {
+	return mantleCudaGeluMulF32(gate, up, out, n, stream);
+}
+
 static int mantleCudaAddVectorsF32Wrapper(
 	float* dst,
 	const float* src,
@@ -62,6 +82,7 @@ static int mantleCudaAddVectorsF32Wrapper(
 	cudaStream_t stream) {
 	return mantleCudaAddVectorsF32(dst, src, n, stream);
 }
+
 
 static int mantleCudaConvertF32ToF16Wrapper(
 	const float* in,
@@ -96,6 +117,14 @@ static int mantleCudaRoundBF16InPlaceF32Wrapper(
 	cudaStream_t stream) {
 	return mantleCudaRoundBF16InPlaceF32(data, n, stream);
 }
+
+static int mantleCudaScaleRoundBF16InPlaceF32Wrapper(
+	float* data,
+	float scale,
+	int n,
+	cudaStream_t stream) {
+	return mantleCudaScaleRoundBF16InPlaceF32(data, scale, n, stream);
+}
 */
 import "C"
 import (
@@ -129,6 +158,26 @@ func SiluMulF32(gate, up, out DeviceBuffer, n int, stream Stream) error {
 		stream.ptr,
 	)); err != nil {
 		return fmt.Errorf("native.SiluMulF32(n=%d): %w", n, err)
+	}
+	return nil
+}
+
+func GeluMulF32(gate, up, out DeviceBuffer, n int, stream Stream) error {
+	if gate.ptr == nil || up.ptr == nil || out.ptr == nil {
+		return fmt.Errorf("native.GeluMulF32: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.GeluMulF32: %w", err)
+	}
+	if err := cudaErr(C.mantleCudaGeluMulF32Wrapper(
+		(*C.float)(gate.ptr),
+		(*C.float)(up.ptr),
+		(*C.float)(out.ptr),
+		nC,
+		stream.ptr,
+	)); err != nil {
+		return fmt.Errorf("native.GeluMulF32(n=%d): %w", n, err)
 	}
 	return nil
 }
@@ -230,6 +279,25 @@ func RoundBF16InPlaceF32(buf DeviceBuffer, n int, stream Stream) error {
 		stream.ptr,
 	)); err != nil {
 		return fmt.Errorf("native.RoundBF16InPlaceF32(n=%d): %w", n, err)
+	}
+	return nil
+}
+
+func ScaleRoundBF16InPlaceF32(buf DeviceBuffer, scale float32, n int, stream Stream) error {
+	if buf.ptr == nil {
+		return fmt.Errorf("native.ScaleRoundBF16InPlaceF32: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.ScaleRoundBF16InPlaceF32: %w", err)
+	}
+	if err := cudaErr(C.mantleCudaScaleRoundBF16InPlaceF32Wrapper(
+		(*C.float)(buf.ptr),
+		C.float(scale),
+		nC,
+		stream.ptr,
+	)); err != nil {
+		return fmt.Errorf("native.ScaleRoundBF16InPlaceF32(n=%d): %w", n, err)
 	}
 	return nil
 }

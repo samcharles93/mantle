@@ -101,6 +101,29 @@ type Ops struct {
 	scratchDevBufs  map[uintptr]native.DeviceBuffer
 	scratchDevBytes map[uintptr]int
 	scratchDevValid map[uintptr]bool
+
+	// Fused QKV->attention->Wo pipeline: persistent device scratch for
+	// Q/K/V projection outputs and cached RoPE inverse-frequency tables.
+	qProjDev       native.DeviceBuffer
+	qProjDevBytes  int
+	kProjDev       native.DeviceBuffer
+	kProjDevBytes  int
+	vProjDev       native.DeviceBuffer
+	vProjDevBytes  int
+	ropeInvFreqDev map[uintptr]ropeInvFreqDevEntry
+	// onesDev caches a device-resident all-ones F32 buffer keyed by length,
+	// used as an identity weight for weightless RMSNorm variants (V-norm).
+	onesDev map[int]native.DeviceBuffer
+	// lastDevKVPos tracks the last token position at which a given
+	// layer's device-side KV cache was written by the fused path.
+	// Shared-KV consumer layers use this to verify the source layer's
+	// device cache is current before reading from it.
+	lastDevKVPos map[*model.Layer]int
+	// lastHostKVPos tracks the last token position at which a given
+	// layer's host-side KV cache was materialized from the device cache.
+	// Shared-KV consumers use this to avoid repeated full-cache D2H copies
+	// when multiple consumer layers fall back on the same token step.
+	lastHostKVPos map[*model.Layer]int
 }
 
 type deviceMat struct {
@@ -169,6 +192,8 @@ type ffnQuantGraphKey struct {
 	upFormat     quantMatFormat
 	gateFormat   quantMatFormat
 	downFormat   quantMatFormat
+	useGelu      bool
+	roundBF16    bool
 	interm       int
 	outRows      int
 	upQPtr       uintptr
@@ -216,6 +241,10 @@ func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 		scratchDevBufs:   make(map[uintptr]native.DeviceBuffer),
 		scratchDevBytes:  make(map[uintptr]int),
 		scratchDevValid:  make(map[uintptr]bool),
+		ropeInvFreqDev:   make(map[uintptr]ropeInvFreqDevEntry),
+		onesDev:          make(map[int]native.DeviceBuffer),
+		lastDevKVPos:     make(map[*model.Layer]int),
+		lastHostKVPos:    make(map[*model.Layer]int),
 	}
 }
 
@@ -1008,6 +1037,39 @@ func (o *Ops) DeviceRoundBF16InPlace(x []float32) bool {
 	return false
 }
 
+// DeviceScaleBF16InPlace applies x *= scale followed by BF16 rounding on the
+// persistent hidden-state buffer when x is device-resident.
+func (o *Ops) DeviceScaleBF16InPlace(x []float32, scale float32) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(x) == 0 {
+		return false
+	}
+	n := len(x)
+	ptr := uintptr(unsafe.Pointer(&x[0]))
+
+	if o.xHostLen != n || ptr != o.xHostPtr {
+		return false
+	}
+	if o.xHostDirty {
+		bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
+		if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&x[0]), bytes); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: device layer scale upload failed (%d bytes): %w", bytes, err))
+			return false
+		}
+		o.xHostDirty = false
+		o.xDevDirty = false
+	}
+	if err := native.ScaleRoundBF16InPlaceF32(o.xPersistDev, scale, n, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: device layer scale failed (n=%d): %w", n, err))
+		return false
+	}
+	o.xDevDirty = true
+	o.xHostDirty = false
+	o.clearNormDeviceView()
+	return true
+}
+
 // DeviceAdd implements instance.DeviceStateOps.
 func (o *Ops) DeviceAdd(dst, src []float32) bool {
 	o.mu.Lock()
@@ -1319,6 +1381,35 @@ func (o *Ops) Close() error {
 	if e := o.aDev.Free(); e != nil && err == nil {
 		err = e
 	}
+	if e := o.qProjDev.Free(); e != nil && err == nil {
+		err = e
+	}
+	if e := o.kProjDev.Free(); e != nil && err == nil {
+		err = e
+	}
+	if e := o.vProjDev.Free(); e != nil && err == nil {
+		err = e
+	}
+	o.qProjDev = native.DeviceBuffer{}
+	o.kProjDev = native.DeviceBuffer{}
+	o.vProjDev = native.DeviceBuffer{}
+	o.qProjDevBytes = 0
+	o.kProjDevBytes = 0
+	o.vProjDevBytes = 0
+	for _, entry := range o.ropeInvFreqDev {
+		if e := entry.buf.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.ropeInvFreqDev = make(map[uintptr]ropeInvFreqDevEntry)
+	for _, buf := range o.onesDev {
+		if e := buf.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.onesDev = make(map[int]native.DeviceBuffer)
+	o.lastDevKVPos = make(map[*model.Layer]int)
+	o.lastHostKVPos = make(map[*model.Layer]int)
 	if e := o.xPersistDev.Free(); e != nil && err == nil {
 		err = e
 	}
@@ -1844,11 +1935,13 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	o.mu.Unlock()
 
 	mode := currentCUDAWeightMode()
+	useGelu := strings.Contains(layer.FFNActivation, "gelu")
+	roundBF16 := layer.RoundActivationsBF16
 	if hasQuant || (mode != cudaWeightModeDequant &&
 		(shouldPreferQuantWeights(layer.FfnUp, mode) ||
 			shouldPreferQuantWeights(layer.FfnGate, mode) ||
 			shouldPreferQuantWeights(layer.FfnDown, mode))) {
-		return o.quantFFNBlock(layer, x, out)
+		return o.quantFFNBlock(layer, x, out, useGelu, roundBF16)
 	}
 	if len(x) < layer.FfnUp.C || len(out) < layer.FfnDown.R {
 		return false
@@ -1928,10 +2021,31 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, gateW.rows, 1, gateW.cols, 1.0, gateW.buf, gateW.dtype, gateW.cols, xInput, xInputType, gateW.cols, 0.0, o.zDev, native.BlasF32, gateW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
 		return false
 	}
-
-	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, interm, o.stream); err != nil {
-		o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn silu kernel failed (n=%d): %w", interm, err))
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.yDev, interm, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn up round failed (n=%d): %w", interm, err))
+			return false
+		}
+		if err := native.RoundBF16InPlaceF32(o.zDev, interm, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn gate round failed (n=%d): %w", interm, err))
+			return false
+		}
+	}
+	activateMul := native.SiluMulF32
+	actName := "silu"
+	if useGelu {
+		activateMul = native.GeluMulF32
+		actName = "gelu"
+	}
+	if err := activateMul(o.zDev, o.yDev, o.yDev, interm, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn %s kernel failed (n=%d): %w", actName, interm, err))
 		return false
+	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.yDev, interm, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn activation round failed (n=%d): %w", interm, err))
+			return false
+		}
 	}
 
 	downInput := o.aDev
@@ -1949,6 +2063,16 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, downW.rows, 1, downW.cols, 1.0, downW.buf, downW.dtype, downW.cols, downInput, downInputType, downW.cols, 0.0, o.zDev, native.BlasF32, downW.rows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
 		return false
 	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.zDev, downW.rows, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn down round failed (n=%d): %w", downW.rows, err))
+			return false
+		}
+		o.setLastResult(o.zDev, out, downW.rows)
+		runtime.KeepAlive(x)
+		runtime.KeepAlive(out)
+		return true
+	}
 	if err := o.waitForResult(o.yHost.Ptr(), o.zDev, outBytes); err != nil {
 		return false
 	}
@@ -1956,9 +2080,9 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	return true
 }
 
-// quantFFNBlock runs the full FFN (Up, Gate, SiLU, Down) on device using quantized matvec kernels.
+// quantFFNBlock runs the full FFN (Up, Gate, activation, Down) on device using quantized matvec kernels.
 // This avoids H2D transfers for intermediate results and keeps the entire FFN computation on-GPU.
-func (o *Ops) quantFFNBlock(layer *model.Layer, x []float32, out []float32) bool {
+func (o *Ops) quantFFNBlock(layer *model.Layer, x []float32, out []float32, useGelu, roundBF16 bool) bool {
 	if len(x) < layer.FfnUp.C || len(out) < layer.FfnDown.R {
 		return false
 	}
@@ -2033,14 +2157,14 @@ func (o *Ops) quantFFNBlock(layer *model.Layer, x []float32, out []float32) bool
 	}
 
 	if useCUDAGraphs() {
-		if err := o.runQuantFFNGraph(qUp, qGate, qDown, xInput, interm, outRows, o.stream); err != nil {
+		if err := o.runQuantFFNGraph(qUp, qGate, qDown, xInput, interm, outRows, useGelu, roundBF16, o.stream); err != nil {
 			native.RecordGraphFailure()
-			if err := o.runQuantFFNDirect(qUp, qGate, qDown, xInput, interm, o.stream); err != nil {
+			if err := o.runQuantFFNDirect(qUp, qGate, qDown, xInput, interm, useGelu, roundBF16, o.stream); err != nil {
 				o.recordFastPathErrorLocked(fmt.Errorf("cuda: quant ffn fast path failed: %w", err))
 				return false
 			}
 		}
-	} else if err := o.runQuantFFNDirect(qUp, qGate, qDown, xInput, interm, o.stream); err != nil {
+	} else if err := o.runQuantFFNDirect(qUp, qGate, qDown, xInput, interm, useGelu, roundBF16, o.stream); err != nil {
 		o.recordFastPathErrorLocked(fmt.Errorf("cuda: quant ffn fast path failed: %w", err))
 		return false
 	}
@@ -2130,24 +2254,53 @@ func runQuantKernelDirect(qw deviceQuantMat, xDev, yDev native.DeviceBuffer, str
 	}
 }
 
-func (o *Ops) runQuantFFNDirect(qUp, qGate, qDown deviceQuantMat, xInput native.DeviceBuffer, interm int, stream native.Stream) error {
+func (o *Ops) runQuantFFNDirect(qUp, qGate, qDown deviceQuantMat, xInput native.DeviceBuffer, interm int, useGelu, roundBF16 bool, stream native.Stream) error {
 	if err := runQuantKernelDirect(qUp, xInput, o.yDev, stream); err != nil {
 		return err
 	}
 	if err := runQuantKernelDirect(qGate, xInput, o.zDev, stream); err != nil {
 		return err
 	}
-	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, interm, stream); err != nil {
-		return fmt.Errorf("silu kernel failed (n=%d): %w", interm, err)
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.yDev, interm, stream); err != nil {
+			return fmt.Errorf("up round failed (n=%d): %w", interm, err)
+		}
+		if err := native.RoundBF16InPlaceF32(o.zDev, interm, stream); err != nil {
+			return fmt.Errorf("gate round failed (n=%d): %w", interm, err)
+		}
 	}
-	return runQuantKernelDirect(qDown, o.yDev, o.zDev, stream)
+	activateMul := native.SiluMulF32
+	actName := "silu"
+	if useGelu {
+		activateMul = native.GeluMulF32
+		actName = "gelu"
+	}
+	if err := activateMul(o.zDev, o.yDev, o.yDev, interm, stream); err != nil {
+		return fmt.Errorf("%s kernel failed (n=%d): %w", actName, interm, err)
+	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.yDev, interm, stream); err != nil {
+			return fmt.Errorf("activation round failed (n=%d): %w", interm, err)
+		}
+	}
+	if err := runQuantKernelDirect(qDown, o.yDev, o.zDev, stream); err != nil {
+		return err
+	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.zDev, qDown.rows, stream); err != nil {
+			return fmt.Errorf("down round failed (n=%d): %w", qDown.rows, err)
+		}
+	}
+	return nil
 }
 
-func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.DeviceBuffer, interm, outRows int, stream native.Stream) error {
+func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.DeviceBuffer, interm, outRows int, useGelu, roundBF16 bool, stream native.Stream) error {
 	key := ffnQuantGraphKey{
 		upFormat:     qUp.format,
 		gateFormat:   qGate.format,
 		downFormat:   qDown.format,
+		useGelu:      useGelu,
+		roundBF16:    roundBF16,
 		interm:       interm,
 		outRows:      outRows,
 		upQPtr:       uintptr(qUp.q.Ptr()),
@@ -2188,13 +2341,41 @@ func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.D
 		_, _ = stream.EndCapture()
 		return err
 	}
-	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, interm, stream); err != nil {
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.yDev, interm, stream); err != nil {
+			_, _ = stream.EndCapture()
+			return fmt.Errorf("up round failed (n=%d): %w", interm, err)
+		}
+		if err := native.RoundBF16InPlaceF32(o.zDev, interm, stream); err != nil {
+			_, _ = stream.EndCapture()
+			return fmt.Errorf("gate round failed (n=%d): %w", interm, err)
+		}
+	}
+	activateMul := native.SiluMulF32
+	actName := "silu"
+	if useGelu {
+		activateMul = native.GeluMulF32
+		actName = "gelu"
+	}
+	if err := activateMul(o.zDev, o.yDev, o.yDev, interm, stream); err != nil {
 		_, _ = stream.EndCapture()
-		return fmt.Errorf("silu kernel failed (n=%d): %w", interm, err)
+		return fmt.Errorf("%s kernel failed (n=%d): %w", actName, interm, err)
+	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.yDev, interm, stream); err != nil {
+			_, _ = stream.EndCapture()
+			return fmt.Errorf("activation round failed (n=%d): %w", interm, err)
+		}
 	}
 	if err := runQuantKernelDirect(qDown, o.yDev, o.zDev, stream); err != nil {
 		_, _ = stream.EndCapture()
 		return err
+	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.zDev, outRows, stream); err != nil {
+			_, _ = stream.EndCapture()
+			return fmt.Errorf("down round failed (n=%d): %w", outRows, err)
+		}
 	}
 
 	graph, err := stream.EndCapture()
@@ -2216,6 +2397,138 @@ func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.D
 	}
 	native.RecordGraphLaunch()
 	return nil
+}
+
+func (o *Ops) GatedProjectionResidual(x, aux []float32, gate, projection *model.Mat, postNorm []float32, activation string, eps float32, roundBF16 bool) bool {
+	if o == nil || gate == nil || projection == nil {
+		return false
+	}
+	if len(x) == 0 || len(aux) == 0 {
+		return false
+	}
+	if len(postNorm) < projection.R || len(x) < projection.R || gate.C != len(x) || gate.R != len(aux) || projection.C != len(aux) || projection.R > len(x) {
+		return false
+	}
+
+	mode := currentCUDAWeightMode()
+	if mode == cudaWeightModeDequant {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.clearNormDeviceView()
+
+	if !o.isDeviceX(x) {
+		return false
+	}
+	if o.xHostDirty {
+		bytes := int64(o.xHostLen) * 4
+		if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&x[0]), bytes); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection x upload failed: %w", err))
+			return false
+		}
+		o.xHostDirty = false
+		o.xDevDirty = false
+	}
+
+	qGate, err := o.ensureQuantMat(gate)
+	if err != nil {
+		return false
+	}
+	qProj, err := o.ensureQuantMat(projection)
+	if err != nil {
+		return false
+	}
+
+	auxPtr := uintptr(unsafe.Pointer(&aux[0]))
+	if !o.uploadScratch(auxPtr, len(aux), unsafe.Pointer(&aux[0])) {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection aux upload failed (n=%d)", len(aux)))
+		return false
+	}
+	auxDev := o.scratchDevBufs[auxPtr]
+
+	intermBytes := int64(len(aux)) * 4
+	outBytes := int64(projection.R) * 4
+	if err := o.ensureDeviceVecs(0, int(intermBytes)); err != nil {
+		return false
+	}
+	if err := o.ensureNormTmp(int(outBytes)); err != nil {
+		return false
+	}
+
+	if err := runQuantKernelDirect(qGate, o.xPersistDev, o.yDev, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection gate kernel failed: %w", err))
+		return false
+	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.yDev, len(aux), o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection gate round failed (n=%d): %w", len(aux), err))
+			return false
+		}
+	}
+
+	activateMul := native.SiluMulF32
+	actName := "silu"
+	if strings.Contains(activation, "gelu") {
+		activateMul = native.GeluMulF32
+		actName = "gelu"
+	}
+	if err := activateMul(o.yDev, auxDev, o.yDev, len(aux), o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection %s kernel failed (n=%d): %w", actName, len(aux), err))
+		return false
+	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.yDev, len(aux), o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection activation round failed (n=%d): %w", len(aux), err))
+			return false
+		}
+	}
+
+	if err := runQuantKernelDirect(qProj, o.yDev, o.zDev, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection projection kernel failed: %w", err))
+		return false
+	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.zDev, projection.R, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection projection round failed (n=%d): %w", projection.R, err))
+			return false
+		}
+	}
+
+	wDev, err := o.deviceNormWeight(postNorm[:projection.R])
+	if err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection norm weight upload failed: %w", err))
+		return false
+	}
+	native.RecordRMSNorm()
+	if err := native.RMSNormF32(o.yDev, o.zDev, wDev, eps, projection.R, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection rmsnorm failed (n=%d): %w", projection.R, err))
+		return false
+	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.yDev, projection.R, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection norm round failed (n=%d): %w", projection.R, err))
+			return false
+		}
+	}
+	if err := native.AddVectorsF32(o.xPersistDev, o.yDev, projection.R, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection residual add failed (n=%d): %w", projection.R, err))
+		return false
+	}
+	if roundBF16 {
+		if err := native.RoundBF16InPlaceF32(o.xPersistDev, projection.R, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: gated projection residual round failed (n=%d): %w", projection.R, err))
+			return false
+		}
+	}
+
+	o.clearLastResult()
+	o.xHostDirty = false
+	o.xDevDirty = true
+	runtime.KeepAlive(x)
+	runtime.KeepAlive(aux)
+	return true
 }
 
 // ShortConvBlock runs the full ShortConv block (InProj, depthwise conv, OutProj) on device.
@@ -2637,33 +2950,44 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []fl
 	}
 
 	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), nHead*headDim), q[:nHead*headDim])
+
+	blocksPerStride := kvStride / int(mcf.QuantBlockSize)
+	if blocksPerStride < 1 {
+		blocksPerStride = 1
+	}
+
 	if !cache.useQ8K {
 		for i := range kvStride {
 			o.kTmpU16[i] = instance.Float32ToFloat16(k[i])
 		}
 	} else {
-		o.kTmpQ8Scale[0] = quantizeQ8(k, o.kTmpQ8[:kvStride])
+		s := quantizeQ8(k, o.kTmpQ8[:kvStride])
+		broadcastQ8Scale(o.kTmpQ8Scale[:blocksPerStride], s)
 	}
 	if !cache.useQ8V {
 		for i := range kvStride {
 			o.vTmpU16[i] = instance.Float32ToFloat16(v[i])
 		}
 	} else {
-		o.vTmpQ8Scale[0] = quantizeQ8(v, o.vTmpQ8[:kvStride])
+		s := quantizeQ8(v, o.vTmpQ8[:kvStride])
+		broadcastQ8Scale(o.vTmpQ8Scale[:blocksPerStride], s)
 	}
 
 	cachePos := pos
 	if cacheLen > 0 {
 		cachePos = pos % cacheLen
 	}
+
+	scaleSliceBytes := int64(blocksPerStride) * int64(unsafe.Sizeof(float32(0)))
+
 	if cache.useQ8K {
-		scaleOffset := int64(cachePos) * int64(unsafe.Sizeof(float32(0)))
+		scaleOffset := int64(cachePos) * scaleSliceBytes
 		kvBytes := int64(kvStride)
 		dstOffset := int64(cachePos * kvStride)
 		if err := native.MemcpyH2DAsyncAt(cache.kQ8, dstOffset, unsafe.Pointer(&o.kTmpQ8[0]), kvBytes, o.stream); err != nil {
 			return false
 		}
-		if err := native.MemcpyH2DAsyncAt(cache.kQ8Scales, scaleOffset, unsafe.Pointer(&o.kTmpQ8Scale[0]), int64(unsafe.Sizeof(float32(0))), o.stream); err != nil {
+		if err := native.MemcpyH2DAsyncAt(cache.kQ8Scales, scaleOffset, unsafe.Pointer(&o.kTmpQ8Scale[0]), scaleSliceBytes, o.stream); err != nil {
 			return false
 		}
 	} else {
@@ -2674,13 +2998,13 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []fl
 		}
 	}
 	if cache.useQ8V {
-		scaleOffset := int64(cachePos) * int64(unsafe.Sizeof(float32(0)))
+		scaleOffset := int64(cachePos) * scaleSliceBytes
 		kvBytes := int64(kvStride)
 		dstOffset := int64(cachePos * kvStride)
 		if err := native.MemcpyH2DAsyncAt(cache.vQ8, dstOffset, unsafe.Pointer(&o.vTmpQ8[0]), kvBytes, o.stream); err != nil {
 			return false
 		}
-		if err := native.MemcpyH2DAsyncAt(cache.vQ8Scales, scaleOffset, unsafe.Pointer(&o.vTmpQ8Scale[0]), int64(unsafe.Sizeof(float32(0))), o.stream); err != nil {
+		if err := native.MemcpyH2DAsyncAt(cache.vQ8Scales, scaleOffset, unsafe.Pointer(&o.vTmpQ8Scale[0]), scaleSliceBytes, o.stream); err != nil {
 			return false
 		}
 	} else {
@@ -2690,6 +3014,29 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []fl
 			return false
 		}
 	}
+
+	// Bug 1 fix: also populate host-side KV cache so that shared-KV layers
+	// (which fall back to CPU attention) can read valid data.
+	cacheRef := &layer.AttnCache
+	cacheRef.EnsurePos(cachePos)
+	hostOffset := cachePos * kvStride
+	if cache.useQ8K {
+		copy(cacheRef.KQ8[hostOffset:hostOffset+kvStride], o.kTmpQ8[:kvStride])
+		if cacheRef.KQ8S != nil {
+			cacheRef.KQ8S[cachePos] = o.kTmpQ8Scale[0]
+		}
+	} else if cacheRef.K16 != nil {
+		copy(cacheRef.K16[hostOffset:hostOffset+kvStride], o.kTmpU16[:kvStride])
+	}
+	if cache.useQ8V {
+		copy(cacheRef.VQ8[hostOffset:hostOffset+kvStride], o.vTmpQ8[:kvStride])
+		if cacheRef.VQ8S != nil {
+			cacheRef.VQ8S[cachePos] = o.vTmpQ8Scale[0]
+		}
+	} else if cacheRef.V16 != nil {
+		copy(cacheRef.V16[hostOffset:hostOffset+kvStride], o.vTmpU16[:kvStride])
+	}
+
 	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), qBytes, o.stream); err != nil {
 		return false
 	}
@@ -2801,6 +3148,12 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer, kvLayer *instan
 		cachePos = pos % cacheLen
 	}
 
+	blocksPerStride := kvStride / int(mcf.QuantBlockSize)
+	if blocksPerStride < 1 {
+		blocksPerStride = 1
+	}
+	scaleSliceBytes := int64(blocksPerStride) * int64(unsafe.Sizeof(float32(0)))
+
 	// Only store K/V into cache for non-shared layers.
 	// Shared-KV layers reuse K/V already stored by the source layer.
 	if storeKV {
@@ -2809,24 +3162,26 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer, kvLayer *instan
 				o.kTmpU16[i] = instance.Float32ToFloat16(k[i])
 			}
 		} else {
-			o.kTmpQ8Scale[0] = quantizeQ8(k, o.kTmpQ8[:kvStride])
+			s := quantizeQ8(k, o.kTmpQ8[:kvStride])
+			broadcastQ8Scale(o.kTmpQ8Scale[:blocksPerStride], s)
 		}
 		if !cache.useQ8V {
 			for i := range kvStride {
 				o.vTmpU16[i] = instance.Float32ToFloat16(v[i])
 			}
 		} else {
-			o.vTmpQ8Scale[0] = quantizeQ8(v, o.vTmpQ8[:kvStride])
+			s := quantizeQ8(v, o.vTmpQ8[:kvStride])
+			broadcastQ8Scale(o.vTmpQ8Scale[:blocksPerStride], s)
 		}
 
 		if cache.useQ8K {
-			scaleOffset := int64(cachePos) * int64(unsafe.Sizeof(float32(0)))
+			scaleOffset := int64(cachePos) * scaleSliceBytes
 			kvBytes := int64(kvStride)
 			dstOffset := int64(cachePos * kvStride)
 			if err := native.MemcpyH2DAsyncAt(cache.kQ8, dstOffset, unsafe.Pointer(&o.kTmpQ8[0]), kvBytes, o.stream); err != nil {
 				return false
 			}
-			if err := native.MemcpyH2DAsyncAt(cache.kQ8Scales, scaleOffset, unsafe.Pointer(&o.kTmpQ8Scale[0]), int64(unsafe.Sizeof(float32(0))), o.stream); err != nil {
+			if err := native.MemcpyH2DAsyncAt(cache.kQ8Scales, scaleOffset, unsafe.Pointer(&o.kTmpQ8Scale[0]), scaleSliceBytes, o.stream); err != nil {
 				return false
 			}
 		} else {
@@ -2837,13 +3192,13 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer, kvLayer *instan
 			}
 		}
 		if cache.useQ8V {
-			scaleOffset := int64(cachePos) * int64(unsafe.Sizeof(float32(0)))
+			scaleOffset := int64(cachePos) * scaleSliceBytes
 			kvBytes := int64(kvStride)
 			dstOffset := int64(cachePos * kvStride)
 			if err := native.MemcpyH2DAsyncAt(cache.vQ8, dstOffset, unsafe.Pointer(&o.vTmpQ8[0]), kvBytes, o.stream); err != nil {
 				return false
 			}
-			if err := native.MemcpyH2DAsyncAt(cache.vQ8Scales, scaleOffset, unsafe.Pointer(&o.vTmpQ8Scale[0]), int64(unsafe.Sizeof(float32(0))), o.stream); err != nil {
+			if err := native.MemcpyH2DAsyncAt(cache.vQ8Scales, scaleOffset, unsafe.Pointer(&o.vTmpQ8Scale[0]), scaleSliceBytes, o.stream); err != nil {
 				return false
 			}
 		} else {
@@ -2852,6 +3207,28 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer, kvLayer *instan
 			if err := native.MemcpyH2DAsyncAt(cache.vF16, dstOffset, unsafe.Pointer(&o.vTmpU16[0]), kvBytes, o.stream); err != nil {
 				return false
 			}
+		}
+
+		// Also populate host-side KV cache so that shared-KV layers
+		// (which fall back to CPU attention) can read valid data.
+		cacheRef := &kvLayer.AttnCache
+		cacheRef.EnsurePos(cachePos)
+		hostOffset := cachePos * kvStride
+		if cache.useQ8K {
+			copy(cacheRef.KQ8[hostOffset:hostOffset+kvStride], o.kTmpQ8[:kvStride])
+			if cacheRef.KQ8S != nil {
+				cacheRef.KQ8S[cachePos] = o.kTmpQ8Scale[0]
+			}
+		} else if cacheRef.K16 != nil {
+			copy(cacheRef.K16[hostOffset:hostOffset+kvStride], o.kTmpU16[:kvStride])
+		}
+		if cache.useQ8V {
+			copy(cacheRef.VQ8[hostOffset:hostOffset+kvStride], o.vTmpQ8[:kvStride])
+			if cacheRef.VQ8S != nil {
+				cacheRef.VQ8S[cachePos] = o.vTmpQ8Scale[0]
+			}
+		} else if cacheRef.V16 != nil {
+			copy(cacheRef.V16[hostOffset:hostOffset+kvStride], o.vTmpU16[:kvStride])
 		}
 	}
 
@@ -3073,6 +3450,7 @@ func (o *Ops) RMSNormBatched(dst, src, weight []float32, eps float32, headDim, n
 	defer o.mu.Unlock()
 
 	var xInput native.DeviceBuffer
+	dstDev := o.yDev
 	usedDeviceInput := false
 	if o.isDeviceX(src) {
 		if o.xHostDirty {
@@ -3085,6 +3463,9 @@ func (o *Ops) RMSNormBatched(dst, src, weight []float32, eps float32, headDim, n
 		}
 		xInput = o.xPersistDev
 		usedDeviceInput = true
+	} else if o.lastResultValid && uintptr(unsafe.Pointer(&src[0])) == o.lastResultHostPtr && totalElems == o.lastResultLen {
+		xInput = o.lastResultDev
+		usedDeviceInput = true
 	}
 
 	bytes := int64(totalElems) * int64(unsafe.Sizeof(float32(0)))
@@ -3093,6 +3474,12 @@ func (o *Ops) RMSNormBatched(dst, src, weight []float32, eps float32, headDim, n
 	}
 	if err := o.ensureDeviceVecs(int(bytes), int(bytes)); err != nil {
 		return false
+	}
+	if usedDeviceInput && xInput.Ptr() == o.yDev.Ptr() {
+		if err := o.ensureNormTmp(int(bytes)); err != nil {
+			return false
+		}
+		dstDev = o.zDev
 	}
 
 	wDev, err := o.deviceNormWeight(weight[:headDim])
@@ -3108,14 +3495,16 @@ func (o *Ops) RMSNormBatched(dst, src, weight []float32, eps float32, headDim, n
 		xInput = o.xDev
 	}
 
-	if err := native.RMSNormBatchedF32(o.yDev, xInput, wDev, eps, headDim, nHeads, o.stream); err != nil {
+	if err := native.RMSNormBatchedF32(dstDev, xInput, wDev, eps, headDim, nHeads, o.stream); err != nil {
 		return false
 	}
 
-	if err := o.waitForResult(o.yHost.Ptr(), o.yDev, bytes); err != nil {
+	if err := o.waitForResult(o.yHost.Ptr(), dstDev, bytes); err != nil {
 		return false
 	}
-
+	if usedDeviceInput && o.lastResultValid && uintptr(unsafe.Pointer(&src[0])) == o.lastResultHostPtr && totalElems == o.lastResultLen {
+		o.clearLastResult()
+	}
 	copy(dst[:totalElems], unsafe.Slice((*float32)(o.yHost.Ptr()), totalElems))
 	return true
 }
@@ -4085,11 +4474,18 @@ func (o *Ops) ensureKVQ8Tmp(kvStride int) error {
 	if len(o.vTmpQ8) < kvStride {
 		o.vTmpQ8 = make([]int8, kvStride)
 	}
-	if len(o.kTmpQ8Scale) < 1 {
-		o.kTmpQ8Scale = make([]float32, 1)
+	// The CUDA kernel reads per-block scales (one per 32-element block).
+	// Allocate enough slots so the single quantization scale can be
+	// broadcast across all blocks before the H2D copy.
+	blocksPerStride := kvStride / int(mcf.QuantBlockSize)
+	if blocksPerStride < 1 {
+		blocksPerStride = 1
 	}
-	if len(o.vTmpQ8Scale) < 1 {
-		o.vTmpQ8Scale = make([]float32, 1)
+	if len(o.kTmpQ8Scale) < blocksPerStride {
+		o.kTmpQ8Scale = make([]float32, blocksPerStride)
+	}
+	if len(o.vTmpQ8Scale) < blocksPerStride {
+		o.vTmpQ8Scale = make([]float32, blocksPerStride)
 	}
 	return nil
 }
@@ -4126,6 +4522,14 @@ func quantizeQ8(src []float32, dst []int8) float32 {
 		dst[i] = int8(q)
 	}
 	return scale
+}
+
+// broadcastQ8Scale fills dst with the same scale value so the CUDA kernel's
+// per-block scale reads all see the correct (uniform) value.
+func broadcastQ8Scale(dst []float32, scale float32) {
+	for i := range dst {
+		dst[i] = scale
+	}
 }
 
 func (o *Ops) ensureAttnCache(layer *model.Layer, kvStride, cacheLen int) (deviceAttnCache, error) {
