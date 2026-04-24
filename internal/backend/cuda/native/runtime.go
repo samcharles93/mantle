@@ -36,6 +36,7 @@ extern cudaError_t cudaMemPrefetchAsync(const void* devPtr, unsigned long long c
 
 #define MANTLE_CUDA_MEMCPY_HOST_TO_DEVICE 1
 #define MANTLE_CUDA_MEMCPY_DEVICE_TO_HOST 2
+#define MANTLE_CUDA_MEMCPY_DEVICE_TO_DEVICE 3
 #define MANTLE_CUDA_MEMCPY_DEFAULT 4
 
 typedef struct cublasContext* cublasHandle_t;
@@ -632,6 +633,32 @@ func MemcpyD2HAsync(dst unsafe.Pointer, src DeviceBuffer, bytes int64, stream St
 		kind = C.int(C.MANTLE_CUDA_MEMCPY_DEFAULT)
 	}
 	return cudaErr(C.mantleCudaMemcpyAsync(dst, src.ptr, C.ulonglong(bytes), kind, stream.ptr))
+}
+
+// MemcpyD2HAsyncAt is MemcpyD2HAsync with a byte offset into the device source.
+func MemcpyD2HAsyncAt(dst unsafe.Pointer, src DeviceBuffer, srcOffset int64, bytes int64, stream Stream) error {
+	if bytes <= 0 {
+		return nil
+	}
+	recordD2H(bytes)
+	ptr := unsafe.Add(src.ptr, int(srcOffset))
+	kind := C.int(C.MANTLE_CUDA_MEMCPY_DEVICE_TO_HOST)
+	if src.managed {
+		kind = C.int(C.MANTLE_CUDA_MEMCPY_DEFAULT)
+	}
+	return cudaErr(C.mantleCudaMemcpyAsync(dst, ptr, C.ulonglong(bytes), kind, stream.ptr))
+}
+
+// MemcpyD2DAsync performs an async device-to-device copy.
+func MemcpyD2DAsync(dst, src DeviceBuffer, bytes int64, stream Stream) error {
+	if bytes <= 0 {
+		return nil
+	}
+	kind := C.int(C.MANTLE_CUDA_MEMCPY_DEVICE_TO_DEVICE)
+	if dst.managed || src.managed {
+		kind = C.int(C.MANTLE_CUDA_MEMCPY_DEFAULT)
+	}
+	return cudaErr(C.mantleCudaMemcpyAsync(dst.ptr, src.ptr, C.ulonglong(bytes), kind, stream.ptr))
 }
 
 func MemcpyH2D(dst DeviceBuffer, src unsafe.Pointer, bytes int64) error {
