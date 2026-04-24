@@ -12,6 +12,7 @@ import (
 	"github.com/samcharles93/mantle/internal/backend/bootstrap"
 	"github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/backend/cuda/native"
+	"github.com/samcharles93/mantle/internal/backend/simd"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 )
 
@@ -38,6 +39,7 @@ func (b *Backend) Name() string {
 func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int, opts core.LoadModelOptions) (core.Runtime, error) {
 	native.ResetManagedFallbackFlag()
 	native.ResetPerfCounters()
+	simd.ResetHostPerfCounters()
 	stream, err := native.NewStream()
 	if err != nil {
 		return nil, fmt.Errorf("cuda stream create failed: %w", err)
@@ -126,6 +128,7 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 
 	preloadCounters := native.GetPerfCounters()
 	native.ResetPerfCounters()
+	simd.ResetHostPerfCounters()
 
 	return &cudaRuntime{
 		model:              runtimeModel,
@@ -274,6 +277,7 @@ func (r *cudaRuntime) Close() error {
 
 func (r *cudaRuntime) emitPerfSummary() {
 	decode := native.GetPerfCounters()
+	host := simd.GetHostPerfCounters()
 	toks := r.tokenCount.Load()
 	fmt.Fprintf(os.Stderr, "\n=== CUDA Performance Summary ===\n")
 	fmt.Fprintf(os.Stderr, "Tokens processed: %d\n", toks)
@@ -292,6 +296,12 @@ func (r *cudaRuntime) emitPerfSummary() {
 	fmt.Fprintf(os.Stderr, "D2H bytes: %d MB\n", decode.D2HBytes/1024/1024)
 	fmt.Fprintf(os.Stderr, "Device allocs: %d (%.1f MB)\n", decode.DeviceAllocs, float64(decode.DeviceBytes)/1024/1024)
 	fmt.Fprintf(os.Stderr, "Managed allocs: %d (%.1f MB)\n", decode.ManagedAllocs, float64(decode.ManagedBytes)/1024/1024)
+	fmt.Fprintf(os.Stderr, "-- Host Counters --\n")
+	fmt.Fprintf(os.Stderr, "BF16 round calls: %d (%.1f elems/call)\n", host.BF16RoundCalls, float64(host.BF16RoundElems)/float64(max(host.BF16RoundCalls, 1)))
+	fmt.Fprintf(os.Stderr, "Weighted RMSNorm calls: %d (%.1f elems/call)\n", host.RMSNormWeightedCalls, float64(host.RMSNormWeightedElems)/float64(max(host.RMSNormWeightedCalls, 1)))
+	fmt.Fprintf(os.Stderr, "Unit RMSNorm calls: %d (%.1f elems/call)\n", host.RMSNormUnitCalls, float64(host.RMSNormUnitElems)/float64(max(host.RMSNormUnitCalls, 1)))
+	fmt.Fprintf(os.Stderr, "Softmax calls: %d (%.1f elems/call)\n", host.SoftmaxCalls, float64(host.SoftmaxElems)/float64(max(host.SoftmaxCalls, 1)))
+	fmt.Fprintf(os.Stderr, "TopK calls: %d\n", host.TopKCalls)
 	fmt.Fprintf(os.Stderr, "-- Preload Counters --\n")
 	fmt.Fprintf(os.Stderr, "MatVec CUDA calls: %d\n", r.preloadCounters.MatVecCalls)
 	fmt.Fprintf(os.Stderr, "MatVec CPU fallbacks: %d\n", r.preloadCounters.MatVecCPUFallbackCalls)
