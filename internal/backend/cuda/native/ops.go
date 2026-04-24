@@ -121,6 +121,19 @@ static int mantleCudaShortConvDepthwiseWrapper(
 	return mantleCudaShortConvDepthwise(proj, conv_w, state, out, embd, klen, stream);
 }
 
+static int mantleCudaMambaDepthwiseConvWrapper(
+	const float* in,
+	const float* conv_w,
+	const float* bias,
+	float* state,
+	float* out,
+	int channels,
+	int klen,
+	int has_bias,
+	cudaStream_t stream) {
+	return mantleCudaMambaDepthwiseConv(in, conv_w, bias, state, out, channels, klen, has_bias, stream);
+}
+
 static int mantleCudaRoundBF16InPlaceF32Wrapper(
 	float* data,
 	int n,
@@ -233,6 +246,54 @@ func ShortConvDepthwise(proj, convW, state, out DeviceBuffer, embd, klen int, st
 		stream.ptr,
 	)); err != nil {
 		return fmt.Errorf("native.ShortConvDepthwise(embd=%d, klen=%d): %w", embd, klen, err)
+	}
+	return nil
+}
+
+// MambaDepthwiseConv applies a per-channel 1D convolution over a rolling
+// history state plus the current input sample, matching the CPU reference
+// in internal/backend/simd/mamba.go (mambaDepthwiseConv).
+//
+// Dimensions:
+//   - in:     [channels]
+//   - convW:  [channels * klen], row-major per channel
+//   - bias:   [channels] or zero-valued DeviceBuffer (ptr == nil) when absent
+//   - state:  [channels * (klen - 1)]
+//   - out:    [channels]
+//
+// The state buffer is updated in place: shifted left by one time step along
+// the time axis and the current input is appended at the last slot. When
+// klen == 1 the state buffer is not accessed.
+func MambaDepthwiseConv(in, convW, bias, state, out DeviceBuffer, channels, klen int, stream Stream) error {
+	if in.ptr == nil || convW.ptr == nil || state.ptr == nil || out.ptr == nil {
+		return fmt.Errorf("native.MambaDepthwiseConv: buffer is nil")
+	}
+	channelsC, err := checkedPositiveCInt("channels", channels)
+	if err != nil {
+		return fmt.Errorf("native.MambaDepthwiseConv: %w", err)
+	}
+	klenC, err := checkedPositiveCInt("klen", klen)
+	if err != nil {
+		return fmt.Errorf("native.MambaDepthwiseConv: %w", err)
+	}
+	var biasPtr *C.float
+	var hasBias C.int
+	if bias.ptr != nil {
+		biasPtr = (*C.float)(bias.ptr)
+		hasBias = 1
+	}
+	if err := cudaErr(C.mantleCudaMambaDepthwiseConvWrapper(
+		(*C.float)(in.ptr),
+		(*C.float)(convW.ptr),
+		biasPtr,
+		(*C.float)(state.ptr),
+		(*C.float)(out.ptr),
+		channelsC,
+		klenC,
+		hasBias,
+		stream.ptr,
+	)); err != nil {
+		return fmt.Errorf("native.MambaDepthwiseConv(channels=%d, klen=%d): %w", channels, klen, err)
 	}
 	return nil
 }
