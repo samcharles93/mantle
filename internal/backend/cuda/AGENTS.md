@@ -7,9 +7,11 @@ This guide applies only to `internal/backend/cuda` and `internal/backend/cuda/na
 ## Project Structure & Module Organization
 
 - [`cuda.go`](/work/apps/mantle/internal/backend/cuda/cuda.go): backend construction, device checks, preload flow, and runtime lifecycle.
-- [`ops.go`](/work/apps/mantle/internal/backend/cuda/ops.go): CUDA ops state, device buffers, weight residency, and graph caches.
+- [`ops.go`](/work/apps/mantle/internal/backend/cuda/ops.go): CUDA ops state, device buffers, weight residency, graph caches, and block-level orchestrators (MambaBlock, DeltaNetBlock, MoEBlock).
 - [`errors.go`](/work/apps/mantle/internal/backend/cuda/errors.go): panic-to-error conversion for runtime failures.
-- [`native/`](/work/apps/mantle/internal/backend/cuda/native): CGO wrappers, CUDA/cuBLAS bindings, runtime helpers, validation tests, and `.cu` kernels.
+- [`native/`](/work/apps/mantle/internal/backend/cuda/native): CGO wrappers, CUDA/cuBLAS bindings, runtime helpers, validation/benchmark tests, and `.cu` kernels.
+  - `moe_router.{cu,go,_test.go}`: fused sigmoid+bias+top-K+norm router kernel.
+  - `moe_accumulate.{cu,go,_test.go}`: grid-stride FMA accumulator for weighted expert outputs.
 
 Keep high-level backend policy in `cuda.go`, reusable device orchestration in `ops.go`, and raw CUDA interop isolated under `native/`.
 
