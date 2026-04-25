@@ -1490,6 +1490,12 @@ func initInstanceScratch(m *Instance) {
 	numExperts := m.Config.Config.NumExperts
 	topK := m.Config.Config.NumExpertsPerTok
 	for i := range m.Layers {
+		// Gemma 4 dense layers use a fused gate+up matrix with 2*intermediate rows
+		if l := m.Layers[i]; l.FfnGate != nil {
+			if need := l.FfnGate.R; need > ffn {
+				ffn = need
+			}
+		}
 		if gm := m.Layers[i].Gemma4MoE; gm != nil {
 			if len(gm.Experts) > numExperts {
 				numExperts = len(gm.Experts)
