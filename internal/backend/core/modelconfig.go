@@ -94,3 +94,30 @@ type ModelConfig struct {
 	Config    Config
 	Tokenizer tokenizer.TokenizerConfig
 }
+
+// MambaConfig captures the runtime parameters required to execute a Mamba
+// block on any backend. It is the shared contract used by the SIMD fast-path
+// hook and the CUDA backend implementation.
+type MambaConfig struct {
+	SSMInMultiplier     float32
+	SSMOutMultiplier    float32
+	TimeStepMin         float32
+	TimeStepMax         float32
+	TimeStepFloor       float32
+	MambaRMSNorm        bool
+	MambaNormBeforeGate bool
+	RMSEpsilon          float32
+}
+
+// DeltaNetConfig captures the runtime parameters required to execute a Gated
+// DeltaNet block on any backend. It is the shared contract used by the SIMD
+// fast-path hook and the CUDA backend implementation.
+type DeltaNetConfig struct {
+	RMSEpsilon float32
+}
+
+// MoEConfig captures the runtime parameters required to execute a MoE block on
+// any backend. It is the shared contract used by the SIMD fast-path hook and
+// the CUDA backend implementation.
+type MoEConfig struct {
+}
