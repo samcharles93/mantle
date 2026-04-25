@@ -164,6 +164,7 @@ func runDecoderLayers(m *Instance, rt *tokenRuntimeState) error {
 				return fmt.Errorf("ffn pre-norm sync failed: %w", err)
 			}
 			roundBF16SliceInPlace(m.Scratch.Tmp[:len(x)])
+			markHostStateDirty(ds, m.Scratch.Tmp[:len(x)])
 		}
 
 		perLayerInput := rt.perLayerInput(m, i)

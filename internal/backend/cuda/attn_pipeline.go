@@ -645,6 +645,7 @@ func (o *Ops) QKVAttentionProjection(
 			o.recordFastPathErrorLocked(err)
 			return false
 		}
+		native.RecordRMSNorm()
 		if err := native.RMSNormBatchedF32(o.qProjDev, o.qProjDev, wDev, epsilon, headDim, nHead, o.stream); err != nil {
 			o.recordFastPathErrorLocked(err)
 			return false
@@ -657,6 +658,7 @@ func (o *Ops) QKVAttentionProjection(
 				o.recordFastPathErrorLocked(err)
 				return false
 			}
+			native.RecordRMSNorm()
 			if err := native.RMSNormBatchedF32(o.kProjDev, o.kProjDev, wDev, epsilon, headDim, kvHeads, o.stream); err != nil {
 				o.recordFastPathErrorLocked(err)
 				return false
@@ -668,6 +670,7 @@ func (o *Ops) QKVAttentionProjection(
 				o.recordFastPathErrorLocked(err)
 				return false
 			}
+			native.RecordRMSNorm()
 			if err := native.RMSNormBatchedF32(o.vProjDev, o.vProjDev, wDev, epsilon, headDim, kvHeads, o.stream); err != nil {
 				o.recordFastPathErrorLocked(err)
 				return false
