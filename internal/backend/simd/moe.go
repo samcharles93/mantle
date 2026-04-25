@@ -1,6 +1,14 @@
 package simd
 
-import "math"
+import (
+	"math"
+
+	"github.com/samcharles93/mantle/internal/backend/core"
+)
+
+type moeFastPath interface {
+	MoEBlock(ml *core.MoELayer, x, out []float32, cfg core.MoEConfig) bool
+}
 
 func FFNProject(m *Instance, up, gate, down *Mat, x []float32) []float32 {
 	intermediate := up.R
@@ -25,6 +33,15 @@ func MoE(m *Instance, layer *Layer, x []float32) []float32 {
 	if moe == nil {
 		panic("moe layer missing moe config")
 	}
+
+	if fp, ok := m.Ops().(moeFastPath); ok {
+		cfg := core.MoEConfig{}
+		if fp.MoEBlock(moe, x, m.Scratch.MoeAccum, cfg) {
+			return m.Scratch.MoeAccum
+		}
+	}
+	syncDeviceSlice(m.Ops(), x)
+
 	accum := m.Scratch.MoeAccum
 	for i := range accum {
 		accum[i] = 0

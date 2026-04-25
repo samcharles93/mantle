@@ -1,6 +1,14 @@
 package simd
 
-import "math"
+import (
+	"math"
+
+	"github.com/samcharles93/mantle/internal/backend/core"
+)
+
+type deltaNetFastPath interface {
+	DeltaNetBlock(dl *core.DeltaNetLayer, x, out []float32, cfg core.DeltaNetConfig) bool
+}
 
 // DeltaNet implements the Qwen3.5 linear-attention/Gated DeltaNet block for a
 // single token step. It follows the upstream recurrent formulation used for
@@ -9,6 +17,18 @@ func DeltaNet(m *Instance, layer *Layer, x []float32) []float32 {
 	dl := layer.DeltaNet
 	if dl == nil {
 		return nil
+	}
+	if dl.QKVProj == nil || dl.AProj == nil || dl.BProj == nil || dl.ZProj == nil || dl.OutProj == nil || dl.Conv == nil {
+		return nil
+	}
+
+	if fp, ok := m.Ops().(deltaNetFastPath); ok {
+		cfg := core.DeltaNetConfig{
+			RMSEpsilon: float32(m.Config.Config.RMSEpsilon),
+		}
+		if fp.DeltaNetBlock(dl, x, m.Scratch.Tmp, cfg) {
+			return m.Scratch.Tmp
+		}
 	}
 	syncDeviceSlice(m.Ops(), x)
 

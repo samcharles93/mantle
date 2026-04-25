@@ -2,7 +2,13 @@ package simd
 
 import (
 	"simd/archsimd"
+
+	"github.com/samcharles93/mantle/internal/backend/core"
 )
+
+type mambaFastPath interface {
+	MambaBlock(ml *core.MambaLayer, x, out []float32, cfg core.MambaConfig) bool
+}
 
 func Mamba(m *Instance, layer *Layer, x []float32) []float32 {
 	ml := layer.Mamba
@@ -11,6 +17,22 @@ func Mamba(m *Instance, layer *Layer, x []float32) []float32 {
 	}
 	if ml.InProj == nil || ml.OutProj == nil || ml.Conv == nil {
 		return nil
+	}
+
+	if fp, ok := m.Ops().(mambaFastPath); ok {
+		cfg := core.MambaConfig{
+			SSMInMultiplier:     float32(m.Config.Config.SSMInMultiplier),
+			SSMOutMultiplier:    float32(m.Config.Config.SSMOutMultiplier),
+			TimeStepMin:         float32(m.Config.Config.TimeStepMin),
+			TimeStepMax:         float32(m.Config.Config.TimeStepMax),
+			TimeStepFloor:       float32(m.Config.Config.TimeStepFloor),
+			MambaRMSNorm:        m.Config.Config.MambaRMSNorm,
+			MambaNormBeforeGate: m.Config.Config.MambaNormBeforeGate,
+			RMSEpsilon:          float32(m.Config.Config.RMSEpsilon),
+		}
+		if fp.MambaBlock(ml, x, m.Scratch.MambaOut, cfg) {
+			return m.Scratch.MambaOut
+		}
 	}
 	syncDeviceSlice(m.Ops(), x)
 

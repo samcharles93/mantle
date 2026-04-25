@@ -27,10 +27,17 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 			return nil, fmt.Errorf("ForwardTokens requires f32 weights, got %v", l.Wq.DType)
 		}
 	}
-	// Bail if model has Mamba/MoE/recurrent layers (unsupported in batch path)
+	_, mambaFP := m.Ops().(mambaFastPath)
+	_, moeFP := m.Ops().(moeFastPath)
 	for i := range m.Layers {
-		if m.Layers[i].Mamba != nil || m.Layers[i].MoE != nil || m.Layers[i].IsRecurrent {
-			return nil, fmt.Errorf("ForwardTokens does not support Mamba/MoE/recurrent layers")
+		if m.Layers[i].MoE != nil && !moeFP {
+			return nil, fmt.Errorf("ForwardTokens does not support MoE layers without fast-path")
+		}
+		if m.Layers[i].IsRecurrent {
+			return nil, fmt.Errorf("ForwardTokens does not support recurrent layers")
+		}
+		if m.Layers[i].Mamba != nil && !mambaFP {
+			return nil, fmt.Errorf("ForwardTokens does not support Mamba layers without fast-path")
 		}
 		if m.Layers[i].HeadDim != 0 && m.Layers[i].HeadDim != m.HeadDim {
 			return nil, fmt.Errorf("ForwardTokens does not support per-layer attention dimensions")
