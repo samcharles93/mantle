@@ -55,6 +55,24 @@ extern int mantleCudaMambaDepthwiseConv(
 	int klen,
 	int has_bias,
 	cudaStream_t stream);
+extern int mantleCudaSiluF32InPlace(
+	float* x,
+	int n,
+	cudaStream_t stream);
+extern int mantleCudaMambaSSMScan(
+	const float* x,
+	const float* dt,
+	const float* b,
+	const float* c,
+	const float* a_log,
+	const float* d_vec,
+	float* state,
+	float* out,
+	int head_count,
+	int head_dim,
+	int d_state,
+	int group_size,
+	cudaStream_t stream);
 extern int mantleCudaRoundBF16InPlaceF32(
 	float* data,
 	int n,
@@ -63,6 +81,28 @@ extern int mantleCudaScaleRoundBF16InPlaceF32(
 	float* data,
 	float scale,
 	int n,
+	cudaStream_t stream);
+extern int mantleCudaMambaDtSoftplusClampF32(
+	float* dt,
+	const float* bias,
+	int n,
+	float t_min,
+	float t_max,
+	float t_floor,
+	cudaStream_t stream);
+extern int mantleCudaRMSNormGatedF32(
+	float* out,
+	const float* y,
+	const float* z,
+	const float* weight,
+	float eps,
+	int n,
+	int norm_before_gate,
+	cudaStream_t stream);
+extern int mantleCudaScaleF32InPlace(
+	float* x,
+	int n,
+	float scale,
 	cudaStream_t stream);
 
 
@@ -134,6 +174,30 @@ static int mantleCudaMambaDepthwiseConvWrapper(
 	return mantleCudaMambaDepthwiseConv(in, conv_w, bias, state, out, channels, klen, has_bias, stream);
 }
 
+static int mantleCudaSiluF32InPlaceWrapper(
+	float* x,
+	int n,
+	cudaStream_t stream) {
+	return mantleCudaSiluF32InPlace(x, n, stream);
+}
+
+static int mantleCudaMambaSSMScanWrapper(
+	const float* x,
+	const float* dt,
+	const float* b,
+	const float* c,
+	const float* a_log,
+	const float* d_vec,
+	float* state,
+	float* out,
+	int head_count,
+	int head_dim,
+	int d_state,
+	int group_size,
+	cudaStream_t stream) {
+	return mantleCudaMambaSSMScan(x, dt, b, c, a_log, d_vec, state, out, head_count, head_dim, d_state, group_size, stream);
+}
+
 static int mantleCudaRoundBF16InPlaceF32Wrapper(
 	float* data,
 	int n,
@@ -147,6 +211,37 @@ static int mantleCudaScaleRoundBF16InPlaceF32Wrapper(
 	int n,
 	cudaStream_t stream) {
 	return mantleCudaScaleRoundBF16InPlaceF32(data, scale, n, stream);
+}
+
+static int mantleCudaMambaDtSoftplusClampF32Wrapper(
+	float* dt,
+	const float* bias,
+	int n,
+	float t_min,
+	float t_max,
+	float t_floor,
+	cudaStream_t stream) {
+	return mantleCudaMambaDtSoftplusClampF32(dt, bias, n, t_min, t_max, t_floor, stream);
+}
+
+static int mantleCudaScaleF32InPlaceWrapper(
+	float* x,
+	int n,
+	float scale,
+	cudaStream_t stream) {
+	return mantleCudaScaleF32InPlace(x, n, scale, stream);
+}
+
+static int mantleCudaRMSNormGatedF32Wrapper(
+	float* out,
+	const float* y,
+	const float* z,
+	const float* weight,
+	float eps,
+	int n,
+	int norm_before_gate,
+	cudaStream_t stream) {
+	return mantleCudaRMSNormGatedF32(out, y, z, weight, eps, n, norm_before_gate, stream);
 }
 */
 import "C"
@@ -294,6 +389,161 @@ func MambaDepthwiseConv(in, convW, bias, state, out DeviceBuffer, channels, klen
 		stream.ptr,
 	)); err != nil {
 		return fmt.Errorf("native.MambaDepthwiseConv(channels=%d, klen=%d): %w", channels, klen, err)
+	}
+	return nil
+}
+
+func SiluF32InPlace(x DeviceBuffer, n int, stream Stream) error {
+	if x.ptr == nil {
+		return fmt.Errorf("native.SiluF32InPlace: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.SiluF32InPlace: %w", err)
+	}
+	if err := cudaErr(C.mantleCudaSiluF32InPlaceWrapper(
+		(*C.float)(x.ptr),
+		nC,
+		stream.ptr,
+	)); err != nil {
+		return fmt.Errorf("native.SiluF32InPlace(n=%d): %w", n, err)
+	}
+	return nil
+}
+
+// MambaSSMScan performs the selective-SSM recurrence update for a single
+// time step across all heads and positions, mirroring mambaScan in
+// internal/backend/simd/mamba.go.
+//
+// Dimensions:
+//   - x:     [headCount * headDim]
+//   - dt:    [headCount]
+//   - b:     [groups * dState] where groups = headCount / groupSize
+//   - c:     [groups * dState]
+//   - aLog:  [headCount]
+//   - dVec:  [headCount]
+//   - state: [headCount * headDim * dState] (updated in place)
+//   - out:   [headCount * headDim]
+//
+// groupSize must be > 0 and must divide headCount (headCount % groupSize == 0).
+func MambaSSMScan(x, dt, b, c, aLog, dVec, state, out DeviceBuffer, headCount, headDim, dState, groupSize int, stream Stream) error {
+	if x.ptr == nil || dt.ptr == nil || b.ptr == nil || c.ptr == nil ||
+		aLog.ptr == nil || dVec.ptr == nil || state.ptr == nil || out.ptr == nil {
+		return fmt.Errorf("native.MambaSSMScan: buffer is nil")
+	}
+	headCountC, err := checkedPositiveCInt("headCount", headCount)
+	if err != nil {
+		return fmt.Errorf("native.MambaSSMScan: %w", err)
+	}
+	headDimC, err := checkedPositiveCInt("headDim", headDim)
+	if err != nil {
+		return fmt.Errorf("native.MambaSSMScan: %w", err)
+	}
+	dStateC, err := checkedPositiveCInt("dState", dState)
+	if err != nil {
+		return fmt.Errorf("native.MambaSSMScan: %w", err)
+	}
+	groupSizeC, err := checkedPositiveCInt("groupSize", groupSize)
+	if err != nil {
+		return fmt.Errorf("native.MambaSSMScan: %w", err)
+	}
+	if headCount%groupSize != 0 {
+		return fmt.Errorf("native.MambaSSMScan: headCount (%d) must be divisible by groupSize (%d)", headCount, groupSize)
+	}
+	if dState > 1024 {
+		return fmt.Errorf("native.MambaSSMScan: dState (%d) exceeds block-dim limit 1024", dState)
+	}
+	if err := cudaErr(C.mantleCudaMambaSSMScanWrapper(
+		(*C.float)(x.ptr),
+		(*C.float)(dt.ptr),
+		(*C.float)(b.ptr),
+		(*C.float)(c.ptr),
+		(*C.float)(aLog.ptr),
+		(*C.float)(dVec.ptr),
+		(*C.float)(state.ptr),
+		(*C.float)(out.ptr),
+		headCountC,
+		headDimC,
+		dStateC,
+		groupSizeC,
+		stream.ptr,
+	)); err != nil {
+		return fmt.Errorf("native.MambaSSMScan(headCount=%d, headDim=%d, dState=%d, groupSize=%d): %w", headCount, headDim, dState, groupSize, err)
+	}
+	return nil
+}
+
+// MambaDtSoftplusClampF32 applies dt[i] = clamp(softplus(dt[i]+bias[i]), tMin, tMax);
+// if tFloor > 0 and result < tFloor, result = tFloor. Mirrors the dt preprocessing
+// in internal/backend/simd/mamba.go before the selective-SSM scan.
+func MambaDtSoftplusClampF32(dt, bias DeviceBuffer, n int, tMin, tMax, tFloor float32, stream Stream) error {
+	if dt.ptr == nil || bias.ptr == nil {
+		return fmt.Errorf("native.MambaDtSoftplusClampF32: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.MambaDtSoftplusClampF32: %w", err)
+	}
+	if err := cudaErr(C.mantleCudaMambaDtSoftplusClampF32Wrapper(
+		(*C.float)(dt.ptr),
+		(*C.float)(bias.ptr),
+		nC,
+		C.float(tMin),
+		C.float(tMax),
+		C.float(tFloor),
+		stream.ptr,
+	)); err != nil {
+		return fmt.Errorf("native.MambaDtSoftplusClampF32(n=%d): %w", n, err)
+	}
+	return nil
+}
+
+// RMSNormGatedF32 fuses RMSNorm with a SiLU gate. When normBeforeGate is
+// true, out = rms_norm(y, weight, eps) * silu(z). Otherwise, out =
+// rms_norm(y * silu(z), weight, eps). Generic kernel reused by Mamba and
+// DeltaNet; mirrors RMSNormGated in internal/backend/simd/mamba.go.
+func RMSNormGatedF32(out, y, z, weight DeviceBuffer, n int, eps float32, normBeforeGate bool, stream Stream) error {
+	if out.ptr == nil || y.ptr == nil || z.ptr == nil || weight.ptr == nil {
+		return fmt.Errorf("native.RMSNormGatedF32: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.RMSNormGatedF32: %w", err)
+	}
+	var flag C.int
+	if normBeforeGate {
+		flag = 1
+	}
+	if err := cudaErr(C.mantleCudaRMSNormGatedF32Wrapper(
+		(*C.float)(out.ptr),
+		(*C.float)(y.ptr),
+		(*C.float)(z.ptr),
+		(*C.float)(weight.ptr),
+		C.float(eps),
+		nC,
+		flag,
+		stream.ptr,
+	)); err != nil {
+		return fmt.Errorf("native.RMSNormGatedF32(n=%d, normBeforeGate=%v): %w", n, normBeforeGate, err)
+	}
+	return nil
+}
+
+func ScaleF32InPlace(x DeviceBuffer, n int, scale float32, stream Stream) error {
+	if x.ptr == nil {
+		return fmt.Errorf("native.ScaleF32InPlace: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.ScaleF32InPlace: %w", err)
+	}
+	if err := cudaErr(C.mantleCudaScaleF32InPlaceWrapper(
+		(*C.float)(x.ptr),
+		nC,
+		C.float(scale),
+		stream.ptr,
+	)); err != nil {
+		return fmt.Errorf("native.ScaleF32InPlace(n=%d, scale=%g): %w", n, scale, err)
 	}
 	return nil
 }

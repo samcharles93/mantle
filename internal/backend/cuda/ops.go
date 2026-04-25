@@ -24,21 +24,29 @@ type Ops struct {
 	prefetchStream native.Stream
 	blas           native.BlasHandle
 
-	mu               sync.Mutex
-	fastPathErr      error
-	weights          map[*model.Mat]deviceMat
-	qweights         map[*model.Mat]deviceQuantMat
-	offloadedMats    map[*model.Mat]struct{} // weights intentionally kept on CPU
-	gpuLayers        int                     // -1 auto, 0 all layers on CPU, N first N layers on GPU
-	normWeights      map[uintptr]native.DeviceBuffer
-	attnCaches       map[*model.Layer]deviceAttnCache
-	f16Dequant       map[*model.Mat]native.DeviceBuffer // Cached F16 dequantized weights
-	convKernels      map[*model.Mat]native.DeviceBuffer // Cached conv kernel weights on device
-	convStates       map[*model.Layer]convDeviceState   // Per-layer conv state on device
-	convStateReady   map[*model.Layer]bool              // conv state already resident on device
-	quantGraphs      map[quantGraphKey]native.GraphExec // Cached CUDA Graph executables for quant kernels
-	ffnQuantGraphs   map[ffnQuantGraphKey]native.GraphExec
-	managedLayerBufs map[int]managedLayerRange
+	mu                      sync.Mutex
+	fastPathErr             error
+	weights                 map[*model.Mat]deviceMat
+	qweights                map[*model.Mat]deviceQuantMat
+	offloadedMats           map[*model.Mat]struct{} // weights intentionally kept on CPU
+	gpuLayers               int                     // -1 auto, 0 all layers on CPU, N first N layers on GPU
+	normWeights             map[uintptr]native.DeviceBuffer
+	attnCaches              map[*model.Layer]deviceAttnCache
+	f16Dequant              map[*model.Mat]native.DeviceBuffer // Cached F16 dequantized weights
+	convKernels             map[*model.Mat]native.DeviceBuffer // Cached conv kernel weights on device
+	convStates              map[*model.Layer]convDeviceState   // Per-layer conv state on device
+	convStateReady          map[*model.Layer]bool              // conv state already resident on device
+	mambaConvStates         map[*model.MambaLayer]convDeviceState
+	mambaConvReady          map[*model.MambaLayer]bool
+	mambaSSMStates          map[*model.MambaLayer]convDeviceState
+	mambaSSMReady           map[*model.MambaLayer]bool
+	deltaNetConvStates      map[*model.DeltaNetLayer]convDeviceState
+	deltaNetConvReady       map[*model.DeltaNetLayer]bool
+	deltaNetRecurrentStates map[*model.DeltaNetLayer]convDeviceState
+	deltaNetRecurrentReady  map[*model.DeltaNetLayer]bool
+	quantGraphs             map[quantGraphKey]native.GraphExec // Cached CUDA Graph executables for quant kernels
+	ffnQuantGraphs          map[ffnQuantGraphKey]native.GraphExec
+	managedLayerBufs        map[int]managedLayerRange
 
 	// Dynamic KV cache bounding: effective context length for allocation (0 = use layer max)
 	effectiveContextLen int
@@ -124,6 +132,18 @@ type Ops struct {
 	// Shared-KV consumers use this to avoid repeated full-cache D2H copies
 	// when multiple consumer layers fall back on the same token step.
 	lastHostKVPos map[*model.Layer]int
+
+	// mambaScratchDev is a single per-Ops device scratch buffer reused by
+	// MambaBlock for the fused InProj/conv/SSM/OutProj pipeline. Layout is
+	// [z | convChannels | dt | y], sub-pointered via DeviceBufferFromRaw.
+	mambaScratchDev   native.DeviceBuffer
+	mambaScratchBytes int
+
+	deltaNetScratchDev   native.DeviceBuffer
+	deltaNetScratchBytes int
+
+	moeScratchDev   native.DeviceBuffer
+	moeScratchBytes int
 }
 
 type deviceMat struct {
@@ -223,28 +243,36 @@ const (
 
 func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 	return &Ops{
-		stream:           stream,
-		blas:             blas,
-		weights:          make(map[*model.Mat]deviceMat),
-		qweights:         make(map[*model.Mat]deviceQuantMat),
-		offloadedMats:    make(map[*model.Mat]struct{}),
-		gpuLayers:        -1,
-		normWeights:      make(map[uintptr]native.DeviceBuffer),
-		attnCaches:       make(map[*model.Layer]deviceAttnCache),
-		f16Dequant:       make(map[*model.Mat]native.DeviceBuffer),
-		convKernels:      make(map[*model.Mat]native.DeviceBuffer),
-		convStates:       make(map[*model.Layer]convDeviceState),
-		convStateReady:   make(map[*model.Layer]bool),
-		quantGraphs:      make(map[quantGraphKey]native.GraphExec),
-		ffnQuantGraphs:   make(map[ffnQuantGraphKey]native.GraphExec),
-		managedLayerBufs: make(map[int]managedLayerRange),
-		scratchDevBufs:   make(map[uintptr]native.DeviceBuffer),
-		scratchDevBytes:  make(map[uintptr]int),
-		scratchDevValid:  make(map[uintptr]bool),
-		ropeInvFreqDev:   make(map[uintptr]ropeInvFreqDevEntry),
-		onesDev:          make(map[int]native.DeviceBuffer),
-		lastDevKVPos:     make(map[*model.Layer]int),
-		lastHostKVPos:    make(map[*model.Layer]int),
+		stream:                  stream,
+		blas:                    blas,
+		weights:                 make(map[*model.Mat]deviceMat),
+		qweights:                make(map[*model.Mat]deviceQuantMat),
+		offloadedMats:           make(map[*model.Mat]struct{}),
+		gpuLayers:               -1,
+		normWeights:             make(map[uintptr]native.DeviceBuffer),
+		attnCaches:              make(map[*model.Layer]deviceAttnCache),
+		f16Dequant:              make(map[*model.Mat]native.DeviceBuffer),
+		convKernels:             make(map[*model.Mat]native.DeviceBuffer),
+		convStates:              make(map[*model.Layer]convDeviceState),
+		convStateReady:          make(map[*model.Layer]bool),
+		mambaConvStates:         make(map[*model.MambaLayer]convDeviceState),
+		mambaConvReady:          make(map[*model.MambaLayer]bool),
+		mambaSSMStates:          make(map[*model.MambaLayer]convDeviceState),
+		mambaSSMReady:           make(map[*model.MambaLayer]bool),
+		deltaNetConvStates:      make(map[*model.DeltaNetLayer]convDeviceState),
+		deltaNetConvReady:       make(map[*model.DeltaNetLayer]bool),
+		deltaNetRecurrentStates: make(map[*model.DeltaNetLayer]convDeviceState),
+		deltaNetRecurrentReady:  make(map[*model.DeltaNetLayer]bool),
+		quantGraphs:             make(map[quantGraphKey]native.GraphExec),
+		ffnQuantGraphs:          make(map[ffnQuantGraphKey]native.GraphExec),
+		managedLayerBufs:        make(map[int]managedLayerRange),
+		scratchDevBufs:          make(map[uintptr]native.DeviceBuffer),
+		scratchDevBytes:         make(map[uintptr]int),
+		scratchDevValid:         make(map[uintptr]bool),
+		ropeInvFreqDev:          make(map[uintptr]ropeInvFreqDevEntry),
+		onesDev:                 make(map[int]native.DeviceBuffer),
+		lastDevKVPos:            make(map[*model.Layer]int),
+		lastHostKVPos:           make(map[*model.Layer]int),
 	}
 }
 
@@ -356,6 +384,12 @@ func (o *Ops) ResetConvStates() {
 	defer o.mu.Unlock()
 	for k := range o.convStateReady {
 		delete(o.convStateReady, k)
+	}
+	for k := range o.mambaConvReady {
+		delete(o.mambaConvReady, k)
+	}
+	for k := range o.mambaSSMReady {
+		delete(o.mambaSSMReady, k)
 	}
 	o.clearLastResult()
 	o.greedyResultValid = false
@@ -1347,6 +1381,62 @@ func (o *Ops) Close() error {
 	}
 	o.convStates = nil
 
+	for _, cs := range o.mambaConvStates {
+		if e := cs.buf.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.mambaConvStates = nil
+	o.mambaConvReady = nil
+
+	for _, cs := range o.mambaSSMStates {
+		if e := cs.buf.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.mambaSSMStates = nil
+	o.mambaSSMReady = nil
+
+	for _, cs := range o.deltaNetConvStates {
+		if e := cs.buf.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.deltaNetConvStates = nil
+	o.deltaNetConvReady = nil
+
+	for _, cs := range o.deltaNetRecurrentStates {
+		if e := cs.buf.Free(); e != nil && err == nil {
+			err = e
+		}
+	}
+	o.deltaNetRecurrentStates = nil
+	o.deltaNetRecurrentReady = nil
+
+	if o.mambaScratchBytes > 0 {
+		if e := o.mambaScratchDev.Free(); e != nil && err == nil {
+			err = e
+		}
+		o.mambaScratchDev = native.DeviceBuffer{}
+		o.mambaScratchBytes = 0
+	}
+
+	if o.deltaNetScratchBytes > 0 {
+		if e := o.deltaNetScratchDev.Free(); e != nil && err == nil {
+			err = e
+		}
+		o.deltaNetScratchDev = native.DeviceBuffer{}
+		o.deltaNetScratchBytes = 0
+	}
+
+	if o.moeScratchBytes > 0 {
+		if e := o.moeScratchDev.Free(); e != nil && err == nil {
+			err = e
+		}
+		o.moeScratchDev = native.DeviceBuffer{}
+		o.moeScratchBytes = 0
+	}
+
 	for _, cache := range o.attnCaches {
 		if e := cache.kF16.Free(); e != nil && err == nil {
 			err = e
@@ -1674,6 +1764,86 @@ func (o *Ops) matVecWithDeviceInput(dst []float32, w *model.Mat, xDev native.Dev
 		return err
 	}
 	return nil
+}
+
+// matVecToDeviceBuffer performs MatVec using a device-resident input and
+// writes the result to an explicit device destination buffer. Supports
+// quantized weights and F32/F16/BF16 dequant weights (F32 x converted
+// on-device as needed). Requires o.mu locked.
+func (o *Ops) matVecToDeviceBuffer(w *model.Mat, xDev native.DeviceBuffer, xLen int, dst native.DeviceBuffer) error {
+	if w == nil || w.R == 0 || w.C == 0 {
+		return fmt.Errorf("invalid weight matrix")
+	}
+	if xLen != w.C {
+		return fmt.Errorf("x length mismatch")
+	}
+	if _, ok := o.qweights[w]; ok {
+		qw, err := o.ensureQuantMat(w)
+		if err != nil {
+			return err
+		}
+		return o.runQuantKernel(qw, xDev, dst, o.stream)
+	}
+	if useQuantKernel() && (shouldPreferQuantWeights(w, currentCUDAWeightMode()) || (w.Quant != nil && w.Quant.ValidFor(w))) {
+		qw, err := o.ensureQuantMat(w)
+		if err != nil {
+			return err
+		}
+		return o.runQuantKernel(qw, xDev, dst, o.stream)
+	}
+	devW, err := o.deviceMat(w)
+	if err != nil {
+		return err
+	}
+	xInput := xDev
+	xInputType := native.BlasF32
+	if devW.dtype != native.BlasF32 {
+		switch devW.dtype {
+		case native.BlasF16:
+			xBytes := int64(w.C) * 2
+			if err := o.ensureDeviceVecs(int(xBytes), 0); err != nil {
+				return err
+			}
+			if err := native.ConvertF32ToF16(xDev, o.xDev, w.C, o.stream); err != nil {
+				return err
+			}
+			xInput = o.xDev
+			xInputType = native.BlasF16
+		case native.BlasBF16:
+			xBytes := int64(w.C) * 2
+			if err := o.ensureDeviceVecs(int(xBytes), 0); err != nil {
+				return err
+			}
+			if err := native.ConvertF32ToBF16(xDev, o.xDev, w.C, o.stream); err != nil {
+				return err
+			}
+			xInput = o.xDev
+			xInputType = native.BlasBF16
+		default:
+			return fmt.Errorf("mixed precision dequant matvec not supported for dtype %d", devW.dtype)
+		}
+	}
+	return native.GemmEx(
+		o.blas,
+		native.BlasOpT,
+		native.BlasOpN,
+		w.R,
+		1,
+		w.C,
+		1.0,
+		devW.buf,
+		devW.dtype,
+		w.C,
+		xInput,
+		xInputType,
+		w.C,
+		0.0,
+		dst,
+		native.BlasF32,
+		w.R,
+		native.BlasComputeF32,
+		native.BlasGemmDefault,
+	)
 }
 
 // matVecWithDeviceInputNoCopy performs MatVec using an already resident
@@ -2709,6 +2879,897 @@ func (o *Ops) ensureConvState(layer *model.Layer, bytes int) (convDeviceState, e
 	cs := convDeviceState{buf: buf, size: bytes}
 	o.convStates[layer] = cs
 	return cs, nil
+}
+
+func (o *Ops) ensureMambaScratch(bytes int) (native.DeviceBuffer, error) {
+	if bytes <= 0 {
+		return native.DeviceBuffer{}, nil
+	}
+	if o.mambaScratchBytes >= bytes {
+		return o.mambaScratchDev, nil
+	}
+	if o.mambaScratchBytes > 0 {
+		o.mambaScratchDev.Free()
+		o.mambaScratchDev = native.DeviceBuffer{}
+		o.mambaScratchBytes = 0
+	}
+	buf, err := native.AllocDevice(int64(bytes))
+	if err != nil {
+		return native.DeviceBuffer{}, err
+	}
+	o.mambaScratchDev = buf
+	o.mambaScratchBytes = bytes
+	return buf, nil
+}
+
+func (o *Ops) ensureDeltaNetScratch(bytes int) (native.DeviceBuffer, error) {
+	if bytes <= 0 {
+		return native.DeviceBuffer{}, nil
+	}
+	if o.deltaNetScratchBytes >= bytes {
+		return o.deltaNetScratchDev, nil
+	}
+	if o.deltaNetScratchBytes > 0 {
+		o.deltaNetScratchDev.Free()
+		o.deltaNetScratchDev = native.DeviceBuffer{}
+		o.deltaNetScratchBytes = 0
+	}
+	buf, err := native.AllocDevice(int64(bytes))
+	if err != nil {
+		return native.DeviceBuffer{}, err
+	}
+	o.deltaNetScratchDev = buf
+	o.deltaNetScratchBytes = bytes
+	return buf, nil
+}
+
+func (o *Ops) ensureMoeScratch(bytes int) (native.DeviceBuffer, error) {
+	if bytes <= 0 {
+		return native.DeviceBuffer{}, nil
+	}
+	if o.moeScratchBytes >= bytes {
+		return o.moeScratchDev, nil
+	}
+	if o.moeScratchBytes > 0 {
+		o.moeScratchDev.Free()
+		o.moeScratchDev = native.DeviceBuffer{}
+		o.moeScratchBytes = 0
+	}
+	buf, err := native.AllocDevice(int64(bytes))
+	if err != nil {
+		return native.DeviceBuffer{}, err
+	}
+	o.moeScratchDev = buf
+	o.moeScratchBytes = bytes
+	return buf, nil
+}
+
+func (o *Ops) DeltaNetBlock(dl *model.DeltaNetLayer, x, out []float32, cfg core.DeltaNetConfig) bool {
+	if o == nil || dl == nil {
+		return false
+	}
+	if dl.QKVProj == nil || dl.AProj == nil || dl.BProj == nil || dl.ZProj == nil ||
+		dl.OutProj == nil || dl.Conv == nil {
+		return false
+	}
+	if dl.Norm == nil || dl.ALog == nil || dl.DTBias == nil {
+		return false
+	}
+	if v := os.Getenv("MANTLE_CUDA_DELTANET"); v == "0" || v == "false" {
+		return false
+	}
+
+	embd := dl.QKVProj.C
+	nk := dl.NumKeyHeads
+	nv := dl.NumValueHeads
+	hk := dl.HeadKeyDim
+	hv := dl.HeadValueDim
+	keyDim := dl.KeyDim
+	valueDim := dl.ValueDim
+	convChannels := dl.Conv.R
+	convKernelLen := dl.Conv.C
+	outRows := dl.OutProj.R
+
+	if nk <= 0 || nv <= 0 || hk <= 0 || hv <= 0 || convKernelLen <= 0 {
+		return false
+	}
+	if keyDim != nk*hk || valueDim != nv*hv {
+		return false
+	}
+	if convChannels != 2*keyDim+valueDim {
+		return false
+	}
+	if dl.QKVProj.R != convChannels {
+		return false
+	}
+	if dl.AProj.R != nv || dl.BProj.R != nv {
+		return false
+	}
+	if dl.ZProj.R != valueDim {
+		return false
+	}
+	if dl.OutProj.C != valueDim || outRows <= 0 {
+		return false
+	}
+	if dl.AProj.C != embd || dl.BProj.C != embd || dl.ZProj.C != embd {
+		return false
+	}
+	if len(x) < embd || len(out) < outRows {
+		return false
+	}
+	if len(dl.Norm) < hv || len(dl.ALog) < nv || len(dl.DTBias) < nv {
+		return false
+	}
+
+	groupSize := 1
+	if nv > nk {
+		groupSize = nv / nk
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	fail := func(err error) bool {
+		o.clearLastResult()
+		if err != nil {
+			o.recordFastPathErrorLocked(err)
+		}
+		return false
+	}
+
+	if err := o.flushLastResult(); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet pre-flush failed: %w", err))
+	}
+	convKernelDev, err := o.ensureConvKernel(dl.Conv)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: deltanet conv kernel upload failed: %w", err))
+	}
+	aLogDev, err := o.deviceNormWeight(dl.ALog[:nv])
+	if err != nil {
+		return fail(fmt.Errorf("cuda: deltanet a_log upload failed: %w", err))
+	}
+	dtBiasDev, err := o.deviceNormWeight(dl.DTBias[:nv])
+	if err != nil {
+		return fail(fmt.Errorf("cuda: deltanet dt bias upload failed: %w", err))
+	}
+	normDev, err := o.deviceNormWeight(dl.Norm[:hv])
+	if err != nil {
+		return fail(fmt.Errorf("cuda: deltanet norm upload failed: %w", err))
+	}
+
+	convTail := convKernelLen - 1
+	if convTail < 0 {
+		convTail = 0
+	}
+	convStateLen := convChannels * convTail
+	if convStateLen > 0 && len(dl.ConvState) < convStateLen {
+		return fail(nil)
+	}
+	recurrentStateLen := nv * hk * hv
+	if len(dl.RecurrentState) < recurrentStateLen {
+		return fail(nil)
+	}
+
+	ensureDeltaState := func(states map[*model.DeltaNetLayer]convDeviceState, bytes int) (convDeviceState, error) {
+		allocBytes := bytes
+		if allocBytes <= 0 {
+			allocBytes = 4
+		}
+		if cs, ok := states[dl]; ok && cs.size >= allocBytes {
+			return cs, nil
+		}
+		if cs, ok := states[dl]; ok {
+			if err := cs.buf.Free(); err != nil {
+				return convDeviceState{}, err
+			}
+			delete(states, dl)
+		}
+		buf, err := native.AllocDevice(int64(allocBytes))
+		if err != nil {
+			return convDeviceState{}, err
+		}
+		cs := convDeviceState{buf: buf, size: allocBytes}
+		states[dl] = cs
+		return cs, nil
+	}
+
+	convStateBytes := convStateLen * 4
+	convState, err := ensureDeltaState(o.deltaNetConvStates, convStateBytes)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: deltanet conv state alloc failed: %w", err))
+	}
+	recurrentStateBytes := recurrentStateLen * 4
+	recurrentState, err := ensureDeltaState(o.deltaNetRecurrentStates, recurrentStateBytes)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: deltanet recurrent state alloc failed: %w", err))
+	}
+
+	if convStateLen > 0 && !o.deltaNetConvReady[dl] {
+		if err := native.MemcpyH2DAsync(convState.buf, unsafe.Pointer(&dl.ConvState[0]), int64(convStateBytes), o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: deltanet conv state upload failed (%d bytes): %w", convStateBytes, err))
+		}
+		o.deltaNetConvReady[dl] = true
+	}
+	if !o.deltaNetRecurrentReady[dl] {
+		if err := native.MemcpyH2DAsync(recurrentState.buf, unsafe.Pointer(&dl.RecurrentState[0]), int64(recurrentStateBytes), o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: deltanet recurrent state upload failed (%d bytes): %w", recurrentStateBytes, err))
+		}
+		o.deltaNetRecurrentReady[dl] = true
+	}
+
+	xBytes := int64(embd) * 4
+	outBytes := int64(outRows) * 4
+	var xInput native.DeviceBuffer
+	usedDeviceInput := false
+	if o.isNormDeviceX(x) {
+		xInput = o.normDev
+		usedDeviceInput = true
+	} else if o.isDeviceX(x) {
+		if o.xHostDirty {
+			bytes := int64(o.xHostLen) * 4
+			if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&x[0]), bytes); err != nil {
+				return fail(fmt.Errorf("cuda: deltanet device x upload failed (%d bytes): %w", bytes, err))
+			}
+			o.xHostDirty = false
+			o.xDevDirty = false
+		}
+		xInput = o.xPersistDev
+		usedDeviceInput = true
+	}
+
+	if err := o.ensureDeviceVecs(func() int {
+		if usedDeviceInput {
+			return 0
+		}
+		return int(xBytes)
+	}(), int(outBytes)); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet device vec alloc failed: %w", err))
+	}
+	if !usedDeviceInput {
+		if err := o.ensureHostVecs(int(xBytes), int(outBytes)); err != nil {
+			return fail(fmt.Errorf("cuda: deltanet host vec alloc failed: %w", err))
+		}
+		copy(unsafe.Slice((*float32)(o.xHost.Ptr()), embd), x[:embd])
+		if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: deltanet x upload failed (%d bytes): %w", xBytes, err))
+		}
+		xInput = o.xDev
+	} else if err := o.ensureHostVecs(0, int(outBytes)); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet host output alloc failed: %w", err))
+	}
+
+	offQKV := 0
+	offA := convChannels * 4
+	offB := offA + nv*4
+	offZ := offB + nv*4
+	offQ := offZ + valueDim*4
+	offK := offQ + keyDim*4
+	offV := offK + keyDim*4
+	offY := offV + valueDim*4
+	total := offY + valueDim*4
+
+	base, err := o.ensureDeltaNetScratch(total)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: deltanet scratch alloc failed: %w", err))
+	}
+	qkvDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offQKV))
+	aDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offA))
+	bDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offB))
+	zDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offZ))
+	qDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offQ))
+	kDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offK))
+	vDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offV))
+	yDelta := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offY))
+
+	if err := o.matVecToDeviceBuffer(dl.QKVProj, xInput, embd, qkvDev); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet qkv proj failed: %w", err))
+	}
+	if err := o.matVecToDeviceBuffer(dl.AProj, xInput, embd, aDev); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet a proj failed: %w", err))
+	}
+	if err := o.matVecToDeviceBuffer(dl.BProj, xInput, embd, bDev); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet b proj failed: %w", err))
+	}
+	if err := o.matVecToDeviceBuffer(dl.ZProj, xInput, embd, zDev); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet z proj failed: %w", err))
+	}
+
+	var noBias native.DeviceBuffer
+	if err := native.MambaDepthwiseConv(qkvDev, convKernelDev, noBias, convState.buf, qkvDev, convChannels, convKernelLen, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet depthwise conv failed (channels=%d, klen=%d): %w", convChannels, convKernelLen, err))
+	}
+	if err := native.SiluF32InPlace(qkvDev, convChannels, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet conv silu failed (n=%d): %w", convChannels, err))
+	}
+
+	qSrc := native.DeviceBufferFromRaw(qkvDev.Ptr())
+	kSrc := native.DeviceBufferFromRaw(unsafe.Add(qkvDev.Ptr(), keyDim*4))
+	vSrc := native.DeviceBufferFromRaw(unsafe.Add(qkvDev.Ptr(), 2*keyDim*4))
+	if err := native.MemcpyD2DAsync(qDev, qSrc, int64(keyDim)*4, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet q split copy failed: %w", err))
+	}
+	if err := native.MemcpyD2DAsync(kDev, kSrc, int64(keyDim)*4, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet k split copy failed: %w", err))
+	}
+	if err := native.MemcpyD2DAsync(vDev, vSrc, int64(valueDim)*4, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet v split copy failed: %w", err))
+	}
+
+	eps := float32(1e-6)
+	if err := native.DeltaNetL2NormF32(qDev, eps, hk, nk, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet q l2norm failed (hk=%d, nk=%d): %w", hk, nk, err))
+	}
+	if err := native.DeltaNetL2NormF32(kDev, eps, hk, nk, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet k l2norm failed (hk=%d, nk=%d): %w", hk, nk, err))
+	}
+
+	scale := float32(1.0 / math.Sqrt(float64(hk)))
+	if err := native.DeltaNetRecurrentF32(
+		recurrentState.buf, qDev, kDev, vDev,
+		aLogDev, aDev, bDev, dtBiasDev,
+		yDelta,
+		scale, hk, hv, nv, nk, groupSize,
+		o.stream,
+	); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet recurrent failed (hk=%d, hv=%d, nv=%d, nk=%d, gs=%d): %w", hk, hv, nv, nk, groupSize, err))
+	}
+
+	for h := 0; h < nv; h++ {
+		yHead := native.DeviceBufferFromRaw(unsafe.Add(yDelta.Ptr(), h*hv*4))
+		zHead := native.DeviceBufferFromRaw(unsafe.Add(zDev.Ptr(), h*hv*4))
+		if err := native.RMSNormGatedF32(yHead, yHead, zHead, normDev, hv, cfg.RMSEpsilon, true, o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: deltanet rmsnorm gated failed (head=%d, n=%d): %w", h, hv, err))
+		}
+	}
+
+	if err := o.matVecToDeviceBuffer(dl.OutProj, yDelta, valueDim, o.yDev); err != nil {
+		return fail(fmt.Errorf("cuda: deltanet out proj failed: %w", err))
+	}
+
+	o.setLastResult(o.yDev, out, outRows)
+	runtime.KeepAlive(dl)
+	runtime.KeepAlive(x)
+	runtime.KeepAlive(out)
+	return true
+}
+
+func (o *Ops) MoEBlock(ml *model.MoELayer, x, out []float32, cfg core.MoEConfig) bool {
+	if o == nil || ml == nil {
+		return false
+	}
+	if ml.Router == nil || ml.Shared.Up == nil || ml.Shared.Gate == nil || ml.Shared.Down == nil {
+		return false
+	}
+	if v := os.Getenv("MANTLE_CUDA_MOE"); v == "0" || v == "false" {
+		return false
+	}
+
+	embd := ml.Router.C
+	numExperts := ml.Router.R
+	intermediate := ml.Shared.Intermediate
+	if intermediate <= 0 {
+		intermediate = ml.Shared.Up.R
+	}
+	outputRows := ml.Shared.Down.R
+	topK := ml.TopK
+	routeScale := ml.RouteScale
+	biasLen := len(ml.ExpertBias)
+	numActualExperts := len(ml.Experts)
+
+	if embd <= 0 || numExperts <= 0 || intermediate <= 0 || outputRows <= 0 {
+		return false
+	}
+	if topK <= 0 || topK > numExperts {
+		return false
+	}
+	if numActualExperts < numExperts {
+		return false
+	}
+	if len(x) < embd || len(out) < outputRows {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	fail := func(err error) bool {
+		o.clearLastResult()
+		if err != nil {
+			o.recordFastPathErrorLocked(err)
+		}
+		return false
+	}
+
+	if err := o.flushLastResult(); err != nil {
+		return fail(fmt.Errorf("cuda: moe pre-flush failed: %w", err))
+	}
+
+	routerW, err := o.deviceMat(ml.Router)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: moe router upload failed: %w", err))
+	}
+	sharedUp, err := o.deviceMat(ml.Shared.Up)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: moe shared up upload failed: %w", err))
+	}
+	sharedGate, err := o.deviceMat(ml.Shared.Gate)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: moe shared gate upload failed: %w", err))
+	}
+	sharedDown, err := o.deviceMat(ml.Shared.Down)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: moe shared down upload failed: %w", err))
+	}
+
+	wtype := sharedUp.dtype
+	if sharedGate.dtype != wtype || sharedDown.dtype != wtype || routerW.dtype != wtype {
+		return fail(nil)
+	}
+	if wtype != native.BlasF32 {
+		return fail(nil)
+	}
+	if routerW.rows != numExperts || routerW.cols != embd {
+		return fail(nil)
+	}
+	if sharedUp.rows != intermediate || sharedUp.cols != embd {
+		return fail(nil)
+	}
+	if sharedGate.rows != intermediate || sharedGate.cols != embd {
+		return fail(nil)
+	}
+	if sharedDown.rows != outputRows || sharedDown.cols != intermediate {
+		return fail(nil)
+	}
+
+	type expertW struct {
+		up, gate, down deviceMat
+	}
+	expertWs := make([]expertW, numActualExperts)
+	for j := range ml.Experts {
+		ex := &ml.Experts[j]
+		ew, err := o.deviceMat(ex.Up)
+		if err != nil {
+			return fail(fmt.Errorf("cuda: moe expert[%d] up upload failed: %w", j, err))
+		}
+		if ew.dtype != wtype || ew.rows != intermediate || ew.cols != embd {
+			return fail(nil)
+		}
+		gw, err := o.deviceMat(ex.Gate)
+		if err != nil {
+			return fail(fmt.Errorf("cuda: moe expert[%d] gate upload failed: %w", j, err))
+		}
+		if gw.dtype != wtype || gw.rows != intermediate || gw.cols != embd {
+			return fail(nil)
+		}
+		dw, err := o.deviceMat(ex.Down)
+		if err != nil {
+			return fail(fmt.Errorf("cuda: moe expert[%d] down upload failed: %w", j, err))
+		}
+		if dw.dtype != wtype || dw.rows != outputRows || dw.cols != intermediate {
+			return fail(nil)
+		}
+		expertWs[j] = expertW{up: ew, gate: gw, down: dw}
+	}
+
+	rawBytes := numExperts * 4
+	biasBytes := biasLen * 4
+	idxBytes := topK * 4
+	wBytes := topK * 4
+	accumBytes := outputRows * 4
+
+	rawOff := 0
+	biasOff := rawBytes
+	idxOff := biasOff + biasBytes
+	wOff := idxOff + idxBytes
+	accumOff := wOff + wBytes
+	totalMoeScratch := accumOff + accumBytes
+
+	base, err := o.ensureMoeScratch(totalMoeScratch)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: moe scratch alloc failed: %w", err))
+	}
+	rawDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), rawOff))
+	var biasDev native.DeviceBuffer
+	if biasLen > 0 {
+		biasDev = native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), biasOff))
+	}
+	idxDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), idxOff))
+	wDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), wOff))
+	accumDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), accumOff))
+
+	maxIntermF32 := intermediate * 4
+	maxOutF32 := outputRows * 4
+	maxBytes := maxIntermF32
+	if maxOutF32 > maxBytes {
+		maxBytes = maxOutF32
+	}
+	xBytes := embd * 4
+	if err := o.ensureDeviceVecs(xBytes, maxBytes); err != nil {
+		return fail(fmt.Errorf("cuda: moe device vec alloc failed: %w", err))
+	}
+	if err := o.ensureNormTmp(maxBytes); err != nil {
+		return fail(fmt.Errorf("cuda: moe norm tmp alloc failed: %w", err))
+	}
+	if err := o.ensureHostVecs(xBytes, maxOutF32); err != nil {
+		return fail(fmt.Errorf("cuda: moe host vec alloc failed: %w", err))
+	}
+
+	copy(unsafe.Slice((*float32)(o.xHost.Ptr()), embd), x[:embd])
+	if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), int64(xBytes), o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: moe x upload failed: %w", err))
+	}
+
+	zeros := unsafe.Slice((*float32)(o.yHost.Ptr()), outputRows)
+	for i := range zeros {
+		zeros[i] = 0
+	}
+	if err := native.MemcpyH2DAsync(accumDev, o.yHost.Ptr(), int64(accumBytes), o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: moe accum zero failed: %w", err))
+	}
+
+	xInput := o.xDev
+	xInputType := wtype
+
+	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, intermediate, 1, embd, 1.0, sharedUp.buf, wtype, embd, xInput, xInputType, embd, 0.0, o.yDev, native.BlasF32, intermediate, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+		return fail(fmt.Errorf("cuda: moe shared up gemm failed: %w", err))
+	}
+	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, intermediate, 1, embd, 1.0, sharedGate.buf, wtype, embd, xInput, xInputType, embd, 0.0, o.zDev, native.BlasF32, intermediate, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+		return fail(fmt.Errorf("cuda: moe shared gate gemm failed: %w", err))
+	}
+	if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, intermediate, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: moe shared silu failed: %w", err))
+	}
+	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, outputRows, 1, intermediate, 1.0, sharedDown.buf, wtype, intermediate, o.yDev, native.BlasF32, intermediate, 0.0, o.zDev, native.BlasF32, outputRows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+		return fail(fmt.Errorf("cuda: moe shared down gemm failed: %w", err))
+	}
+	if err := native.MoEAccumulateF32(accumDev, o.zDev, 1.0, outputRows, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: moe shared accumulate failed: %w", err))
+	}
+
+	if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, numExperts, 1, embd, 1.0, routerW.buf, wtype, embd, xInput, xInputType, embd, 0.0, rawDev, native.BlasF32, numExperts, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+		return fail(fmt.Errorf("cuda: moe router gemm failed: %w", err))
+	}
+
+	if biasLen > 0 {
+		biasSlice := unsafe.Slice((*float32)(o.xHost.Ptr()), biasLen)
+		copy(biasSlice, ml.ExpertBias[:biasLen])
+		if err := native.MemcpyH2DAsync(biasDev, o.xHost.Ptr(), int64(biasBytes), o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: moe bias upload failed: %w", err))
+		}
+	}
+
+	if err := native.MoERouterF32(rawDev, biasDev, biasLen, topK, routeScale, numExperts, idxDev, wDev, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: moe router failed: %w", err))
+	}
+
+	if err := o.stream.Synchronize(); err != nil {
+		return fail(fmt.Errorf("cuda: moe router sync failed: %w", err))
+	}
+	hostIdx := make([]int32, topK)
+	hostWeights := make([]float32, topK)
+	if err := native.MemcpyD2H(unsafe.Pointer(&hostIdx[0]), idxDev, int64(idxBytes)); err != nil {
+		return fail(fmt.Errorf("cuda: moe idx download failed: %w", err))
+	}
+	if err := native.MemcpyD2H(unsafe.Pointer(&hostWeights[0]), wDev, int64(wBytes)); err != nil {
+		return fail(fmt.Errorf("cuda: moe weights download failed: %w", err))
+	}
+
+	for j := 0; j < topK; j++ {
+		expertID := int(hostIdx[j])
+		if expertID < 0 || expertID >= numActualExperts {
+			continue
+		}
+		w := hostWeights[j]
+		if w == 0 {
+			continue
+		}
+		ew := expertWs[expertID]
+
+		if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, intermediate, 1, embd, 1.0, ew.up.buf, wtype, embd, xInput, xInputType, embd, 0.0, o.yDev, native.BlasF32, intermediate, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+			return fail(fmt.Errorf("cuda: moe expert[%d] up gemm failed: %w", expertID, err))
+		}
+		if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, intermediate, 1, embd, 1.0, ew.gate.buf, wtype, embd, xInput, xInputType, embd, 0.0, o.zDev, native.BlasF32, intermediate, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+			return fail(fmt.Errorf("cuda: moe expert[%d] gate gemm failed: %w", expertID, err))
+		}
+		if err := native.SiluMulF32(o.zDev, o.yDev, o.yDev, intermediate, o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: moe expert[%d] silu failed: %w", expertID, err))
+		}
+		if err := native.GemmEx(o.blas, native.BlasOpT, native.BlasOpN, outputRows, 1, intermediate, 1.0, ew.down.buf, wtype, intermediate, o.yDev, native.BlasF32, intermediate, 0.0, o.zDev, native.BlasF32, outputRows, native.BlasComputeF32, native.BlasGemmDefault); err != nil {
+			return fail(fmt.Errorf("cuda: moe expert[%d] down gemm failed: %w", expertID, err))
+		}
+		if err := native.MoEAccumulateF32(accumDev, o.zDev, w, outputRows, o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: moe expert[%d] accumulate failed: %w", expertID, err))
+		}
+	}
+
+	if err := o.stream.Synchronize(); err != nil {
+		return fail(fmt.Errorf("cuda: moe final sync failed: %w", err))
+	}
+	if err := native.MemcpyD2H(unsafe.Pointer(&out[0]), accumDev, int64(accumBytes)); err != nil {
+		return fail(fmt.Errorf("cuda: moe accum download failed: %w", err))
+	}
+
+	runtime.KeepAlive(ml)
+	runtime.KeepAlive(x)
+	runtime.KeepAlive(out)
+	return true
+}
+
+type MambaConfig = core.MambaConfig
+
+func (o *Ops) MambaBlock(ml *model.MambaLayer, x, out []float32, cfg MambaConfig) bool {
+	if o == nil || ml == nil {
+		return false
+	}
+	if ml.InProj == nil || ml.OutProj == nil || ml.Conv == nil || ml.ALog == nil || ml.D == nil {
+		return false
+	}
+	if v := os.Getenv("MANTLE_CUDA_MAMBA"); v == "0" || v == "false" {
+		return false
+	}
+
+	embd := ml.InProj.C
+	inner := ml.Inner
+	headCount := ml.HeadCount
+	headDim := ml.HeadDim
+	dState := ml.DState
+	groups := ml.Groups
+	groupSize := ml.GroupSize
+	convChannels := ml.ConvChannels
+	convKernelLen := ml.ConvKernel
+	dInProj := ml.InProj.R
+	outRows := ml.OutProj.R
+
+	if inner <= 0 || headCount <= 0 || headDim <= 0 || dState <= 0 || groups <= 0 || groupSize <= 0 || convKernelLen <= 0 {
+		return false
+	}
+	if inner != headCount*headDim {
+		return false
+	}
+	if len(x) < embd || len(out) < inner || len(out) < outRows {
+		return false
+	}
+	if cfg.TimeStepMax <= 0 || cfg.TimeStepMin < 0 {
+		return false
+	}
+	if dInProj != 2*inner+2*groups*dState+headCount {
+		return false
+	}
+	if convChannels != inner+2*groups*dState {
+		return false
+	}
+	if ml.Conv.R != convChannels || ml.Conv.C != convKernelLen || ml.OutProj.C != inner || outRows <= 0 {
+		return false
+	}
+	if len(ml.DTBias) < headCount || len(ml.ALog) < headCount || len(ml.D) < headCount {
+		return false
+	}
+	if len(ml.ConvBias) > 0 && len(ml.ConvBias) < convChannels {
+		return false
+	}
+	if cfg.MambaRMSNorm && ml.Norm != nil && len(ml.Norm) < inner {
+		return false
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	fail := func(err error) bool {
+		o.clearLastResult()
+		if err != nil {
+			o.recordFastPathErrorLocked(err)
+		}
+		return false
+	}
+
+	if err := o.flushLastResult(); err != nil {
+		return fail(fmt.Errorf("cuda: mamba pre-flush failed: %w", err))
+	}
+	convKernelDev, err := o.ensureConvKernel(ml.Conv)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: mamba conv kernel upload failed: %w", err))
+	}
+	dtBiasDev, err := o.deviceNormWeight(ml.DTBias[:headCount])
+	if err != nil {
+		return fail(fmt.Errorf("cuda: mamba dt bias upload failed: %w", err))
+	}
+	aLogDev, err := o.deviceNormWeight(ml.ALog[:headCount])
+	if err != nil {
+		return fail(fmt.Errorf("cuda: mamba a_log upload failed: %w", err))
+	}
+	dDev, err := o.deviceNormWeight(ml.D[:headCount])
+	if err != nil {
+		return fail(fmt.Errorf("cuda: mamba d upload failed: %w", err))
+	}
+	var convBiasDev native.DeviceBuffer
+	if len(ml.ConvBias) > 0 {
+		convBiasDev, err = o.deviceNormWeight(ml.ConvBias[:convChannels])
+		if err != nil {
+			return fail(fmt.Errorf("cuda: mamba conv bias upload failed: %w", err))
+		}
+	}
+	var normDev native.DeviceBuffer
+	if cfg.MambaRMSNorm && ml.Norm != nil {
+		normDev, err = o.deviceNormWeight(ml.Norm[:inner])
+		if err != nil {
+			return fail(fmt.Errorf("cuda: mamba norm upload failed: %w", err))
+		}
+	}
+
+	convTail := convKernelLen - 1
+	if convTail < 0 {
+		convTail = 0
+	}
+	convStateLen := convChannels * convTail
+	if convStateLen > 0 && len(ml.ConvState) < convStateLen {
+		return fail(nil)
+	}
+	ssmStateLen := headCount * headDim * dState
+	if len(ml.SSMState) < ssmStateLen {
+		return fail(nil)
+	}
+
+	ensureMambaState := func(states map[*model.MambaLayer]convDeviceState, bytes int) (convDeviceState, error) {
+		allocBytes := bytes
+		if allocBytes <= 0 {
+			allocBytes = 4
+		}
+		if cs, ok := states[ml]; ok && cs.size >= allocBytes {
+			return cs, nil
+		}
+		if cs, ok := states[ml]; ok {
+			if err := cs.buf.Free(); err != nil {
+				return convDeviceState{}, err
+			}
+			delete(states, ml)
+		}
+		buf, err := native.AllocDevice(int64(allocBytes))
+		if err != nil {
+			return convDeviceState{}, err
+		}
+		cs := convDeviceState{buf: buf, size: allocBytes}
+		states[ml] = cs
+		return cs, nil
+	}
+
+	convStateBytes := convStateLen * 4
+	convState, err := ensureMambaState(o.mambaConvStates, convStateBytes)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: mamba conv state alloc failed: %w", err))
+	}
+	ssmStateBytes := ssmStateLen * 4
+	ssmState, err := ensureMambaState(o.mambaSSMStates, ssmStateBytes)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: mamba ssm state alloc failed: %w", err))
+	}
+
+	if convStateLen > 0 && !o.mambaConvReady[ml] {
+		if err := native.MemcpyH2DAsync(convState.buf, unsafe.Pointer(&ml.ConvState[0]), int64(convStateBytes), o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: mamba conv state upload failed (%d bytes): %w", convStateBytes, err))
+		}
+		o.mambaConvReady[ml] = true
+	}
+	if !o.mambaSSMReady[ml] {
+		if err := native.MemcpyH2DAsync(ssmState.buf, unsafe.Pointer(&ml.SSMState[0]), int64(ssmStateBytes), o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: mamba ssm state upload failed (%d bytes): %w", ssmStateBytes, err))
+		}
+		o.mambaSSMReady[ml] = true
+	}
+
+	xBytes := int64(embd) * 4
+	outBytes := int64(outRows) * 4
+	var xInput native.DeviceBuffer
+	usedDeviceInput := false
+	if o.isNormDeviceX(x) {
+		xInput = o.normDev
+		usedDeviceInput = true
+	} else if o.isDeviceX(x) {
+		if o.xHostDirty {
+			bytes := int64(o.xHostLen) * 4
+			if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&x[0]), bytes); err != nil {
+				return fail(fmt.Errorf("cuda: mamba device x upload failed (%d bytes): %w", bytes, err))
+			}
+			o.xHostDirty = false
+			o.xDevDirty = false
+		}
+		xInput = o.xPersistDev
+		usedDeviceInput = true
+	}
+
+	if err := o.ensureDeviceVecs(func() int {
+		if usedDeviceInput {
+			return 0
+		}
+		return int(xBytes)
+	}(), int(outBytes)); err != nil {
+		return fail(fmt.Errorf("cuda: mamba device vec alloc failed: %w", err))
+	}
+	if !usedDeviceInput {
+		if err := o.ensureHostVecs(int(xBytes), int(outBytes)); err != nil {
+			return fail(fmt.Errorf("cuda: mamba host vec alloc failed: %w", err))
+		}
+		copy(unsafe.Slice((*float32)(o.xHost.Ptr()), embd), x[:embd])
+		if err := native.MemcpyH2DAsync(o.xDev, o.xHost.Ptr(), xBytes, o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: mamba x upload failed (%d bytes): %w", xBytes, err))
+		}
+		xInput = o.xDev
+	} else if err := o.ensureHostVecs(0, int(outBytes)); err != nil {
+		return fail(fmt.Errorf("cuda: mamba host output alloc failed: %w", err))
+	}
+
+	offProj := 0
+	offY := dInProj * 4
+	total := (dInProj + inner) * 4
+	scaleIn := cfg.SSMInMultiplier != 1 && cfg.SSMInMultiplier != 0
+	offXScl := 0
+	if scaleIn {
+		offXScl = total
+		total += embd * 4
+	}
+	base, err := o.ensureMambaScratch(total)
+	if err != nil {
+		return fail(fmt.Errorf("cuda: mamba scratch alloc failed: %w", err))
+	}
+	projDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offProj))
+	yMambaDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offY))
+	zDev := native.DeviceBufferFromRaw(projDev.Ptr())
+	convDev := native.DeviceBufferFromRaw(unsafe.Add(projDev.Ptr(), inner*4))
+	dtDev := native.DeviceBufferFromRaw(unsafe.Add(projDev.Ptr(), (inner+convChannels)*4))
+
+	if scaleIn {
+		xScaledDev := native.DeviceBufferFromRaw(unsafe.Add(base.Ptr(), offXScl))
+		if err := native.MemcpyD2DAsync(xScaledDev, xInput, xBytes, o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: mamba x scale copy failed (%d bytes): %w", xBytes, err))
+		}
+		if err := native.ScaleF32InPlace(xScaledDev, embd, cfg.SSMInMultiplier, o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: mamba x scale failed (n=%d): %w", embd, err))
+		}
+		xInput = xScaledDev
+	}
+
+	if err := o.matVecToDeviceBuffer(ml.InProj, xInput, embd, projDev); err != nil {
+		return fail(fmt.Errorf("cuda: mamba in-proj failed: %w", err))
+	}
+	if err := native.MambaDepthwiseConv(convDev, convKernelDev, convBiasDev, convState.buf, convDev, convChannels, convKernelLen, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: mamba depthwise conv failed (channels=%d, klen=%d): %w", convChannels, convKernelLen, err))
+	}
+	if err := native.SiluF32InPlace(convDev, convChannels, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: mamba conv silu failed (n=%d): %w", convChannels, err))
+	}
+
+	xSplit := native.DeviceBufferFromRaw(convDev.Ptr())
+	bSplit := native.DeviceBufferFromRaw(unsafe.Add(convDev.Ptr(), inner*4))
+	cSplit := native.DeviceBufferFromRaw(unsafe.Add(convDev.Ptr(), (inner+groups*dState)*4))
+
+	if err := native.MambaDtSoftplusClampF32(dtDev, dtBiasDev, headCount, cfg.TimeStepMin, cfg.TimeStepMax, cfg.TimeStepFloor, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: mamba dt preprocess failed (n=%d): %w", headCount, err))
+	}
+	if err := native.MambaSSMScan(xSplit, dtDev, bSplit, cSplit, aLogDev, dDev, ssmState.buf, yMambaDev, headCount, headDim, dState, groupSize, o.stream); err != nil {
+		return fail(fmt.Errorf("cuda: mamba ssm scan failed: %w", err))
+	}
+	if cfg.MambaRMSNorm && ml.Norm != nil {
+		if err := native.RMSNormGatedF32(yMambaDev, yMambaDev, zDev, normDev, inner, cfg.RMSEpsilon, cfg.MambaNormBeforeGate, o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: mamba rmsnorm gated failed (n=%d): %w", inner, err))
+		}
+	} else {
+		if err := native.SiluMulF32(zDev, yMambaDev, yMambaDev, inner, o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: mamba gate failed (n=%d): %w", inner, err))
+		}
+	}
+	if err := o.matVecToDeviceBuffer(ml.OutProj, yMambaDev, inner, o.yDev); err != nil {
+		return fail(fmt.Errorf("cuda: mamba out-proj failed: %w", err))
+	}
+	if cfg.SSMOutMultiplier != 1 && cfg.SSMOutMultiplier != 0 {
+		if err := native.ScaleF32InPlace(o.yDev, outRows, cfg.SSMOutMultiplier, o.stream); err != nil {
+			return fail(fmt.Errorf("cuda: mamba output scale failed (n=%d): %w", outRows, err))
+		}
+	}
+
+	o.setLastResult(o.yDev, out, outRows)
+	runtime.KeepAlive(ml)
+	runtime.KeepAlive(x)
+	runtime.KeepAlive(out)
+	return true
 }
 
 func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *model.Mat, x []float32) bool {
