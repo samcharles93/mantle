@@ -37,10 +37,11 @@ import (
 )
 
 // MoERouterF32 runs the fused router pipeline:
-//   raw[i]      = sigmoid(raw[i])           (in-place, returned via raw)
-//   sel[i]      = raw[i] + bias[i]          (bias zero-padded to numExperts)
-//   idxOut[0:k] = argmax^k over sel with lower-index tiebreak
-//   wOut[j]     = (raw[idx[j]] / sum_j raw[idx[j]]) * routeScale
+//
+//	raw[i]      = sigmoid(raw[i])           (in-place, returned via raw)
+//	sel[i]      = raw[i] + bias[i]          (bias zero-padded to numExperts)
+//	idxOut[0:k] = argmax^k over sel with lower-index tiebreak
+//	wOut[j]     = (raw[idx[j]] / sum_j raw[idx[j]]) * routeScale
 //
 // raw must hold numExperts contiguous f32; bias may be empty (biasLen==0) or len numExperts.
 // idxOut must be a device int32 buffer of length k; weightsOut a device f32 buffer of length k.
