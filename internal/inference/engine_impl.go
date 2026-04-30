@@ -95,6 +95,25 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 			}
 		}
 	}
+	// When the text-based prefix match succeeds but the re-encoded prefix
+	// tokens differ from ContextTokens (BPE artifact from generated text
+	// embedded alongside control tokens in the template), fall back to full
+	// re-encode to avoid triggering Model.Reset() in RunWithContext.
+	if ids != nil && len(ids) >= len(e.generator.ContextTokens) {
+		fullIDs, fullErr := safeEncode(e.tokenizer, prompt)
+		if fullErr == nil && len(fullIDs) >= len(e.generator.ContextTokens) {
+			match := true
+			for i, id := range e.generator.ContextTokens {
+				if i >= len(fullIDs) || fullIDs[i] != id {
+					match = false
+					break
+				}
+			}
+			if !match {
+				ids = fullIDs
+			}
+		}
+	}
 	if ids == nil {
 		ids, err = safeEncode(e.tokenizer, prompt)
 		if err != nil {

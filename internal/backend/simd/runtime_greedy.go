@@ -33,6 +33,9 @@ func (m *Instance) ForwardTokenGreedy(tok int) (int, error) {
 		if gh, ok := ops.(greedyHeadOps); ok && gh.DeviceMatVecNoCopy(m.Output, m.Scratch.Tmp) {
 			if next, ok := gh.DeviceArgMaxLastResult(); ok {
 				m.Pos++
+				if skipper, ok := ds.(interface{ SetGreedyEndTokenSkipD2H() }); ok {
+					skipper.SetGreedyEndTokenSkipD2H()
+				}
 				return next, nil
 			}
 		}

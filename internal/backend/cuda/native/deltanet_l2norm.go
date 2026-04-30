@@ -24,6 +24,7 @@ static int mantleCudaDeltaNetL2NormF32Wrapper(
 }
 */
 import "C"
+
 import (
 	"fmt"
 )

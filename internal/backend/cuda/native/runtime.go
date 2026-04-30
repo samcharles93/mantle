@@ -34,6 +34,13 @@ extern cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device);
 extern cudaError_t cudaMemAdvise(const void* devPtr, unsigned long long count, int advice, int device);
 extern cudaError_t cudaMemPrefetchAsync(const void* devPtr, unsigned long long count, int dstDevice, cudaStream_t stream);
 
+typedef void* cudaEvent_t;
+extern cudaError_t cudaEventCreate(cudaEvent_t* event);
+extern cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream);
+extern cudaError_t cudaEventSynchronize(cudaEvent_t event);
+extern cudaError_t cudaEventDestroy(cudaEvent_t event);
+extern cudaError_t cudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end);
+
 #define MANTLE_CUDA_MEMCPY_HOST_TO_DEVICE 1
 #define MANTLE_CUDA_MEMCPY_DEVICE_TO_HOST 2
 #define MANTLE_CUDA_MEMCPY_DEVICE_TO_DEVICE 3
@@ -220,6 +227,27 @@ static int mantleCudaMemPrefetchAsync(const void* devPtr, unsigned long long cou
 	return (int)cudaMemPrefetchAsync(devPtr, count, dstDevice, stream);
 }
 
+static int mantleCudaEventCreate(cudaEvent_t* event) {
+	cudaError_t err = cudaEventCreate(event);
+	return (int)err;
+}
+static int mantleCudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
+	cudaError_t err = cudaEventRecord(event, stream);
+	return (int)err;
+}
+static int mantleCudaEventSynchronize(cudaEvent_t event) {
+	cudaError_t err = cudaEventSynchronize(event);
+	return (int)err;
+}
+static int mantleCudaEventDestroy(cudaEvent_t event) {
+	cudaError_t err = cudaEventDestroy(event);
+	return (int)err;
+}
+static int mantleCudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end) {
+	cudaError_t err = cudaEventElapsedTime(ms, start, end);
+	return (int)err;
+}
+
 static int mantleCublasCreate(cublasHandle_t* out) {
 	cublasStatus_t st = cublasCreate_v2(out);
 	return (int)st;
@@ -335,6 +363,57 @@ import (
 
 type Stream struct {
 	ptr C.cudaStream_t
+}
+
+type Event struct {
+	ptr C.cudaEvent_t
+}
+
+func NewEvent() (Event, error) {
+	var event C.cudaEvent_t
+	if err := cudaErr(C.mantleCudaEventCreate(&event)); err != nil {
+		return Event{}, err
+	}
+	return Event{ptr: event}, nil
+}
+
+func (e Event) Record(stream Stream) error {
+	if e.ptr == nil {
+		return fmt.Errorf("nil cuda event")
+	}
+	return cudaErr(C.mantleCudaEventRecord(e.ptr, stream.ptr))
+}
+
+func (e Event) Synchronize() error {
+	if e.ptr == nil {
+		return nil
+	}
+	return cudaErr(C.mantleCudaEventSynchronize(e.ptr))
+}
+
+func (e Event) Destroy() error {
+	if e.ptr == nil {
+		return nil
+	}
+	return cudaErr(C.mantleCudaEventDestroy(e.ptr))
+}
+
+func (e Event) Ptr() C.cudaEvent_t {
+	return e.ptr
+}
+
+// ElapsedTime returns the elapsed time in milliseconds between two events.
+// Both events must have been recorded on the same stream and end must have
+// completed (via Synchronize or stream sync) before calling.
+func ElapsedTime(start, end Event) (float32, error) {
+	if start.ptr == nil || end.ptr == nil {
+		return 0, fmt.Errorf("nil cuda event in elapsed time")
+	}
+	var ms C.float
+	if err := cudaErr(C.mantleCudaEventElapsedTime(&ms, start.ptr, end.ptr)); err != nil {
+		return 0, err
+	}
+	return float32(ms), nil
 }
 
 type Graph struct {

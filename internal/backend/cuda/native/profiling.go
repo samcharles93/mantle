@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // PerfCounters holds CUDA backend performance statistics.
@@ -26,31 +27,51 @@ type PerfCounters struct {
 	ManagedBytes           int64
 	DeviceAllocs           int64
 	DeviceBytes            int64
+
+	// D2H attribution counters.
+	AttribFlushLastResultCalls int64
+	AttribFlushLastResultUS    int64
+	AttribEndTokenCalls        int64
+	AttribEndTokenUS           int64
+	AttribSyncHostStateCalls   int64
+	AttribSyncHostStateUS      int64
+	AttribSyncDeviceSliceCalls int64
+	AttribSyncDeviceSliceUS    int64
 }
 
-var globalPerfCounters PerfCounters
-var perfEnabledOnce sync.Once
-var perfEnabledCached bool
+var (
+	globalPerfCounters PerfCounters
+	perfEnabledOnce    sync.Once
+	perfEnabledCached  bool
+)
 
 // GetPerfCounters returns a copy of current counters.
 func GetPerfCounters() PerfCounters {
 	return PerfCounters{
-		MatVecCalls:            globalPerfCounters.MatVecCalls,
-		MatVecCPUFallbackCalls: globalPerfCounters.MatVecCPUFallbackCalls,
-		RMSNormCalls:           globalPerfCounters.RMSNormCalls,
-		StoreKVCalls:           globalPerfCounters.StoreKVCalls,
-		StreamSyncs:            globalPerfCounters.StreamSyncs,
-		GraphCaptures:          globalPerfCounters.GraphCaptures,
-		GraphLaunches:          globalPerfCounters.GraphLaunches,
-		GraphFailures:          globalPerfCounters.GraphFailures,
-		FlushIfPendingCalls:    globalPerfCounters.FlushIfPendingCalls,
-		PrefetchCalls:          globalPerfCounters.PrefetchCalls,
-		H2DBytes:               globalPerfCounters.H2DBytes,
-		D2HBytes:               globalPerfCounters.D2HBytes,
-		ManagedAllocs:          globalPerfCounters.ManagedAllocs,
-		ManagedBytes:           globalPerfCounters.ManagedBytes,
-		DeviceAllocs:           globalPerfCounters.DeviceAllocs,
-		DeviceBytes:            globalPerfCounters.DeviceBytes,
+		MatVecCalls:                globalPerfCounters.MatVecCalls,
+		MatVecCPUFallbackCalls:     globalPerfCounters.MatVecCPUFallbackCalls,
+		RMSNormCalls:               globalPerfCounters.RMSNormCalls,
+		StoreKVCalls:               globalPerfCounters.StoreKVCalls,
+		StreamSyncs:                globalPerfCounters.StreamSyncs,
+		GraphCaptures:              globalPerfCounters.GraphCaptures,
+		GraphLaunches:              globalPerfCounters.GraphLaunches,
+		GraphFailures:              globalPerfCounters.GraphFailures,
+		FlushIfPendingCalls:        globalPerfCounters.FlushIfPendingCalls,
+		PrefetchCalls:              globalPerfCounters.PrefetchCalls,
+		H2DBytes:                   globalPerfCounters.H2DBytes,
+		D2HBytes:                   globalPerfCounters.D2HBytes,
+		ManagedAllocs:              globalPerfCounters.ManagedAllocs,
+		ManagedBytes:               globalPerfCounters.ManagedBytes,
+		DeviceAllocs:               globalPerfCounters.DeviceAllocs,
+		DeviceBytes:                globalPerfCounters.DeviceBytes,
+		AttribFlushLastResultCalls: globalPerfCounters.AttribFlushLastResultCalls,
+		AttribFlushLastResultUS:    globalPerfCounters.AttribFlushLastResultUS,
+		AttribEndTokenCalls:        globalPerfCounters.AttribEndTokenCalls,
+		AttribEndTokenUS:           globalPerfCounters.AttribEndTokenUS,
+		AttribSyncHostStateCalls:   globalPerfCounters.AttribSyncHostStateCalls,
+		AttribSyncHostStateUS:      globalPerfCounters.AttribSyncHostStateUS,
+		AttribSyncDeviceSliceCalls: globalPerfCounters.AttribSyncDeviceSliceCalls,
+		AttribSyncDeviceSliceUS:    globalPerfCounters.AttribSyncDeviceSliceUS,
 	}
 }
 
@@ -178,3 +199,51 @@ func RecordFlushIfPending() { recordFlushIfPending() }
 
 // RecordPrefetch records a managed memory prefetch operation.
 func RecordPrefetch() { recordPrefetch() }
+
+func RecordAttribFlushLastResult() func() {
+	if !perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.AttribFlushLastResultCalls, 1)
+		return func() {}
+	}
+	atomic.AddInt64(&globalPerfCounters.AttribFlushLastResultCalls, 1)
+	start := time.Now()
+	return func() {
+		atomic.AddInt64(&globalPerfCounters.AttribFlushLastResultUS, time.Since(start).Microseconds())
+	}
+}
+
+func RecordAttribEndToken() func() {
+	if !perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.AttribEndTokenCalls, 1)
+		return func() {}
+	}
+	atomic.AddInt64(&globalPerfCounters.AttribEndTokenCalls, 1)
+	start := time.Now()
+	return func() {
+		atomic.AddInt64(&globalPerfCounters.AttribEndTokenUS, time.Since(start).Microseconds())
+	}
+}
+
+func RecordAttribSyncHostState() func() {
+	if !perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.AttribSyncHostStateCalls, 1)
+		return func() {}
+	}
+	atomic.AddInt64(&globalPerfCounters.AttribSyncHostStateCalls, 1)
+	start := time.Now()
+	return func() {
+		atomic.AddInt64(&globalPerfCounters.AttribSyncHostStateUS, time.Since(start).Microseconds())
+	}
+}
+
+func RecordAttribSyncDeviceSlice() func() {
+	if !perfEnabled() {
+		atomic.AddInt64(&globalPerfCounters.AttribSyncDeviceSliceCalls, 1)
+		return func() {}
+	}
+	atomic.AddInt64(&globalPerfCounters.AttribSyncDeviceSliceCalls, 1)
+	start := time.Now()
+	return func() {
+		atomic.AddInt64(&globalPerfCounters.AttribSyncDeviceSliceUS, time.Since(start).Microseconds())
+	}
+}

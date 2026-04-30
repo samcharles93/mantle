@@ -31,7 +31,7 @@ func renderGemma4(opts RenderOptions) (string, bool, error) {
 				b.WriteString("<tool|>")
 			}
 		}
-		b.WriteString("<turn|>\n")
+		b.WriteString("\n<turn|>\n")
 	}
 
 	for _, msg := range loopMessages {
@@ -44,7 +44,7 @@ func renderGemma4(opts RenderOptions) (string, bool, error) {
 			if err := writeGemma4ToolResponse(&b, msg); err != nil {
 				return "", false, err
 			}
-			b.WriteString("<turn|>\n")
+			b.WriteString("\n<turn|>\n")
 			continue
 		}
 
@@ -81,7 +81,7 @@ func renderGemma4(opts RenderOptions) (string, bool, error) {
 			}
 			b.WriteString("}<tool_call|>")
 		}
-		b.WriteString("<turn|>\n")
+		b.WriteString("\n<turn|>\n")
 	}
 
 	if opts.AddGenerationPrompt {
