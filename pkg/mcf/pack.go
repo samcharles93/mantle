@@ -254,7 +254,7 @@ func Pack(opts PackOptions) error {
 		isEmbedding := isEmbeddingTensor(name)
 		quantEmbed := opts.QuantEmbed != "" && opts.QuantEmbed != "none" && isEmbedding
 
-		var hasher = sha256.New()
+		hasher := sha256.New()
 		var dst io.Writer = td
 		if deduper != nil {
 			dst = io.MultiWriter(td, hasher)

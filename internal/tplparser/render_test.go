@@ -88,13 +88,13 @@ func TestRenderArchGemma4(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected renderer match")
 	}
-	if !strings.HasPrefix(out, "<bos><|turn>system\nrules<turn|>\n") {
+	if !strings.HasPrefix(out, "<bos><|turn>system\nrules\n<turn|>\n") {
 		t.Fatalf("unexpected prefix: %q", out)
 	}
-	if !strings.Contains(out, "<|turn>model\nok<|tool_call>call:lookup{{q:<escape>hi<escape>}}<tool_call|><turn|>\n") {
+	if !strings.Contains(out, "<|turn>model\nok<|tool_call>call:lookup{{q:<escape>hi<escape>}}<tool_call|>\n<turn|>\n") {
 		t.Fatalf("missing gemma4 tool call rendering: %q", out)
 	}
-	if !strings.Contains(out, "<|turn>user\n<|tool_response>response:lookup{result:<escape>done<escape>}<tool_response|><turn|>\n") {
+	if !strings.Contains(out, "<|turn>user\n<|tool_response>response:lookup{result:<escape>done<escape>}<tool_response|>\n<turn|>\n") {
 		t.Fatalf("missing gemma4 tool response rendering: %q", out)
 	}
 	if !strings.HasSuffix(out, "<|turn>model\n") {

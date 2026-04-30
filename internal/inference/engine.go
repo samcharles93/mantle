@@ -294,7 +294,8 @@ func safeSample(sampler *logits.Sampler, logitsVec []float32, toks []int, exclud
 
 func safeForwardTokenGreedy(m interface {
 	ForwardTokenGreedy(id int) (next int, err error)
-}, id int) (next int, err error) {
+}, id int,
+) (next int, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			err = fmt.Errorf("panic in ForwardTokenGreedy(%d): %v", id, rec)

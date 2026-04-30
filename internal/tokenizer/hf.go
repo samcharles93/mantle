@@ -671,7 +671,8 @@ func buildSpecialTokens(decoder []string, cfg hfTokenizerConfig, added []struct 
 	ID      int    `json:"id"`
 	Content string `json:"content"`
 	Special bool   `json:"special"`
-}) []string {
+},
+) []string {
 	seen := make(map[string]struct{})
 	add := func(tok string) {
 		if tok == "" {

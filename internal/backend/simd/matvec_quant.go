@@ -3,9 +3,8 @@ package simd
 import (
 	"errors"
 	"math"
-	"sync"
-
 	"simd/archsimd"
+	"sync"
 
 	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/pkg/mcf"
