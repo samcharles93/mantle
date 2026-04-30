@@ -20,9 +20,11 @@ type HostPerfCounters struct {
 	TopKCalls            int64
 }
 
-var hostPerfCounters HostPerfCounters
-var hostPerfEnabledOnce sync.Once
-var hostPerfEnabledCached bool
+var (
+	hostPerfCounters      HostPerfCounters
+	hostPerfEnabledOnce   sync.Once
+	hostPerfEnabledCached bool
+)
 
 func hostPerfEnabled() bool {
 	hostPerfEnabledOnce.Do(func() {

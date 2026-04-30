@@ -252,7 +252,11 @@ func (r *cudaRuntime) SetEffectiveContextLength(ctxLen int) {
 
 func (r *cudaRuntime) Close() error {
 	var errs []error
+	var graphStats GraphCacheStats
+	var graphCacheLimit int
 	if r.ops != nil {
+		graphStats = r.ops.GetGraphCacheStats()
+		graphCacheLimit = r.ops.GraphCacheMax()
 		if e := r.ops.Close(); e != nil {
 			errs = append(errs, e)
 		}
@@ -269,13 +273,13 @@ func (r *cudaRuntime) Close() error {
 	r.model = nil
 
 	if os.Getenv("MANTLE_CUDA_TRACE") != "" {
-		r.emitPerfSummary()
+		r.emitPerfSummary(graphStats, graphCacheLimit)
 	}
 
 	return errors.Join(errs...)
 }
 
-func (r *cudaRuntime) emitPerfSummary() {
+func (r *cudaRuntime) emitPerfSummary(graphStats GraphCacheStats, graphCacheLimit int) {
 	decode := native.GetPerfCounters()
 	host := simd.GetHostPerfCounters()
 	toks := r.tokenCount.Load()
@@ -296,6 +300,20 @@ func (r *cudaRuntime) emitPerfSummary() {
 	fmt.Fprintf(os.Stderr, "D2H bytes: %d MB\n", decode.D2HBytes/1024/1024)
 	fmt.Fprintf(os.Stderr, "Device allocs: %d (%.1f MB)\n", decode.DeviceAllocs, float64(decode.DeviceBytes)/1024/1024)
 	fmt.Fprintf(os.Stderr, "Managed allocs: %d (%.1f MB)\n", decode.ManagedAllocs, float64(decode.ManagedBytes)/1024/1024)
+	if graphCacheLimit > 0 {
+		fmt.Fprintf(os.Stderr, "-- Graph Cache --\n")
+		fmt.Fprintf(os.Stderr, "Hits:      %d\n", graphStats.Hits)
+		fmt.Fprintf(os.Stderr, "Misses:    %d\n", graphStats.Misses)
+		fmt.Fprintf(os.Stderr, "Captures:  %d\n", graphStats.Captures)
+		fmt.Fprintf(os.Stderr, "Evictions: %d\n", graphStats.Evictions)
+		fmt.Fprintf(os.Stderr, "Live:      %d\n", graphStats.Entries())
+		fmt.Fprintf(os.Stderr, "Limit:     %d\n", graphCacheLimit)
+	}
+	fmt.Fprintf(os.Stderr, "-- D2H Attribution --\n")
+	fmt.Fprintf(os.Stderr, "FlushLastResult:  %d calls, %.1f ms\n", decode.AttribFlushLastResultCalls, float64(decode.AttribFlushLastResultUS)/1000)
+	fmt.Fprintf(os.Stderr, "EndToken:         %d calls, %.1f ms\n", decode.AttribEndTokenCalls, float64(decode.AttribEndTokenUS)/1000)
+	fmt.Fprintf(os.Stderr, "SyncHostState:    %d calls, %.1f ms\n", decode.AttribSyncHostStateCalls, float64(decode.AttribSyncHostStateUS)/1000)
+	fmt.Fprintf(os.Stderr, "SyncDeviceSlice:  %d calls, %.1f ms\n", decode.AttribSyncDeviceSliceCalls, float64(decode.AttribSyncDeviceSliceUS)/1000)
 	fmt.Fprintf(os.Stderr, "-- Host Counters --\n")
 	fmt.Fprintf(os.Stderr, "BF16 round calls: %d (%.1f elems/call)\n", host.BF16RoundCalls, float64(host.BF16RoundElems)/float64(max(host.BF16RoundCalls, 1)))
 	fmt.Fprintf(os.Stderr, "Weighted RMSNorm calls: %d (%.1f elems/call)\n", host.RMSNormWeightedCalls, float64(host.RMSNormWeightedElems)/float64(max(host.RMSNormWeightedCalls, 1)))

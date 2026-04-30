@@ -131,8 +131,8 @@ func horizontalSumAVX512(v archsimd.Float32x16) float32 {
 }
 
 func softmaxAccumulateAVX512(acc []float32, scores [][]float32, v []float32,
-	jStart, dim int, blockM, blockL []float32, blockQ, blockK int) {
-
+	jStart, dim int, blockM, blockL []float32, blockQ, blockK int,
+) {
 	for qi := range blockQ {
 		// Find max in this row
 		rowMax := blockM[qi]
@@ -301,8 +301,8 @@ func horizontalSumAVX2(v archsimd.Float32x8) float32 {
 }
 
 func softmaxAccumulateAVX2(acc []float32, scores [][]float32, v []float32,
-	jStart, dim int, blockM, blockL []float32, blockQ, blockK int) {
-
+	jStart, dim int, blockM, blockL []float32, blockQ, blockK int,
+) {
 	for qi := range blockQ {
 		// Find max in this row
 		rowMax := blockM[qi]

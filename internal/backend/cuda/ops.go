@@ -46,7 +46,15 @@ type Ops struct {
 	deltaNetRecurrentReady  map[*model.DeltaNetLayer]bool
 	quantGraphs             map[quantGraphKey]native.GraphExec // Cached CUDA Graph executables for quant kernels
 	ffnQuantGraphs          map[ffnQuantGraphKey]native.GraphExec
-	managedLayerBufs        map[int]managedLayerRange
+
+	// Bounded graph cache eviction (FIFO): prevents unbounded growth when
+	// device buffer reallocations produce new pointer-keyed graph entries.
+	quantGraphOrder    []quantGraphKey
+	ffnQuantGraphOrder []ffnQuantGraphKey
+	graphCacheMax      int
+	graphCacheStats    GraphCacheStats
+
+	managedLayerBufs map[int]managedLayerRange
 
 	// Dynamic KV cache bounding: effective context length for allocation (0 = use layer max)
 	effectiveContextLen int
@@ -66,13 +74,14 @@ type Ops struct {
 	aDevBytes int
 
 	// persistent device buffer for hidden‑state vector x
-	xPersistDev   native.DeviceBuffer
-	xPersistBytes int
-	xHostRef      []float32
-	xHostPtr      uintptr // &xHostRef[0] (or 0 if empty)
-	xHostLen      int
-	xHostDirty    bool
-	xDevDirty     bool
+	xPersistDev           native.DeviceBuffer
+	xPersistBytes         int
+	xHostRef              []float32
+	xHostPtr              uintptr // &xHostRef[0] (or 0 if empty)
+	xHostLen              int
+	xHostDirty            bool
+	xDevDirty             bool
+	greedySkipEndTokenD2H bool
 
 	// device-resident block output: avoids D2H + H2D round-trip through host
 	lastResultDev     native.DeviceBuffer
@@ -144,6 +153,8 @@ type Ops struct {
 
 	moeScratchDev   native.DeviceBuffer
 	moeScratchBytes int
+
+	// Async decode staging removed: rejected feature - no fields retained
 }
 
 type deviceMat struct {
@@ -233,6 +244,13 @@ type ffnQuantGraphKey struct {
 	zPtr         uintptr
 }
 
+// GraphCacheStats tracks graph cache hit/miss/capture/eviction counters.
+type GraphCacheStats struct {
+	Hits, Misses, Captures, Evictions int64
+}
+
+func (s GraphCacheStats) Entries() int64 { return s.Captures - s.Evictions }
+
 type cudaWeightMode int
 
 const (
@@ -241,7 +259,19 @@ const (
 	cudaWeightModeDequant
 )
 
+const defaultGraphCacheMax = 128
+
+func graphCacheMaxSize() int {
+	if s := os.Getenv("MANTLE_CUDA_GRAPH_CACHE_SIZE"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return defaultGraphCacheMax
+}
+
 func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
+	gm := graphCacheMaxSize()
 	return &Ops{
 		stream:                  stream,
 		blas:                    blas,
@@ -265,6 +295,7 @@ func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 		deltaNetRecurrentReady:  make(map[*model.DeltaNetLayer]bool),
 		quantGraphs:             make(map[quantGraphKey]native.GraphExec),
 		ffnQuantGraphs:          make(map[ffnQuantGraphKey]native.GraphExec),
+		graphCacheMax:           gm,
 		managedLayerBufs:        make(map[int]managedLayerRange),
 		scratchDevBufs:          make(map[uintptr]native.DeviceBuffer),
 		scratchDevBytes:         make(map[uintptr]int),
@@ -334,6 +365,8 @@ func (o *Ops) flushLastResult() error {
 		o.clearLastResult()
 		return nil
 	}
+	done := native.RecordAttribFlushLastResult()
+	defer done()
 	bytes := int64(o.lastResultLen) * 4
 	err := native.MemcpyD2H(unsafe.Pointer(&o.lastResultHostRef[0]), o.lastResultDev, bytes)
 	o.clearLastResult()
@@ -898,6 +931,7 @@ func (o *Ops) BeginToken(x []float32) {
 	o.xHostPtr = uintptr(unsafe.Pointer(&x[0]))
 	o.xHostDirty = false
 	o.xDevDirty = false
+	o.greedySkipEndTokenD2H = false
 	o.greedyResultValid = false
 	o.clearNormDeviceView()
 	// Ensure persistent device buffer
@@ -930,8 +964,10 @@ func (o *Ops) EndToken(x []float32) {
 		// Not our buffer, or no persistent buffer
 		return
 	}
-	if o.xDevDirty {
+	if o.xDevDirty && !o.greedySkipEndTokenD2H {
 		// Download device copy back to host
+		done := native.RecordAttribEndToken()
+		defer done()
 		bytes := int64(len(x)) * int64(unsafe.Sizeof(float32(0)))
 		if err := native.MemcpyD2H(unsafe.Pointer(&x[0]), o.xPersistDev, bytes); err != nil {
 			panic(fmt.Errorf("cuda: failed to download x from device (%d bytes): %w", bytes, err))
@@ -939,11 +975,21 @@ func (o *Ops) EndToken(x []float32) {
 		o.xDevDirty = false
 	}
 	// Clear reference
+	o.greedySkipEndTokenD2H = false
+	o.xDevDirty = false
 	o.xHostRef = nil
 	o.xHostPtr = 0
 	o.xHostLen = 0
 	o.xHostDirty = false
 	o.clearNormDeviceView()
+}
+
+// SetGreedyEndTokenSkipD2H signals the next EndToken should skip
+// the D2H of hidden-state x, as no subsequent host path requires it.
+func (o *Ops) SetGreedyEndTokenSkipD2H() {
+	o.mu.Lock()
+	o.greedySkipEndTokenD2H = true
+	o.mu.Unlock()
 }
 
 // HostStateDirty implements instance.DeviceStateOps.
@@ -979,6 +1025,8 @@ func (o *Ops) SyncHostState(x []float32) {
 	if !o.xDevDirty {
 		return
 	}
+	done := native.RecordAttribSyncHostState()
+	defer done()
 	bytes := int64(len(x)) * int64(unsafe.Sizeof(float32(0)))
 	if err := native.MemcpyD2H(unsafe.Pointer(&x[0]), o.xPersistDev, bytes); err != nil {
 		panic(fmt.Errorf("cuda: failed to sync x from device (%d bytes): %w", bytes, err))
@@ -1000,6 +1048,8 @@ func (o *Ops) SyncDeviceSlice(x []float32) {
 
 	// Pending block output staged for residual add.
 	if o.lastResultValid && ptr == o.lastResultHostPtr && n == o.lastResultLen {
+		done := native.RecordAttribSyncDeviceSlice()
+		defer done()
 		if err := o.flushLastResult(); err != nil {
 			o.recordFastPathErrorLocked(fmt.Errorf("cuda: sync device slice flush failed: %w", err))
 		}
@@ -1007,6 +1057,8 @@ func (o *Ops) SyncDeviceSlice(x []float32) {
 	}
 	// Persistent token state.
 	if o.xHostLen == n && ptr == o.xHostPtr && o.xDevDirty {
+		done := native.RecordAttribSyncDeviceSlice()
+		defer done()
 		bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
 		if err := native.MemcpyD2H(unsafe.Pointer(&x[0]), o.xPersistDev, bytes); err != nil {
 			panic(fmt.Errorf("cuda: failed to sync persistent device slice (%d bytes): %w", bytes, err))
@@ -1017,6 +1069,8 @@ func (o *Ops) SyncDeviceSlice(x []float32) {
 	}
 	// RMSNorm device view.
 	if o.normDevValid && o.normHostLen == n && ptr == o.normHostPtr {
+		done := native.RecordAttribSyncDeviceSlice()
+		defer done()
 		bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
 		if err := native.MemcpyD2H(unsafe.Pointer(&x[0]), o.normDev, bytes); err != nil {
 			panic(fmt.Errorf("cuda: failed to sync norm device slice (%d bytes): %w", bytes, err))
@@ -1360,12 +1414,14 @@ func (o *Ops) Close() error {
 		}
 	}
 	o.quantGraphs = nil
+	o.quantGraphOrder = nil
 	for _, exec := range o.ffnQuantGraphs {
 		if e := exec.Destroy(); e != nil && err == nil {
 			err = e
 		}
 	}
 	o.ffnQuantGraphs = nil
+	o.ffnQuantGraphOrder = nil
 
 	for _, buf := range o.convKernels {
 		if e := buf.Free(); e != nil && err == nil {
@@ -1551,6 +1607,45 @@ func (o *Ops) Close() error {
 	o.managedLayerBufs = nil
 
 	return err
+}
+
+func (o *Ops) GetGraphCacheStats() GraphCacheStats { return o.graphCacheStats }
+
+func (o *Ops) GraphCacheMax() int { return o.graphCacheMax }
+
+func (o *Ops) getGraphCacheLimit() int {
+	if o.graphCacheMax > 0 {
+		return o.graphCacheMax
+	}
+	return 0
+}
+
+func (o *Ops) evictOldestQuantGraphLocked() {
+	if len(o.quantGraphOrder) == 0 {
+		return
+	}
+	oldest := o.quantGraphOrder[0]
+	o.quantGraphOrder = o.quantGraphOrder[1:]
+	if exec, ok := o.quantGraphs[oldest]; ok {
+		_ = o.stream.Synchronize()
+		_ = exec.Destroy()
+		delete(o.quantGraphs, oldest)
+		o.graphCacheStats.Evictions++
+	}
+}
+
+func (o *Ops) evictOldestFFNGraphLocked() {
+	if len(o.ffnQuantGraphOrder) == 0 {
+		return
+	}
+	oldest := o.ffnQuantGraphOrder[0]
+	o.ffnQuantGraphOrder = o.ffnQuantGraphOrder[1:]
+	if exec, ok := o.ffnQuantGraphs[oldest]; ok {
+		_ = o.stream.Synchronize()
+		_ = exec.Destroy()
+		delete(o.ffnQuantGraphs, oldest)
+		o.graphCacheStats.Evictions++
+	}
 }
 
 func (o *Ops) MatVec(dst []float32, w *model.Mat, x []float32) {
@@ -2373,6 +2468,7 @@ func (o *Ops) runQuantKernelGraph(qw deviceQuantMat, xDev, yDev native.DeviceBuf
 	}
 
 	if exec, ok := o.quantGraphs[key]; ok {
+		o.graphCacheStats.Hits++
 		if err := exec.Launch(stream); err != nil {
 			native.RecordGraphFailure()
 			return err
@@ -2380,6 +2476,7 @@ func (o *Ops) runQuantKernelGraph(qw deviceQuantMat, xDev, yDev native.DeviceBuf
 		native.RecordGraphLaunch()
 		return nil
 	}
+	o.graphCacheStats.Misses++
 
 	if err := stream.BeginCapture(); err != nil {
 		return err
@@ -2405,6 +2502,14 @@ func (o *Ops) runQuantKernelGraph(qw deviceQuantMat, xDev, yDev native.DeviceBuf
 		return err
 	}
 	o.quantGraphs[key] = exec
+	o.quantGraphOrder = append(o.quantGraphOrder, key)
+	o.graphCacheStats.Captures++
+
+	limit := o.getGraphCacheLimit()
+	for limit > 0 && len(o.quantGraphOrder) > limit {
+		o.evictOldestQuantGraphLocked()
+	}
+
 	if err := exec.Launch(stream); err != nil {
 		native.RecordGraphFailure()
 		return err
@@ -2491,6 +2596,7 @@ func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.D
 	}
 
 	if exec, ok := o.ffnQuantGraphs[key]; ok {
+		o.graphCacheStats.Hits++
 		if err := exec.Launch(stream); err != nil {
 			native.RecordGraphFailure()
 			return err
@@ -2498,6 +2604,7 @@ func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.D
 		native.RecordGraphLaunch()
 		return nil
 	}
+	o.graphCacheStats.Misses++
 
 	if err := stream.BeginCapture(); err != nil {
 		return err
@@ -2561,6 +2668,14 @@ func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.D
 		return err
 	}
 	o.ffnQuantGraphs[key] = exec
+	o.ffnQuantGraphOrder = append(o.ffnQuantGraphOrder, key)
+	o.graphCacheStats.Captures++
+
+	limit := o.getGraphCacheLimit()
+	for limit > 0 && len(o.ffnQuantGraphOrder) > limit {
+		o.evictOldestFFNGraphLocked()
+	}
+
 	if err := exec.Launch(stream); err != nil {
 		native.RecordGraphFailure()
 		return err
