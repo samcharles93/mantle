@@ -19,7 +19,7 @@ func initReadline(prompt string) error {
 
 	home, _ := os.UserHomeDir()
 	historyFile := filepath.Join(home, ".local", "share", "mantle", "history")
-	if err := os.MkdirAll(filepath.Dir(historyFile), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(historyFile), 0o755); err != nil {
 		// Fallback to no history file
 		historyFile = ""
 	}

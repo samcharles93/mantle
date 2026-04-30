@@ -4,7 +4,6 @@ package simd
 
 import (
 	"math"
-
 	"simd/archsimd"
 )
 

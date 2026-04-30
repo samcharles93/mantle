@@ -148,7 +148,6 @@ func (s *InferenceService) CreateResponse(ctx context.Context, req *ResponsesReq
 		}
 		return nil
 	})
-
 	if err != nil {
 		returnResp.Status = "failed"
 		returnResp.Error = &ResponseError{
@@ -177,7 +176,8 @@ var timeNow = func() time.Time {
 }
 
 func toInferenceRequest(req *ResponsesRequest, msgs []tokenizer.Message, defaults inference.GenDefaults, defaultReasoningFormat string, defaultReasoningBudget int,
-	srvDefaultTemp *float64, srvDefaultTopP *float64, srvDefaultTopK *int, srvDefaultRepeat *float64, srvDefaultMaxContext *int64, srvDefaultSteps *int64, srvDefaultSeed *int64) inference.Request {
+	srvDefaultTemp *float64, srvDefaultTopP *float64, srvDefaultTopK *int, srvDefaultRepeat *float64, srvDefaultMaxContext *int64, srvDefaultSteps *int64, srvDefaultSeed *int64,
+) inference.Request {
 	var opts inference.RequestOptions
 	opts.Messages = msgs
 	opts.Tools = toolsToAny(req.Tools)

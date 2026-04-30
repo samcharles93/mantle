@@ -15,9 +15,7 @@ import (
 )
 
 func showCmd() *cli.Command {
-	var (
-		modelPath string
-	)
+	var modelPath string
 
 	return &cli.Command{
 		Name:  "show",

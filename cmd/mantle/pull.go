@@ -38,7 +38,7 @@ func pullCmd() *cli.Command {
 			// Clean up repo name for local directory
 			repoDirName := strings.ReplaceAll(repo, "/", "--")
 			tmpDir := filepath.Join(os.TempDir(), "mantle-pull", repoDirName)
-			if err := os.MkdirAll(tmpDir, 0755); err != nil {
+			if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 				return cli.Exit(fmt.Sprintf("pull: failed to create temp dir: %v", err), 1)
 			}
 			defer os.RemoveAll(tmpDir)
@@ -89,7 +89,7 @@ func pullCmd() *cli.Command {
 			}
 
 			outPath := filepath.Join(dir, repoDirName+".mcf")
-			if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 				return cli.Exit(fmt.Sprintf("pull: failed to create output dir: %v", err), 1)
 			}
 

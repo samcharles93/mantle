@@ -3,7 +3,6 @@ package simd
 import (
 	"fmt"
 	"math"
-
 	"simd/archsimd"
 
 	instance "github.com/samcharles93/mantle/internal/backend/core"

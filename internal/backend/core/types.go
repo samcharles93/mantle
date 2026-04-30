@@ -132,6 +132,7 @@ func (DefaultOps) RMSNorm(dst, src, _ []float32, _ float32)                     
 func (DefaultOps) Softmax(_ []float32)                                           {}
 func (DefaultOps) ApplyRoPE(_ []float32, _, _, _ int, _ []float64, _ float32) {
 }
+
 func (DefaultOps) StoreKV(_ int, _ int, _ int, kDst, vDst []float32, _ []uint16, _ []uint16, _ []int8, _ []int8, _ []float32, _ []float32, k, v []float32) {
 	if len(kDst) >= len(k) {
 		copy(kDst, k)

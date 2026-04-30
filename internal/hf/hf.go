@@ -40,7 +40,7 @@ func GetModelInfo(repo string) (*ModelInfo, error) {
 func DownloadFile(repo, rpath, destDir string, progress func(current, total int64)) error {
 	url := fmt.Sprintf("https://huggingface.co/%s/resolve/main/%s", repo, rpath)
 	dest := filepath.Join(destDir, rpath)
-	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
 

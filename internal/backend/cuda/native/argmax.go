@@ -24,6 +24,7 @@ static int mantleCudaArgMaxF32Wrapper(
 }
 */
 import "C"
+
 import (
 	"fmt"
 	"unsafe"

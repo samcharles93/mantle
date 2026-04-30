@@ -119,5 +119,4 @@ type DeltaNetConfig struct {
 // MoEConfig captures the runtime parameters required to execute a MoE block on
 // any backend. It is the shared contract used by the SIMD fast-path hook and
 // the CUDA backend implementation.
-type MoEConfig struct {
-}
+type MoEConfig struct{}

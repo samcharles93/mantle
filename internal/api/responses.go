@@ -265,9 +265,7 @@ func (s *Server) handleCompactResponse(c *echo.Context) error {
 		return writeBadRequest(c, "input is required")
 	}
 
-	var (
-		inputItems []ResponseItem
-	)
+	var inputItems []ResponseItem
 	if req.Input.String != nil {
 		inputItems, err = normalizeInputItems(*req.Input.String)
 	} else {
@@ -308,9 +306,7 @@ func (s *Server) handleInputTokens(c *echo.Context) error {
 	if req.Model == "" {
 		return writeBadRequest(c, "model is required")
 	}
-	var (
-		inputItems []ResponseItem
-	)
+	var inputItems []ResponseItem
 	if req.Input.String != nil {
 		inputItems, err = normalizeInputItems(*req.Input.String)
 	} else {

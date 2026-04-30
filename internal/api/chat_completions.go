@@ -258,7 +258,6 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 		})
 		return err
 	})
-
 	if err != nil {
 		// Best effort error chunk
 		_ = sendSSEChunk(res, map[string]any{"error": err.Error()})
