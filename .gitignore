@@ -24,3 +24,4 @@ profiles/*
 gha-creds-*.json
 scratchpad/
 traces/
+.sisyphus/
