@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/samcharles93/mantle/internal/hostcaps"
@@ -344,4 +345,10 @@ func (m *Instance) GetEffectiveContextLength() int {
 		return 0
 	}
 	return m.effectiveContextLen
+}
+
+// GraphCompute is a no-op default implementation for backends that don't
+// implement graph-based execution yet.
+func (m *Instance) GraphCompute(_ any, _ any) ([]float32, error) {
+	return nil, fmt.Errorf("GraphCompute not implemented for this backend")
 }

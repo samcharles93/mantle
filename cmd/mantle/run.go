@@ -332,6 +332,13 @@ func runCmd() *cli.Command {
 			Usage:       "write memory profile to file",
 			Destination: &memProfile,
 		},
+		// Experimental: graph-based execution
+		&cli.BoolFlag{
+			Name:   "use-graph",
+			Usage:  "use graph-based execution (experimental)",
+			Value:  false,
+			Hidden: true,
+		},
 	)
 
 	return &cli.Command{
@@ -444,6 +451,7 @@ func runCmd() *cli.Command {
 				Backend:             backend,
 				DisableSWA:          noSWA,
 				TilingConfig:        tilingCfg,
+				UseGraph:            c.Bool("use-graph"),
 			}
 			loader.LoadOptions.CacheTypeK = c.String("cache-type-k")
 			loader.LoadOptions.CacheTypeV = c.String("cache-type-v")

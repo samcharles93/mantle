@@ -25,6 +25,7 @@ type Loader struct {
 	Backend             string
 	DisableSWA          bool
 	LoadOptions         core.LoadModelOptions
+	UseGraph            bool
 	TilingConfig        simd.TilingConfig
 }
 
@@ -50,6 +51,8 @@ type GenDefaults struct {
 func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*LoadResult, error) {
 	log := logger.FromContext(ctx)
 	opts := l.LoadOptions
+	// propagate UseGraph toggle from Loader to LoadModelOptions
+	opts.UseGraph = l.UseGraph
 	if opts.HostCaps == nil {
 		if caps := hostcaps.FromContext(ctx); caps != nil {
 			opts.HostCaps = caps
