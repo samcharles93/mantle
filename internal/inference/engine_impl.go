@@ -7,6 +7,9 @@ import (
 	"strings"
 
 	core "github.com/samcharles93/mantle/internal/backend/core"
+	"github.com/samcharles93/mantle/internal/backend/simd"
+	"github.com/samcharles93/mantle/internal/graph"
+	"github.com/samcharles93/mantle/internal/graph/archs"
 	"github.com/samcharles93/mantle/internal/logits"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/internal/tokenizer"
@@ -21,6 +24,8 @@ type EngineImpl struct {
 	chatTemplatePath string
 	stopTokens       []int
 	mcfFile          *mcfstore.File
+
+	useGraph bool // experimental: use graph-based execution
 
 	generator   *Generator
 	lastPrompt  string
@@ -145,6 +150,9 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 			StopTokens:    append([]int(nil), e.stopTokens...),
 			ContextTokens: make([]int, 0, len(ids)),
 		}
+		if e.useGraph {
+			e.setupGraphExecution(e.generator)
+		}
 	} else {
 		e.generator.Sampler = sampler
 	}
@@ -230,4 +238,39 @@ func (e *EngineImpl) renderPrompt(req *Request) (string, error) {
 		AddGenerationPrompt: true,
 		NoTemplate:          req.NoTemplate,
 	})
+}
+
+// setupGraphExecution builds the computation graph for the current model and
+// wires it to the generator. It requires the SIMD backend (the only backend
+// that currently supports graph-based execution).
+func (e *EngineImpl) setupGraphExecution(gen *Generator) {
+	simdInst, ok := e.model.(*simd.Instance)
+	if !ok {
+		return
+	}
+	coreInst := (*core.Instance)(simdInst)
+	cfg := &coreInst.Config.Config
+
+	var g *graph.Graph
+	var err error
+	switch e.arch {
+	case "llama":
+		g, err = (&archs.LlamaBuilder{}).BuildGraph(cfg, coreInst)
+	case "qwen2", "qwen3":
+		g, err = (&archs.Qwen3Builder{}).BuildGraph(cfg, coreInst)
+	case "mistral":
+		g, err = (&archs.MistralBuilder{}).BuildGraph(cfg, coreInst)
+	case "mamba":
+		g, err = (&archs.MambaBuilder{}).BuildGraph(cfg, coreInst)
+	case "deltanet":
+		g, err = (&archs.DeltaNetBuilder{}).BuildGraph(cfg, coreInst)
+	default:
+		return
+	}
+	if err != nil || g == nil {
+		return
+	}
+	gen.useGraph = true
+	gen.engineGraph = g
+	gen.gr = simdInst
 }

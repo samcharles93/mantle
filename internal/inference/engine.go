@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/samcharles93/mantle/internal/backend/core"
+	"github.com/samcharles93/mantle/internal/graph"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/logits"
 )
@@ -28,6 +29,12 @@ type prefillForwarder interface {
 	PrefillTokens(tokens []int) ([]float32, error)
 }
 
+// graphRunner is the subset of the SIMD Instance needed for graph-based token
+// processing. Backends that support graph execution implement this interface.
+type graphRunner interface {
+	Compute(ctx *graph.ComputeContext, g *graph.Graph) ([]float32, error)
+}
+
 // Generator manages the state of a generation session
 type Generator struct {
 	Model     core.Model
@@ -37,6 +44,11 @@ type Generator struct {
 	}
 	ContextTokens []int
 	StopTokens    []int
+
+	// Graph-based execution path (experimental, activated via --use-graph).
+	useGraph    bool
+	engineGraph *graph.Graph
+	gr          graphRunner // non-nil when useGraph is true
 
 	tokenCache    []string
 	tokenCacheOK  []bool
@@ -89,6 +101,30 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 	var logitsVec []float32
 	var err error
 	promptStart := time.Now()
+
+	// Graph path: per-token processing through the graph (no batch prefill).
+	if g.useGraph {
+		pos := len(g.ContextTokens)
+		for _, id := range newInTokens {
+			computeCtx := &graph.ComputeContext{
+				Token: id,
+				Pos:   pos,
+				KVLen: pos,
+			}
+			logitsVec, err = g.gr.Compute(computeCtx, g.engineGraph)
+			if err != nil {
+				return nil, stats, err
+			}
+			pos++
+		}
+		g.ContextTokens = append(g.ContextTokens, newInTokens...)
+		stats.PromptTokens = len(newInTokens)
+		stats.PromptDuration = time.Since(promptStart)
+		if stats.PromptDuration.Seconds() > 0 && stats.PromptTokens > 0 {
+			stats.PromptTPS = float64(stats.PromptTokens) / stats.PromptDuration.Seconds()
+		}
+		goto afterPrompt
+	}
 
 	// Use batched ForwardTokens for prompt prefill (uses GEMM with tiling)
 	// This is much faster than token-by-token for longer prompts
@@ -228,7 +264,24 @@ afterPrompt:
 			}
 		}
 
-		if canDeviceGreedy {
+		if g.useGraph {
+			// Graph path: Compute → sample; no device-greedy shortcut.
+			computeCtx := &graph.ComputeContext{
+				Token: next,
+				Pos:   len(g.ContextTokens) - 1,
+				KVLen: len(g.ContextTokens) - 1,
+			}
+			logitsVec, err = g.gr.Compute(computeCtx, g.engineGraph)
+			if err != nil {
+				flush()
+				return g.ContextTokens, stats, err
+			}
+			next, sampleErr = safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
+			if sampleErr != nil {
+				flush()
+				return g.ContextTokens, stats, sampleErr
+			}
+		} else if canDeviceGreedy {
 			next, err = safeForwardTokenGreedy(gs, next)
 			if err != nil {
 				flush()

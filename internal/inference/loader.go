@@ -190,6 +190,7 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 		chatTemplatePath: l.ChatTemplatePath,
 		stopTokens:       stopTokens,
 		mcfFile:          mcfFile,
+		useGraph:         l.UseGraph,
 	}
 
 	return &LoadResult{
