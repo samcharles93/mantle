@@ -1726,9 +1726,16 @@ func needsOneCenteredRMSNorm(cfg *model.HFConfig) bool {
 	for _, raw := range modelTags {
 		tag := strings.ToLower(strings.TrimSpace(raw))
 		switch {
-		case strings.Contains(tag, "gemma4"), strings.Contains(tag, "gemma3n"), strings.Contains(tag, "qwen3_5"):
+		case strings.Contains(tag, "gemma4"), strings.Contains(tag, "gemma3n"):
 			return false
 		case tag == "gemma", strings.Contains(tag, "gemma2"), strings.Contains(tag, "gemma3"):
+			oneCentered = true
+		case strings.Contains(tag, "qwen3_5"):
+			// Qwen3.5 uses Qwen3_5RMSNorm (upstream kernel "RMSNormZeroCentered"):
+			// weight is initialised to zero and the forward pass applies
+			// output * (1 + weight). The gated DeltaNet norm
+			// (Qwen3_5RMSNormGated) is plain and is not part of
+			// adjustGemmaNorms, so it is deliberately left untouched.
 			oneCentered = true
 		}
 	}
