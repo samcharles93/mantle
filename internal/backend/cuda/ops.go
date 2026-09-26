@@ -2242,7 +2242,6 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	intermF16Bytes := int64(interm) * 2
 	outBytes := int64(downW.rows) * 4
 
-	xInput := o.xDev
 	xInputType := upW.dtype
 	devInput, usedDeviceInput, err := o.deviceInputForVector(x[:], upW.dtype, len(x))
 	if err != nil {
@@ -2250,7 +2249,6 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 		return false
 	}
 	if usedDeviceInput {
-		xInput = devInput.buf
 		xInputType = devInput.dtype
 	}
 	hostXBytes := int(xBytes)
@@ -2271,7 +2269,12 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 		return false
 	}
 
-	if !usedDeviceInput {
+	// Capture xDev only after ensureDeviceVecs has run: o.xDev may be
+	// unallocated until the first ensure call resizes it.
+	xInput := o.xDev
+	if usedDeviceInput {
+		xInput = devInput.buf
+	} else {
 		if err := fillXBuffer(o.xHost, upW.dtype, x[:]); err != nil {
 			return false
 		}
