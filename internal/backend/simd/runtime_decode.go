@@ -317,7 +317,7 @@ func (d layerStateDebugger) logPostNormTmp(rt *tokenRuntimeState, layerIdx int, 
 }
 
 func (d layerStateDebugger) logAttentionOut(rt *tokenRuntimeState, layerIdx int, opOut []float32) error {
-	if !d.enabled || (layerIdx != 0 && layerIdx != 3) {
+	if !d.enabled || layerIdx != 0 {
 		return nil
 	}
 	if rt.bf != nil {
