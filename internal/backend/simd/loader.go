@@ -868,9 +868,6 @@ func loadAttentionQAndGate(src tensorSource, cfg *model.HFConfig, qName string, 
 				headCount := qDim / headDim
 				return loadInterleavedHeadBlocksFromPayload(qName, payload, headDim, headCount, hidden)
 			}
-			// Non-quantized fused Q+Gate: use interleaved head block splitting.
-			headCount := qDim / headDim
-			return loadInterleavedHeadBlocksFromPayload(qName, payload, headDim, headCount, hidden)
 		}
 	}
 	wq, err := loadMat(src, qName)
@@ -1550,6 +1547,7 @@ func initInstanceScratch(m *Instance) {
 		ScBx:          make([]float32, embd),
 		ScConv:        make([]float32, embd),
 		DeltaQKV:      make([]float32, max(deltaQKV, 1)),
+		DeltaConv:     make([]float32, max(deltaQKV, 1)),
 		DeltaA:        make([]float32, max(deltaHeads, 1)),
 		DeltaB:        make([]float32, max(deltaHeads, 1)),
 		DeltaZ:        make([]float32, max(deltaValue, 1)),

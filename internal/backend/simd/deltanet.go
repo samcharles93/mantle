@@ -39,21 +39,21 @@ func DeltaNet(m *Instance, layer *Layer, x []float32) []float32 {
 	ops.MatVec(m.Scratch.DeltaZ[:dl.ValueDim], dl.ZProj, x)
 
 	mambaDepthwiseConv(
-		m.Scratch.DeltaQKV[:dl.Conv.R],
+		m.Scratch.DeltaConv[:dl.Conv.R],
 		m.Scratch.DeltaQKV[:dl.Conv.R],
 		dl.Conv,
 		nil,
 		dl.ConvState,
 	)
 	for i := 0; i < dl.Conv.R; i++ {
-		m.Scratch.DeltaQKV[i] = Silu(m.Scratch.DeltaQKV[i])
+		m.Scratch.DeltaConv[i] = Silu(m.Scratch.DeltaConv[i])
 	}
 
 	deltaNetSplitQKV(
 		m.Scratch.DeltaQ[:dl.KeyDim],
 		m.Scratch.DeltaK[:dl.KeyDim],
 		m.Scratch.DeltaV[:dl.ValueDim],
-		m.Scratch.DeltaQKV[:dl.Conv.R],
+		m.Scratch.DeltaConv[:dl.Conv.R],
 		dl.NumKeyHeads,
 		dl.NumValueHeads,
 		dl.HeadKeyDim,

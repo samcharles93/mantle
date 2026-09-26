@@ -240,6 +240,7 @@ type ScratchBuffers struct {
 	ScBx          []float32
 	ScConv        []float32
 	DeltaQKV      []float32
+	DeltaConv     []float32
 	DeltaA        []float32
 	DeltaB        []float32
 	DeltaZ        []float32
