@@ -25,10 +25,7 @@ func NewResponseStore() *ResponseStore {
 }
 
 func (s *ResponseStore) Save(resp ResponsesResponse, inputItems []ResponseItem) {
-	visible := true
-	if resp.Store != nil && !*resp.Store {
-		visible = false
-	}
+	visible := resp.Store == nil || *resp.Store
 	s.mu.Lock()
 	s.responses[resp.ID] = &responseRecord{
 		Response:   resp,

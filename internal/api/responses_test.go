@@ -417,7 +417,7 @@ func TestResponsesStreamingPreservesStructuredChunkOrder(t *testing.T) {
 	if idxTextA < 0 || idxReasoning < 0 || idxReasoningDelta < 0 || idxTextB < 0 {
 		t.Fatalf("expected structured deltas in body: %s", body)
 	}
-	if !(idxTextA < idxReasoning && idxReasoningDelta < idxTextB) {
+	if idxTextA >= idxReasoning || idxReasoningDelta >= idxTextB {
 		t.Fatalf("delta order mismatch in body: %s", body)
 	}
 	if !strings.Contains(body, `"type":"response.output_reasoning.done"`) {

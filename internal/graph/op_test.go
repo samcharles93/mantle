@@ -52,8 +52,11 @@ func TestDTypeString(t *testing.T) {
 		d    DType
 		want string
 	}{
-		{DTypeF32, "F32"}, {DTypeF16, "F16"}, {DTypeBF16, "BF16"},
-		{DTypeQ8, "Q8"}, {DTypeK4, "K4"},
+		{DTypeF32, "F32"},
+		{DTypeF16, "F16"},
+		{DTypeBF16, "BF16"},
+		{DTypeQ8, "Q8"},
+		{DTypeK4, "K4"},
 	}
 	for _, tt := range tests {
 		if got := tt.d.String(); got != tt.want {
@@ -67,8 +70,11 @@ func TestTensorRoleString(t *testing.T) {
 		r    TensorRole
 		want string
 	}{
-		{RoleInput, "Input"}, {RoleWeight, "Weight"}, {RoleKVState, "KVState"},
-		{RoleActivation, "Activation"}, {RoleOutput, "Output"},
+		{RoleInput, "Input"},
+		{RoleWeight, "Weight"},
+		{RoleKVState, "KVState"},
+		{RoleActivation, "Activation"},
+		{RoleOutput, "Output"},
 	}
 	for _, tt := range tests {
 		if got := tt.r.String(); got != tt.want {

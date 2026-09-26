@@ -701,6 +701,8 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 	}
 
 	switch {
+	case hasArch("dspark"):
+		return nil, fmt.Errorf("DSpark draft models require a speculative runtime")
 	case hasArch("falcon_h1"):
 		return falconH1Spec(), nil
 	case hasArch("lfm"):

@@ -693,21 +693,21 @@ func dotInt8Float32SIMD(q []int8, x []float32, n int) float32 {
 	var acc archsimd.Float32x8
 	i := 0
 	for ; i+16 <= n; i += 16 {
-		vq := archsimd.LoadInt8x16Slice(q[i:])
+		vq := archsimd.LoadInt8x16(q[i:])
 		v16 := vq.ExtendToInt16()
 
 		lo := v16.GetLo().ExtendToInt32().ConvertToFloat32()
 		hi := v16.GetHi().ExtendToInt32().ConvertToFloat32()
 
-		vxLo := archsimd.LoadFloat32x8Slice(x[i:])
-		vxHi := archsimd.LoadFloat32x8Slice(x[i+8:])
+		vxLo := archsimd.LoadFloat32x8(x[i:])
+		vxHi := archsimd.LoadFloat32x8(x[i+8:])
 
 		acc = lo.MulAdd(vxLo, acc)
 		acc = hi.MulAdd(vxHi, acc)
 	}
 
 	var tmp [8]float32
-	acc.Store(&tmp)
+	acc.StoreArray(&tmp)
 	sum := tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 
 	for ; i < n; i++ {
@@ -728,14 +728,14 @@ func dotInt8Int16SIMD(q []int8, x []int16, n int) int32 {
 	var acc archsimd.Int32x8
 	i := 0
 	for ; i+16 <= n; i += 16 {
-		vq := archsimd.LoadInt8x16Slice(q[i:])
+		vq := archsimd.LoadInt8x16(q[i:])
 		iq := vq.ExtendToInt16()
-		ix := archsimd.LoadInt16x16Slice(x[i:])
+		ix := archsimd.LoadInt16x16(x[i:])
 		acc = acc.Add(iq.DotProductPairs(ix))
 	}
 
 	var tmp [8]int32
-	acc.Store(&tmp)
+	acc.StoreArray(&tmp)
 	sum := tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 	for ; i < n; i++ {
 		sum += int32(q[i]) * int32(x[i])

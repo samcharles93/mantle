@@ -75,6 +75,7 @@ func TestGraphCaptureStub(t *testing.T) {
 	for i := range outputNorm {
 		outputNorm[i] = 1.0
 	}
+	attention := core.NewMat(embDim, embDim)
 
 	layers := []instance.Layer{
 		{
@@ -84,10 +85,10 @@ func TestGraphCaptureStub(t *testing.T) {
 			FfnNorm:     make([]float32, embDim),
 			PostFfnNorm: make([]float32, embDim),
 			AttnNorm:    make([]float32, embDim),
-			Wq:          &core.Mat{},
-			Wk:          &core.Mat{},
-			Wv:          &core.Mat{},
-			Wo:          &core.Mat{},
+			Wq:          &attention,
+			Wk:          &attention,
+			Wv:          &attention,
+			Wo:          &attention,
 		},
 	}
 

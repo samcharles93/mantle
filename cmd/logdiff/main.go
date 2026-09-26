@@ -499,7 +499,7 @@ func joinInts(ids []int) string {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		b.WriteString(fmt.Sprintf("%d", id))
+		fmt.Fprintf(&b, "%d", id)
 	}
 	b.WriteByte(']')
 	return b.String()

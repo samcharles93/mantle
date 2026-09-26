@@ -1,6 +1,6 @@
 module github.com/samcharles93/mantle
 
-go 1.26
+go 1.27
 
 require github.com/urfave/cli/v3 v3.6.2
 

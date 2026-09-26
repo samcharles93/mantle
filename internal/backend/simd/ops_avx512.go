@@ -12,10 +12,10 @@ func addAVX512(dst, src []float32) {
 	n := len(dst)
 	i := 0
 	for ; i+16 <= n; i += 16 {
-		vd := archsimd.LoadFloat32x16Slice(dst[i:])
-		vs := archsimd.LoadFloat32x16Slice(src[i:])
+		vd := archsimd.LoadFloat32x16(dst[i:])
+		vs := archsimd.LoadFloat32x16(src[i:])
 		vd = vd.Add(vs)
-		vd.StoreSlice(dst[i:])
+		vd.Store(dst[i:])
 	}
 	for ; i < n; i++ {
 		dst[i] += src[i]
@@ -34,44 +34,44 @@ func dotAVX512(a, b []float32) float32 {
 
 	i := 0
 	for ; i+64 <= n; i += 64 {
-		va0 := archsimd.LoadFloat32x16Slice(a[i:])
-		vb0 := archsimd.LoadFloat32x16Slice(b[i:])
+		va0 := archsimd.LoadFloat32x16(a[i:])
+		vb0 := archsimd.LoadFloat32x16(b[i:])
 		acc0 = va0.MulAdd(vb0, acc0)
 
-		va1 := archsimd.LoadFloat32x16Slice(a[i+16:])
-		vb1 := archsimd.LoadFloat32x16Slice(b[i+16:])
+		va1 := archsimd.LoadFloat32x16(a[i+16:])
+		vb1 := archsimd.LoadFloat32x16(b[i+16:])
 		acc1 = va1.MulAdd(vb1, acc1)
 
-		va2 := archsimd.LoadFloat32x16Slice(a[i+32:])
-		vb2 := archsimd.LoadFloat32x16Slice(b[i+32:])
+		va2 := archsimd.LoadFloat32x16(a[i+32:])
+		vb2 := archsimd.LoadFloat32x16(b[i+32:])
 		acc2 = va2.MulAdd(vb2, acc2)
 
-		va3 := archsimd.LoadFloat32x16Slice(a[i+48:])
-		vb3 := archsimd.LoadFloat32x16Slice(b[i+48:])
+		va3 := archsimd.LoadFloat32x16(a[i+48:])
+		vb3 := archsimd.LoadFloat32x16(b[i+48:])
 		acc3 = va3.MulAdd(vb3, acc3)
 	}
 
 	for ; i+32 <= n; i += 32 {
-		va0 := archsimd.LoadFloat32x16Slice(a[i:])
-		vb0 := archsimd.LoadFloat32x16Slice(b[i:])
+		va0 := archsimd.LoadFloat32x16(a[i:])
+		vb0 := archsimd.LoadFloat32x16(b[i:])
 		acc0 = va0.MulAdd(vb0, acc0)
 
-		va1 := archsimd.LoadFloat32x16Slice(a[i+16:])
-		vb1 := archsimd.LoadFloat32x16Slice(b[i+16:])
+		va1 := archsimd.LoadFloat32x16(a[i+16:])
+		vb1 := archsimd.LoadFloat32x16(b[i+16:])
 		acc1 = va1.MulAdd(vb1, acc1)
 	}
 
 	for ; i+16 <= n; i += 16 {
-		va := archsimd.LoadFloat32x16Slice(a[i:])
-		vb := archsimd.LoadFloat32x16Slice(b[i:])
+		va := archsimd.LoadFloat32x16(a[i:])
+		vb := archsimd.LoadFloat32x16(b[i:])
 		acc0 = va.MulAdd(vb, acc0)
 	}
 
 	var tmp0, tmp1, tmp2, tmp3 [16]float32
-	acc0.Store(&tmp0)
-	acc1.Store(&tmp1)
-	acc2.Store(&tmp2)
-	acc3.Store(&tmp3)
+	acc0.StoreArray(&tmp0)
+	acc1.StoreArray(&tmp1)
+	acc2.StoreArray(&tmp2)
+	acc3.StoreArray(&tmp3)
 
 	sum := tmp0[0] + tmp0[1] + tmp0[2] + tmp0[3] + tmp0[4] + tmp0[5] + tmp0[6] + tmp0[7] +
 		tmp0[8] + tmp0[9] + tmp0[10] + tmp0[11] + tmp0[12] + tmp0[13] + tmp0[14] + tmp0[15] +
@@ -98,12 +98,12 @@ func rmsNormAVX512(dst, src, weight []float32, eps float32) {
 	var acc archsimd.Float32x16
 	i := 0
 	for ; i+16 <= n; i += 16 {
-		v := archsimd.LoadFloat32x16Slice(src[i:])
+		v := archsimd.LoadFloat32x16(src[i:])
 		acc = v.MulAdd(v, acc)
 	}
 
 	var tmp [16]float32
-	acc.Store(&tmp)
+	acc.StoreArray(&tmp)
 	sum := tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7] +
 		tmp[8] + tmp[9] + tmp[10] + tmp[11] + tmp[12] + tmp[13] + tmp[14] + tmp[15]
 
@@ -117,11 +117,11 @@ func rmsNormAVX512(dst, src, weight []float32, eps float32) {
 	vscale := archsimd.BroadcastFloat32x16(scale)
 	i = 0
 	for ; i+16 <= n; i += 16 {
-		vsrc := archsimd.LoadFloat32x16Slice(src[i:])
-		vw := archsimd.LoadFloat32x16Slice(weight[i:])
+		vsrc := archsimd.LoadFloat32x16(src[i:])
+		vw := archsimd.LoadFloat32x16(weight[i:])
 		v := vsrc.Mul(vscale)
 		v = v.Mul(vw)
-		v.StoreSlice(dst[i:])
+		v.Store(dst[i:])
 	}
 	for ; i < n; i++ {
 		dst[i] = src[i] * scale * weight[i]
@@ -168,16 +168,16 @@ func applyRoPEAVX512(x []float32, nHead, headDim, pos int, invFreq []float64, at
 
 		i := 0
 		for ; i+16 <= half; i += 16 {
-			x0 := archsimd.LoadFloat32x16Slice(lo[i:])
-			x1 := archsimd.LoadFloat32x16Slice(hi[i:])
-			c := archsimd.LoadFloat32x16Slice(cosVals[i:])
-			s := archsimd.LoadFloat32x16Slice(sinVals[i:])
+			x0 := archsimd.LoadFloat32x16(lo[i:])
+			x1 := archsimd.LoadFloat32x16(hi[i:])
+			c := archsimd.LoadFloat32x16(cosVals[i:])
+			s := archsimd.LoadFloat32x16(sinVals[i:])
 
 			y0 := x0.Mul(c).Sub(x1.Mul(s))
 			y1 := x0.MulAdd(s, x1.Mul(c))
 
-			y0.StoreSlice(lo[i:])
-			y1.StoreSlice(hi[i:])
+			y0.Store(lo[i:])
+			y1.Store(hi[i:])
 		}
 		for ; i < half; i++ {
 			x0 := lo[i]

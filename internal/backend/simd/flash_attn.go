@@ -69,9 +69,9 @@ func flashAttentionAVX512(output, q, k, v []float32, seqLenQ, seqLenK, dim int, 
 			d := 0
 			for ; d <= dim-16; d += 16 {
 				rowPtr := (*[16]float32)(acc[(qi*dim + d):])
-				vec := archsimd.LoadFloat32x16(rowPtr)
+				vec := archsimd.LoadFloat32x16Array(rowPtr)
 				vec = vec.Mul(invLVec)
-				vec.Store((*[16]float32)(output[(i+qi)*dim+d : (i+qi)*dim+d+16]))
+				vec.StoreArray((*[16]float32)(output[(i+qi)*dim+d : (i+qi)*dim+d+16]))
 			}
 
 			// Remainder
@@ -98,8 +98,8 @@ func computeQKTAVX512(q, k []float32, iStart, iEnd, jStart, jEnd, dim int, scale
 			var sum float32
 			d := 0
 			for ; d <= dim-16; d += 16 {
-				qVec := archsimd.LoadFloat32x16((*[16]float32)(qRow[d : d+16]))
-				kVec := archsimd.LoadFloat32x16((*[16]float32)(kRow[d : d+16]))
+				qVec := archsimd.LoadFloat32x16Array((*[16]float32)(qRow[d : d+16]))
+				kVec := archsimd.LoadFloat32x16Array((*[16]float32)(kRow[d : d+16]))
 				prod := qVec.Mul(kVec)
 				sum += horizontalSumAVX512(prod)
 			}
@@ -126,7 +126,7 @@ func horizontalSumAVX512(v archsimd.Float32x16) float32 {
 	sumVec4 := lo4.Add(hi4)
 
 	var arr [4]float32
-	sumVec4.Store(&arr)
+	sumVec4.StoreArray(&arr)
 	return arr[0] + arr[1] + arr[2] + arr[3]
 }
 
@@ -161,9 +161,9 @@ func softmaxAccumulateAVX512(acc []float32, scores [][]float32, v []float32,
 		d := 0
 		for ; d <= dim-16; d += 16 {
 			accPtr := (*[16]float32)(acc[(qi*dim + d):])
-			vec := archsimd.LoadFloat32x16(accPtr)
+			vec := archsimd.LoadFloat32x16Array(accPtr)
 			vec = vec.Mul(scaleVec)
-			vec.Store(accPtr)
+			vec.StoreArray(accPtr)
 		}
 
 		// Remainder
@@ -180,13 +180,13 @@ func softmaxAccumulateAVX512(acc []float32, scores [][]float32, v []float32,
 			d := 0
 			for ; d <= dim-16; d += 16 {
 				accPtr := (*[16]float32)(acc[(qi*dim + d):])
-				vVec := archsimd.LoadFloat32x16((*[16]float32)(vRow[d : d+16]))
+				vVec := archsimd.LoadFloat32x16Array((*[16]float32)(vRow[d : d+16]))
 
 				// FMA: acc += weight * v
 				prod := vVec.Mul(weightVec)
-				accVec := archsimd.LoadFloat32x16(accPtr)
+				accVec := archsimd.LoadFloat32x16Array(accPtr)
 				accVec = accVec.Add(prod)
-				accVec.Store(accPtr)
+				accVec.StoreArray(accPtr)
 			}
 
 			// Remainder
@@ -241,9 +241,9 @@ func flashAttentionAVX2(output, q, k, v []float32, seqLenQ, seqLenK, dim int, sc
 			d := 0
 			for ; d <= dim-8; d += 8 {
 				accPtr := (*[8]float32)(acc[(qi*dim + d):])
-				vec := archsimd.LoadFloat32x8(accPtr)
+				vec := archsimd.LoadFloat32x8Array(accPtr)
 				vec = vec.Mul(invLVec)
-				vec.Store((*[8]float32)(output[(i+qi)*dim+d : (i+qi)*dim+d+8]))
+				vec.StoreArray((*[8]float32)(output[(i+qi)*dim+d : (i+qi)*dim+d+8]))
 			}
 
 			// Remainder
@@ -270,8 +270,8 @@ func computeQKTAVX2(q, k []float32, iStart, iEnd, jStart, jEnd, dim int, scale f
 			var sum float32
 			d := 0
 			for ; d <= dim-8; d += 8 {
-				qVec := archsimd.LoadFloat32x8((*[8]float32)(qRow[d : d+8]))
-				kVec := archsimd.LoadFloat32x8((*[8]float32)(kRow[d : d+8]))
+				qVec := archsimd.LoadFloat32x8Array((*[8]float32)(qRow[d : d+8]))
+				kVec := archsimd.LoadFloat32x8Array((*[8]float32)(kRow[d : d+8]))
 				prod := qVec.Mul(kVec)
 				sum += horizontalSumAVX2(prod)
 			}
@@ -296,7 +296,7 @@ func horizontalSumAVX2(v archsimd.Float32x8) float32 {
 
 	// Store and sum manually
 	var arr [4]float32
-	sumVec.Store(&arr)
+	sumVec.StoreArray(&arr)
 	return arr[0] + arr[1] + arr[2] + arr[3]
 }
 
@@ -331,9 +331,9 @@ func softmaxAccumulateAVX2(acc []float32, scores [][]float32, v []float32,
 		d := 0
 		for ; d <= dim-8; d += 8 {
 			accPtr := (*[8]float32)(acc[(qi*dim + d):])
-			vec := archsimd.LoadFloat32x8(accPtr)
+			vec := archsimd.LoadFloat32x8Array(accPtr)
 			vec = vec.Mul(scaleVec)
-			vec.Store(accPtr)
+			vec.StoreArray(accPtr)
 		}
 
 		// Remainder
@@ -350,12 +350,12 @@ func softmaxAccumulateAVX2(acc []float32, scores [][]float32, v []float32,
 			d := 0
 			for ; d <= dim-8; d += 8 {
 				accPtr := (*[8]float32)(acc[(qi*dim + d):])
-				vVec := archsimd.LoadFloat32x8((*[8]float32)(vRow[d : d+8]))
+				vVec := archsimd.LoadFloat32x8Array((*[8]float32)(vRow[d : d+8]))
 				// acc += weight * v
 				prod := vVec.Mul(weightVec)
-				accVec := archsimd.LoadFloat32x8(accPtr)
+				accVec := archsimd.LoadFloat32x8Array(accPtr)
 				accVec = accVec.Add(prod)
-				accVec.Store(accPtr)
+				accVec.StoreArray(accPtr)
 			}
 
 			// Remainder

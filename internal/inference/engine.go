@@ -277,12 +277,14 @@ afterPrompt:
 				return g.ContextTokens, stats, err
 			}
 			next, sampleErr = safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
+			logGenerationSampleDebug(next, g.StopTokens, logitsVec)
 			if sampleErr != nil {
 				flush()
 				return g.ContextTokens, stats, sampleErr
 			}
 		} else if canDeviceGreedy {
 			next, err = safeForwardTokenGreedy(gs, next)
+			logGenerationSampleDebug(next, g.StopTokens, nil)
 			if err != nil {
 				flush()
 				return g.ContextTokens, stats, err
@@ -294,6 +296,7 @@ afterPrompt:
 				return g.ContextTokens, stats, err
 			}
 			next, sampleErr = safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
+			logGenerationSampleDebug(next, g.StopTokens, logitsVec)
 			if sampleErr != nil {
 				flush()
 				return g.ContextTokens, stats, sampleErr

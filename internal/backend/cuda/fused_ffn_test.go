@@ -82,6 +82,7 @@ func TestFusedFFNCUDA(t *testing.T) {
 	for i := range outputNorm {
 		outputNorm[i] = 1.0
 	}
+	attention := core.NewMat(embDim, embDim)
 
 	layers := []instance.Layer{
 		{
@@ -89,10 +90,10 @@ func TestFusedFFNCUDA(t *testing.T) {
 			FfnGate: &ffnGate,
 			FfnDown: &ffnDown,
 			// Minimal attention weights (unused in this test but required for PreloadModelWeights)
-			Wq: &core.Mat{},
-			Wk: &core.Mat{},
-			Wv: &core.Mat{},
-			Wo: &core.Mat{},
+			Wq: &attention,
+			Wk: &attention,
+			Wv: &attention,
+			Wo: &attention,
 		},
 	}
 

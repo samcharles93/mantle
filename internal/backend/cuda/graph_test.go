@@ -270,7 +270,7 @@ func TestGraphValidateSyntheticGraph(t *testing.T) {
 				Op:     graph.OpEmbed,
 				Branch: graph.BranchEmbed,
 				Name:   "embed",
-				Input:  []graph.TensorID{graph.NewTensorID()},
+				Input:  []graph.TensorID{0},
 				Output: graph.NewTensorID(),
 				Params: graph.EmbedParams{VocabSize: 100, EmbDim: 16},
 			},

@@ -44,24 +44,35 @@ func (b *LlamaBuilder) BuildGraph(cfg *core.Config, inst *core.Instance) (*graph
 			Params: graph.FFNParams{}, // placeholder — norm params from layer config
 		})
 
-		// Attention block
+		// Attention or DeltaNet block
 		attnOut := graph.NewTensorID()
-		g.AddNode(graph.Node{
-			Op:     graph.OpAttentionBlock,
-			Branch: graph.BranchAttention,
-			Name:   fmt.Sprintf("layer%d.attention", i),
-			Input:  []graph.TensorID{normed},
-			Output: attnOut,
-			Params: graph.AttentionParams{
-				NHeadKV:    layer.HeadKV,
-				HeadDim:    layer.HeadDim,
-				KVStride:   inst.MaxKVStride,
-				SlidingWin: layer.AttnWindow,
-				LayerIndex: i,
-				InvFreq:    layer.RopeInvFreq,
-				AttnScale:  layer.AttnScale,
-			},
-		})
+		if layer.DeltaNet != nil {
+			g.AddNode(graph.Node{
+				Op:     graph.OpDeltaNetBlock,
+				Branch: graph.BranchDeltaNet,
+				Name:   fmt.Sprintf("layer%d.deltanet", i),
+				Input:  []graph.TensorID{normed},
+				Output: attnOut,
+				Params: graph.DeltaNetParams{},
+			})
+		} else {
+			g.AddNode(graph.Node{
+				Op:     graph.OpAttentionBlock,
+				Branch: graph.BranchAttention,
+				Name:   fmt.Sprintf("layer%d.attention", i),
+				Input:  []graph.TensorID{normed},
+				Output: attnOut,
+				Params: graph.AttentionParams{
+					NHeadKV:    layer.HeadKV,
+					HeadDim:    layer.HeadDim,
+					KVStride:   inst.MaxKVStride,
+					SlidingWin: layer.AttnWindow,
+					LayerIndex: i,
+					InvFreq:    layer.RopeInvFreq,
+					AttnScale:  layer.AttnScale,
+				},
+			})
+		}
 
 		// Residual add (attention output + previous state)
 		residual1 := graph.NewTensorID()

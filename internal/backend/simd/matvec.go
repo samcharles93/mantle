@@ -276,14 +276,14 @@ func matVecRangeF32SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 		// Process 16 values per iteration for better pipelining
 		for ; j+16 <= c; j += 16 {
 			// Load input vectors once
-			vx0 := archsimd.LoadFloat32x8Slice(x[j:])
-			vx1 := archsimd.LoadFloat32x8Slice(x[j+8:])
+			vx0 := archsimd.LoadFloat32x8(x[j:])
+			vx1 := archsimd.LoadFloat32x8(x[j+8:])
 
 			// Load row vectors (memory latency hiding)
-			vrow0a := archsimd.LoadFloat32x8Slice(row0[j:])
-			vrow1a := archsimd.LoadFloat32x8Slice(row1[j:])
-			vrow2a := archsimd.LoadFloat32x8Slice(row2[j:])
-			vrow3a := archsimd.LoadFloat32x8Slice(row3[j:])
+			vrow0a := archsimd.LoadFloat32x8(row0[j:])
+			vrow1a := archsimd.LoadFloat32x8(row1[j:])
+			vrow2a := archsimd.LoadFloat32x8(row2[j:])
+			vrow3a := archsimd.LoadFloat32x8(row3[j:])
 
 			// FMA operations (parallel execution)
 			acc0 = vrow0a.MulAdd(vx0, acc0)
@@ -292,10 +292,10 @@ func matVecRangeF32SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 			acc3 = vrow3a.MulAdd(vx0, acc3)
 
 			// Second half
-			vrow0b := archsimd.LoadFloat32x8Slice(row0[j+8:])
-			vrow1b := archsimd.LoadFloat32x8Slice(row1[j+8:])
-			vrow2b := archsimd.LoadFloat32x8Slice(row2[j+8:])
-			vrow3b := archsimd.LoadFloat32x8Slice(row3[j+8:])
+			vrow0b := archsimd.LoadFloat32x8(row0[j+8:])
+			vrow1b := archsimd.LoadFloat32x8(row1[j+8:])
+			vrow2b := archsimd.LoadFloat32x8(row2[j+8:])
+			vrow3b := archsimd.LoadFloat32x8(row3[j+8:])
 
 			acc0 = vrow0b.MulAdd(vx1, acc0)
 			acc1 = vrow1b.MulAdd(vx1, acc1)
@@ -305,18 +305,18 @@ func matVecRangeF32SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 
 		// Handle remaining 8-value chunks
 		for ; j+8 <= c; j += 8 {
-			vx := archsimd.LoadFloat32x8Slice(x[j:])
+			vx := archsimd.LoadFloat32x8(x[j:])
 
-			vrow0 := archsimd.LoadFloat32x8Slice(row0[j:])
+			vrow0 := archsimd.LoadFloat32x8(row0[j:])
 			acc0 = vrow0.MulAdd(vx, acc0)
 
-			vrow1 := archsimd.LoadFloat32x8Slice(row1[j:])
+			vrow1 := archsimd.LoadFloat32x8(row1[j:])
 			acc1 = vrow1.MulAdd(vx, acc1)
 
-			vrow2 := archsimd.LoadFloat32x8Slice(row2[j:])
+			vrow2 := archsimd.LoadFloat32x8(row2[j:])
 			acc2 = vrow2.MulAdd(vx, acc2)
 
-			vrow3 := archsimd.LoadFloat32x8Slice(row3[j:])
+			vrow3 := archsimd.LoadFloat32x8(row3[j:])
 			acc3 = vrow3.MulAdd(vx, acc3)
 		}
 
@@ -324,10 +324,10 @@ func matVecRangeF32SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 		var tmp1 [8]float32
 		var tmp2 [8]float32
 		var tmp3 [8]float32
-		acc0.Store(&tmp0)
-		acc1.Store(&tmp1)
-		acc2.Store(&tmp2)
-		acc3.Store(&tmp3)
+		acc0.StoreArray(&tmp0)
+		acc1.StoreArray(&tmp1)
+		acc2.StoreArray(&tmp2)
+		acc3.StoreArray(&tmp3)
 		var sum0 float32
 		var sum1 float32
 		var sum2 float32
@@ -359,17 +359,17 @@ func matVecRangeF32SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 		var acc1 archsimd.Float32x8
 		j := 0
 		for ; j+8 <= c; j += 8 {
-			vx := archsimd.LoadFloat32x8Slice(x[j:])
-			vrow0 := archsimd.LoadFloat32x8Slice(row0[j:])
-			vrow1 := archsimd.LoadFloat32x8Slice(row1[j:])
+			vx := archsimd.LoadFloat32x8(x[j:])
+			vrow0 := archsimd.LoadFloat32x8(row0[j:])
+			vrow1 := archsimd.LoadFloat32x8(row1[j:])
 			acc0 = vrow0.MulAdd(vx, acc0)
 			acc1 = vrow1.MulAdd(vx, acc1)
 		}
 
 		var tmp0 [8]float32
 		var tmp1 [8]float32
-		acc0.Store(&tmp0)
-		acc1.Store(&tmp1)
+		acc0.StoreArray(&tmp0)
+		acc1.StoreArray(&tmp1)
 		var sum0 float32
 		var sum1 float32
 		sum0 += tmp0[0] + tmp0[1] + tmp0[2] + tmp0[3] + tmp0[4] + tmp0[5] + tmp0[6] + tmp0[7]
@@ -388,13 +388,13 @@ func matVecRangeF32SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 		var acc archsimd.Float32x8
 		j := 0
 		for ; j+8 <= c; j += 8 {
-			vrow := archsimd.LoadFloat32x8Slice(row[j:])
-			vx := archsimd.LoadFloat32x8Slice(x[j:])
+			vrow := archsimd.LoadFloat32x8(row[j:])
+			vx := archsimd.LoadFloat32x8(x[j:])
 			acc = vrow.MulAdd(vx, acc)
 		}
 
 		var tmp [8]float32
-		acc.Store(&tmp)
+		acc.StoreArray(&tmp)
 		var sum float32
 		sum += tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 
@@ -520,20 +520,20 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 			// Interleave loads and conversions for optimal instruction scheduling
 			for ; j+16 <= c; j += 16 {
 				// Load input vectors once
-				vx0 := archsimd.LoadFloat32x8Slice(x[j:])
-				vx1 := archsimd.LoadFloat32x8Slice(x[j+8:])
+				vx0 := archsimd.LoadFloat32x8(x[j:])
+				vx1 := archsimd.LoadFloat32x8(x[j+8:])
 
 				// Batch load all uint16 vectors (hides memory latency)
-				vu0a := archsimd.LoadUint16x8Slice(row0[j:])
-				vu1a := archsimd.LoadUint16x8Slice(row1[j:])
-				vu2a := archsimd.LoadUint16x8Slice(row2[j:])
-				vu3a := archsimd.LoadUint16x8Slice(row3[j:])
+				vu0a := archsimd.LoadUint16x8(row0[j:])
+				vu1a := archsimd.LoadUint16x8(row1[j:])
+				vu2a := archsimd.LoadUint16x8(row2[j:])
+				vu3a := archsimd.LoadUint16x8(row3[j:])
 
 				// Batch convert (allows parallel execution)
-				vf0a := vu0a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
-				vf1a := vu1a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
-				vf2a := vu2a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
-				vf3a := vu3a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vf0a := vu0a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf1a := vu1a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf2a := vu2a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf3a := vu3a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 
 				// Batch FMA (parallel execution)
 				acc0 = vf0a.MulAdd(vx0, acc0)
@@ -542,15 +542,15 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 				acc3 = vf3a.MulAdd(vx0, acc3)
 
 				// Second half - same pattern
-				vu0b := archsimd.LoadUint16x8Slice(row0[j+8:])
-				vu1b := archsimd.LoadUint16x8Slice(row1[j+8:])
-				vu2b := archsimd.LoadUint16x8Slice(row2[j+8:])
-				vu3b := archsimd.LoadUint16x8Slice(row3[j+8:])
+				vu0b := archsimd.LoadUint16x8(row0[j+8:])
+				vu1b := archsimd.LoadUint16x8(row1[j+8:])
+				vu2b := archsimd.LoadUint16x8(row2[j+8:])
+				vu3b := archsimd.LoadUint16x8(row3[j+8:])
 
-				vf0b := vu0b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
-				vf1b := vu1b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
-				vf2b := vu2b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
-				vf3b := vu3b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vf0b := vu0b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf1b := vu1b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf2b := vu2b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf3b := vu3b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 
 				acc0 = vf0b.MulAdd(vx1, acc0)
 				acc1 = vf1b.MulAdd(vx1, acc1)
@@ -560,22 +560,22 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 
 			// Handle remaining 8-value chunks
 			for ; j+8 <= c; j += 8 {
-				vx := archsimd.LoadFloat32x8Slice(x[j:])
+				vx := archsimd.LoadFloat32x8(x[j:])
 
-				vu0 := archsimd.LoadUint16x8Slice(row0[j:])
-				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vu0 := archsimd.LoadUint16x8(row0[j:])
+				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc0 = vf0.MulAdd(vx, acc0)
 
-				vu1 := archsimd.LoadUint16x8Slice(row1[j:])
-				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vu1 := archsimd.LoadUint16x8(row1[j:])
+				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc1 = vf1.MulAdd(vx, acc1)
 
-				vu2 := archsimd.LoadUint16x8Slice(row2[j:])
-				vf2 := vu2.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vu2 := archsimd.LoadUint16x8(row2[j:])
+				vf2 := vu2.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc2 = vf2.MulAdd(vx, acc2)
 
-				vu3 := archsimd.LoadUint16x8Slice(row3[j:])
-				vf3 := vu3.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vu3 := archsimd.LoadUint16x8(row3[j:])
+				vf3 := vu3.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc3 = vf3.MulAdd(vx, acc3)
 			}
 
@@ -583,10 +583,10 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 			var tmp1 [8]float32
 			var tmp2 [8]float32
 			var tmp3 [8]float32
-			acc0.Store(&tmp0)
-			acc1.Store(&tmp1)
-			acc2.Store(&tmp2)
-			acc3.Store(&tmp3)
+			acc0.StoreArray(&tmp0)
+			acc1.StoreArray(&tmp1)
+			acc2.StoreArray(&tmp2)
+			acc3.StoreArray(&tmp3)
 			var sum0 float32
 			var sum1 float32
 			var sum2 float32
@@ -626,41 +626,41 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 
 			// Process 16 values per iteration
 			for ; j+16 <= c; j += 16 {
-				vx0 := archsimd.LoadFloat32x8Slice(x[j:])
-				vx1 := archsimd.LoadFloat32x8Slice(x[j+8:])
+				vx0 := archsimd.LoadFloat32x8(x[j:])
+				vx1 := archsimd.LoadFloat32x8(x[j+8:])
 
-				vu0a := archsimd.LoadUint16x8Slice(row0[j:])
-				vu0b := archsimd.LoadUint16x8Slice(row0[j+8:])
-				vf0a := vu0a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
-				vf0b := vu0b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vu0a := archsimd.LoadUint16x8(row0[j:])
+				vu0b := archsimd.LoadUint16x8(row0[j+8:])
+				vf0a := vu0a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf0b := vu0b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc0 = vf0a.MulAdd(vx0, acc0)
 				acc0 = vf0b.MulAdd(vx1, acc0)
 
-				vu1a := archsimd.LoadUint16x8Slice(row1[j:])
-				vu1b := archsimd.LoadUint16x8Slice(row1[j+8:])
-				vf1a := vu1a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
-				vf1b := vu1b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vu1a := archsimd.LoadUint16x8(row1[j:])
+				vu1b := archsimd.LoadUint16x8(row1[j+8:])
+				vf1a := vu1a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf1b := vu1b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc1 = vf1a.MulAdd(vx0, acc1)
 				acc1 = vf1b.MulAdd(vx1, acc1)
 			}
 
 			// Handle remaining 8-value chunks
 			for ; j+8 <= c; j += 8 {
-				vx := archsimd.LoadFloat32x8Slice(x[j:])
+				vx := archsimd.LoadFloat32x8(x[j:])
 
-				vu0 := archsimd.LoadUint16x8Slice(row0[j:])
-				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vu0 := archsimd.LoadUint16x8(row0[j:])
+				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc0 = vf0.MulAdd(vx, acc0)
 
-				vu1 := archsimd.LoadUint16x8Slice(row1[j:])
-				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
+				vu1 := archsimd.LoadUint16x8(row1[j:])
+				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc1 = vf1.MulAdd(vx, acc1)
 			}
 
 			var tmp0 [8]float32
 			var tmp1 [8]float32
-			acc0.Store(&tmp0)
-			acc1.Store(&tmp1)
+			acc0.StoreArray(&tmp0)
+			acc1.StoreArray(&tmp1)
 			var sum0 float32
 			var sum1 float32
 			sum0 += tmp0[0] + tmp0[1] + tmp0[2] + tmp0[3] + tmp0[4] + tmp0[5] + tmp0[6] + tmp0[7]
@@ -684,14 +684,14 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 			var acc archsimd.Float32x8
 			j := 0
 			for ; j+8 <= c; j += 8 {
-				vu := archsimd.LoadUint16x8Slice(row[j:])
-				vf := vu.ExtendToUint32().ShiftAllLeft(16).AsFloat32x8()
-				vx := archsimd.LoadFloat32x8Slice(x[j:])
+				vu := archsimd.LoadUint16x8(row[j:])
+				vf := vu.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vx := archsimd.LoadFloat32x8(x[j:])
 				acc = vf.MulAdd(vx, acc)
 			}
 
 			var tmp [8]float32
-			acc.Store(&tmp)
+			acc.StoreArray(&tmp)
 			var sum float32
 			sum += tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 
@@ -744,20 +744,20 @@ func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 			// Process 32 values per iteration (2x16-element vectors) for better pipelining
 			for ; j+32 <= c; j += 32 {
 				// Load input vectors once
-				vx0 := archsimd.LoadFloat32x16Slice(x[j:])
-				vx1 := archsimd.LoadFloat32x16Slice(x[j+16:])
+				vx0 := archsimd.LoadFloat32x16(x[j:])
+				vx1 := archsimd.LoadFloat32x16(x[j+16:])
 
 				// Batch load all uint16 vectors (hides memory latency)
-				vu0a := archsimd.LoadUint16x16Slice(row0[j:])
-				vu1a := archsimd.LoadUint16x16Slice(row1[j:])
-				vu2a := archsimd.LoadUint16x16Slice(row2[j:])
-				vu3a := archsimd.LoadUint16x16Slice(row3[j:])
+				vu0a := archsimd.LoadUint16x16(row0[j:])
+				vu1a := archsimd.LoadUint16x16(row1[j:])
+				vu2a := archsimd.LoadUint16x16(row2[j:])
+				vu3a := archsimd.LoadUint16x16(row3[j:])
 
 				// Batch convert (allows parallel execution)
-				vf0a := vu0a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
-				vf1a := vu1a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
-				vf2a := vu2a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
-				vf3a := vu3a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vf0a := vu0a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf1a := vu1a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf2a := vu2a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf3a := vu3a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 
 				// Batch FMA (parallel execution) - first accumulator
 				acc0 = vf0a.MulAdd(vx0, acc0)
@@ -766,15 +766,15 @@ func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 				acc3 = vf3a.MulAdd(vx0, acc3)
 
 				// Second batch for second accumulator
-				vu0b := archsimd.LoadUint16x16Slice(row0[j+16:])
-				vu1b := archsimd.LoadUint16x16Slice(row1[j+16:])
-				vu2b := archsimd.LoadUint16x16Slice(row2[j+16:])
-				vu3b := archsimd.LoadUint16x16Slice(row3[j+16:])
+				vu0b := archsimd.LoadUint16x16(row0[j+16:])
+				vu1b := archsimd.LoadUint16x16(row1[j+16:])
+				vu2b := archsimd.LoadUint16x16(row2[j+16:])
+				vu3b := archsimd.LoadUint16x16(row3[j+16:])
 
-				vf0b := vu0b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
-				vf1b := vu1b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
-				vf2b := vu2b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
-				vf3b := vu3b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vf0b := vu0b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf1b := vu1b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf2b := vu2b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf3b := vu3b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 
 				acc0_2 = vf0b.MulAdd(vx1, acc0_2)
 				acc1_2 = vf1b.MulAdd(vx1, acc1_2)
@@ -784,22 +784,22 @@ func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 
 			// Handle remaining 16-value chunks
 			for ; j+16 <= c; j += 16 {
-				vx := archsimd.LoadFloat32x16Slice(x[j:])
+				vx := archsimd.LoadFloat32x16(x[j:])
 
-				vu0 := archsimd.LoadUint16x16Slice(row0[j:])
-				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu0 := archsimd.LoadUint16x16(row0[j:])
+				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc0 = vf0.MulAdd(vx, acc0)
 
-				vu1 := archsimd.LoadUint16x16Slice(row1[j:])
-				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu1 := archsimd.LoadUint16x16(row1[j:])
+				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc1 = vf1.MulAdd(vx, acc1)
 
-				vu2 := archsimd.LoadUint16x16Slice(row2[j:])
-				vf2 := vu2.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu2 := archsimd.LoadUint16x16(row2[j:])
+				vf2 := vu2.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc2 = vf2.MulAdd(vx, acc2)
 
-				vu3 := archsimd.LoadUint16x16Slice(row3[j:])
-				vf3 := vu3.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu3 := archsimd.LoadUint16x16(row3[j:])
+				vf3 := vu3.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc3 = vf3.MulAdd(vx, acc3)
 			}
 
@@ -810,10 +810,10 @@ func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 			acc3 = acc3.Add(acc3_2)
 
 			var tmp0, tmp1, tmp2, tmp3 [16]float32
-			acc0.Store(&tmp0)
-			acc1.Store(&tmp1)
-			acc2.Store(&tmp2)
-			acc3.Store(&tmp3)
+			acc0.StoreArray(&tmp0)
+			acc1.StoreArray(&tmp1)
+			acc2.StoreArray(&tmp2)
+			acc3.StoreArray(&tmp3)
 
 			var sum0, sum1, sum2, sum3 float32
 			for k := range 16 {
@@ -853,34 +853,34 @@ func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 
 			// Process 32 values per iteration
 			for ; j+32 <= c; j += 32 {
-				vx0 := archsimd.LoadFloat32x16Slice(x[j:])
-				vx1 := archsimd.LoadFloat32x16Slice(x[j+16:])
+				vx0 := archsimd.LoadFloat32x16(x[j:])
+				vx1 := archsimd.LoadFloat32x16(x[j+16:])
 
-				vu0a := archsimd.LoadUint16x16Slice(row0[j:])
-				vu1a := archsimd.LoadUint16x16Slice(row1[j:])
-				vf0a := vu0a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
-				vf1a := vu1a.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu0a := archsimd.LoadUint16x16(row0[j:])
+				vu1a := archsimd.LoadUint16x16(row1[j:])
+				vf0a := vu0a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf1a := vu1a.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc0 = vf0a.MulAdd(vx0, acc0)
 				acc1 = vf1a.MulAdd(vx0, acc1)
 
-				vu0b := archsimd.LoadUint16x16Slice(row0[j+16:])
-				vu1b := archsimd.LoadUint16x16Slice(row1[j+16:])
-				vf0b := vu0b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
-				vf1b := vu1b.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu0b := archsimd.LoadUint16x16(row0[j+16:])
+				vu1b := archsimd.LoadUint16x16(row1[j+16:])
+				vf0b := vu0b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+				vf1b := vu1b.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc0_2 = vf0b.MulAdd(vx1, acc0_2)
 				acc1_2 = vf1b.MulAdd(vx1, acc1_2)
 			}
 
 			// Handle remaining 16-value chunks
 			for ; j+16 <= c; j += 16 {
-				vx := archsimd.LoadFloat32x16Slice(x[j:])
+				vx := archsimd.LoadFloat32x16(x[j:])
 
-				vu0 := archsimd.LoadUint16x16Slice(row0[j:])
-				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu0 := archsimd.LoadUint16x16(row0[j:])
+				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc0 = vf0.MulAdd(vx, acc0)
 
-				vu1 := archsimd.LoadUint16x16Slice(row1[j:])
-				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu1 := archsimd.LoadUint16x16(row1[j:])
+				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc1 = vf1.MulAdd(vx, acc1)
 			}
 
@@ -889,8 +889,8 @@ func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 			acc1 = acc1.Add(acc1_2)
 
 			var tmp0, tmp1 [16]float32
-			acc0.Store(&tmp0)
-			acc1.Store(&tmp1)
+			acc0.StoreArray(&tmp0)
+			acc1.StoreArray(&tmp1)
 
 			var sum0, sum1 float32
 			for k := range 16 {
@@ -918,23 +918,23 @@ func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 			var acc, acc2 archsimd.Float32x16
 			j := 0
 			for ; j+32 <= c; j += 32 {
-				vx0 := archsimd.LoadFloat32x16Slice(x[j:])
-				vx1 := archsimd.LoadFloat32x16Slice(x[j+16:])
+				vx0 := archsimd.LoadFloat32x16(x[j:])
+				vx1 := archsimd.LoadFloat32x16(x[j+16:])
 
-				vu0 := archsimd.LoadUint16x16Slice(row[j:])
-				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu0 := archsimd.LoadUint16x16(row[j:])
+				vf0 := vu0.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc = vf0.MulAdd(vx0, acc)
 
-				vu1 := archsimd.LoadUint16x16Slice(row[j+16:])
-				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu1 := archsimd.LoadUint16x16(row[j+16:])
+				vf1 := vu1.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc2 = vf1.MulAdd(vx1, acc2)
 			}
 
 			for ; j+16 <= c; j += 16 {
-				vx := archsimd.LoadFloat32x16Slice(x[j:])
+				vx := archsimd.LoadFloat32x16(x[j:])
 
-				vu := archsimd.LoadUint16x16Slice(row[j:])
-				vf := vu.ExtendToUint32().ShiftAllLeft(16).AsFloat32x16()
+				vu := archsimd.LoadUint16x16(row[j:])
+				vf := vu.ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
 				acc = vf.MulAdd(vx, acc)
 			}
 
@@ -942,7 +942,7 @@ func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 			acc = acc.Add(acc2)
 
 			var tmp [16]float32
-			acc.Store(&tmp)
+			acc.StoreArray(&tmp)
 			var sum float32
 			for k := range 16 {
 				sum += tmp[k]

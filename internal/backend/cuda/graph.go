@@ -69,7 +69,6 @@ func (gr *GraphRuntime) computeNode(
 	tensors map[graph.TensorID][]float32,
 	currentLayer *int,
 ) ([]float32, error) {
-
 	getInput := func(idx int) ([]float32, error) {
 		if idx >= len(node.Input) {
 			return nil, fmt.Errorf("input index %d out of range (have %d inputs)", idx, len(node.Input))

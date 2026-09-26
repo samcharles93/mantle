@@ -2,8 +2,25 @@ package model
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
+
+func TestDetectArchMiniCPM5BaseAndDSpark(t *testing.T) {
+	base := &HFConfig{ModelType: "llama", Architectures: []string{"LlamaForCausalLM"}}
+	spec, err := DetectArch(base)
+	if err != nil {
+		t.Fatalf("detect base model: %v", err)
+	}
+	if spec.Name != "llama" || spec.Names.Wq(0) != "model.layers.0.self_attn.q_proj.weight" {
+		t.Fatalf("unexpected base mapping: %s, %s", spec.Name, spec.Names.Wq(0))
+	}
+
+	draft := &HFConfig{ModelType: "qwen3", Architectures: []string{"Qwen3DSparkModel"}}
+	if _, err := DetectArch(draft); err == nil || !strings.Contains(err.Error(), "DSpark") {
+		t.Fatalf("expected DSpark runtime error, got %v", err)
+	}
+}
 
 func TestLoadHFConfigBytesMergesTextConfigAttnOutputGate(t *testing.T) {
 	raw := []byte(`{

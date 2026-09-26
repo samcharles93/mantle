@@ -1,5 +1,7 @@
 package graph
 
+import "slices"
+
 import "fmt"
 
 // FuseSubgraph checks whether the nodes at the given indices form a valid
@@ -79,12 +81,7 @@ func FuseSubgraph(g *Graph, nodeIndices []int, ops []OpType, outputs []int) bool
 
 // isNodeIndexInSet checks whether idx is present in the sorted-or-unsorted set.
 func isNodeIndexInSet(idx int, set []int) bool {
-	for _, s := range set {
-		if idx == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(set, idx)
 }
 
 // countNodeUses counts how many times a tensor (produced by node at nodeIdx)

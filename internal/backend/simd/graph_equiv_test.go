@@ -88,7 +88,7 @@ func newTestInstance(vocabSize, embdDim, nLayers int) *core.Instance {
 		m.Output.Data[i] = float32(i+1) * 0.01
 	}
 
-	for li := 0; li < nLayers; li++ {
+	for li := range nLayers {
 		layer := &m.Layers[li]
 		layer.HeadKV = kvHeads
 		layer.HeadDim = headDim
@@ -264,16 +264,16 @@ func TestGraphComputeEquivalentToForwardToken_AttnFFN(t *testing.T) {
 		t.Fatalf("forward logits: expected %d, got %d", vocabSize, len(forwardLogits))
 	}
 
-    if !floatsEqual(graphLogits, forwardLogits, 2e-3) {
-        firstDiff := -1
-        for i := range graphLogits {
-            diff := float32(math.Abs(float64(graphLogits[i] - forwardLogits[i])))
-            if diff > 2e-3 {
-                firstDiff = i
-                break
-            }
-        }
-        if firstDiff >= 0 {
+	if !floatsEqual(graphLogits, forwardLogits, 2e-3) {
+		firstDiff := -1
+		for i := range graphLogits {
+			diff := float32(math.Abs(float64(graphLogits[i] - forwardLogits[i])))
+			if diff > 2e-3 {
+				firstDiff = i
+				break
+			}
+		}
+		if firstDiff >= 0 {
 			t.Errorf("logits mismatch at index %d (attention+ffn): graph[%d]=%v forward[%d]=%v diff=%v",
 				firstDiff, firstDiff, graphLogits[firstDiff], firstDiff, forwardLogits[firstDiff],
 				graphLogits[firstDiff]-forwardLogits[firstDiff])
@@ -333,19 +333,19 @@ func TestGraphComputeStepByStep(t *testing.T) {
 		t.Fatalf("ForwardToken failed: %v", err)
 	}
 
-    if !floatsEqual(graphLogits, forwardLogits, 2e-3) {
-        firstDiff := -1
-        for i := range graphLogits {
-            diff := float32(math.Abs(float64(graphLogits[i] - forwardLogits[i])))
-            if diff > 2e-3 {
-                firstDiff = i
-                break
-            }
-        }
-        t.Errorf("logits mismatch at index %d:", firstDiff)
-        for i := range graphLogits {
-            t.Logf("  [%d] graph=%.10f forward=%.10f diff=%.10e",
-                i, graphLogits[i], forwardLogits[i], graphLogits[i]-forwardLogits[i])
-        }
-    }
+	if !floatsEqual(graphLogits, forwardLogits, 2e-3) {
+		firstDiff := -1
+		for i := range graphLogits {
+			diff := float32(math.Abs(float64(graphLogits[i] - forwardLogits[i])))
+			if diff > 2e-3 {
+				firstDiff = i
+				break
+			}
+		}
+		t.Errorf("logits mismatch at index %d:", firstDiff)
+		for i := range graphLogits {
+			t.Logf("  [%d] graph=%.10f forward=%.10f diff=%.10e",
+				i, graphLogits[i], forwardLogits[i], graphLogits[i]-forwardLogits[i])
+		}
+	}
 }

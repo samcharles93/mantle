@@ -13,6 +13,20 @@ type errOnSecondModel struct {
 	calls int
 }
 
+type emptyLogitsOnSecondModel struct {
+	calls int
+}
+
+func (m *emptyLogitsOnSecondModel) ForwardToken(int) ([]float32, error) {
+	m.calls++
+	if m.calls == 2 {
+		return nil, nil
+	}
+	return []float32{1, 0}, nil
+}
+
+func (m *emptyLogitsOnSecondModel) Reset() { m.calls = 0 }
+
 func (m *errOnSecondModel) ForwardToken(int) ([]float32, error) {
 	m.calls++
 	if m.calls == 2 {
@@ -65,5 +79,19 @@ func TestRunWithContextConvertsSamplerPanicToError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "panic in Sample") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunWithContextReturnsSamplerErrorDuringGeneration(t *testing.T) {
+	t.Parallel()
+
+	g := &Generator{
+		Model:   &emptyLogitsOnSecondModel{},
+		Sampler: newGreedySampler(),
+	}
+
+	_, _, err := g.RunWithContext(context.Background(), []int{1}, 2, nil)
+	if err == nil || !strings.Contains(err.Error(), "panic in Sample") {
+		t.Fatalf("expected generation sampler error, got %v", err)
 	}
 }

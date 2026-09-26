@@ -27,10 +27,10 @@ func fusedFFN(m *Instance, layer *Layer, input []float32, activation string) []f
 	if useGelu {
 		if cpu.HasAVX2 {
 			for ; i+8 <= n; i += 8 {
-				vgate := archsimd.LoadFloat32x8Slice(m.Scratch.FfnGate[i:])
-				vup := archsimd.LoadFloat32x8Slice(m.Scratch.FfnUp[i:])
+				vgate := archsimd.LoadFloat32x8(m.Scratch.FfnGate[i:])
+				vup := archsimd.LoadFloat32x8(m.Scratch.FfnUp[i:])
 				vact := fastGeluVec(vgate).Mul(vup)
-				vact.StoreSlice(m.Scratch.FfnAct[i:])
+				vact.Store(m.Scratch.FfnAct[i:])
 			}
 		}
 		for ; i < n; i++ {
@@ -39,10 +39,10 @@ func fusedFFN(m *Instance, layer *Layer, input []float32, activation string) []f
 	} else {
 		if cpu.HasAVX2 {
 			for ; i+8 <= n; i += 8 {
-				vgate := archsimd.LoadFloat32x8Slice(m.Scratch.FfnGate[i:])
-				vup := archsimd.LoadFloat32x8Slice(m.Scratch.FfnUp[i:])
+				vgate := archsimd.LoadFloat32x8(m.Scratch.FfnGate[i:])
+				vup := archsimd.LoadFloat32x8(m.Scratch.FfnUp[i:])
 				vact := fastSiluVec(vgate).Mul(vup)
-				vact.StoreSlice(m.Scratch.FfnAct[i:])
+				vact.Store(m.Scratch.FfnAct[i:])
 			}
 		}
 		for ; i < n; i++ {

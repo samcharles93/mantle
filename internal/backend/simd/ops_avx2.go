@@ -11,9 +11,9 @@ import (
 func addSIMD(dst, src []float32) {
 	i := 0
 	for ; i+8 <= len(dst); i += 8 {
-		vd := archsimd.LoadFloat32x8Slice(dst[i:])
-		vs := archsimd.LoadFloat32x8Slice(src[i:])
-		vd.Add(vs).StoreSlice(dst[i:])
+		vd := archsimd.LoadFloat32x8(dst[i:])
+		vs := archsimd.LoadFloat32x8(src[i:])
+		vd.Add(vs).Store(dst[i:])
 	}
 	for ; i < len(dst); i++ {
 		dst[i] += src[i]
@@ -30,18 +30,18 @@ func dotSIMD(a, b []float32) float32 {
 	var acc0, acc1 archsimd.Float32x8
 	i := 0
 	for ; i+16 <= len(a); i += 16 {
-		acc0 = archsimd.LoadFloat32x8Slice(a[i:]).MulAdd(archsimd.LoadFloat32x8Slice(b[i:]), acc0)
-		acc1 = archsimd.LoadFloat32x8Slice(a[i+8:]).MulAdd(archsimd.LoadFloat32x8Slice(b[i+8:]), acc1)
+		acc0 = archsimd.LoadFloat32x8(a[i:]).MulAdd(archsimd.LoadFloat32x8(b[i:]), acc0)
+		acc1 = archsimd.LoadFloat32x8(a[i+8:]).MulAdd(archsimd.LoadFloat32x8(b[i+8:]), acc1)
 	}
 
 	if i+8 <= len(a) {
-		acc0 = archsimd.LoadFloat32x8Slice(a[i:]).MulAdd(archsimd.LoadFloat32x8Slice(b[i:]), acc0)
+		acc0 = archsimd.LoadFloat32x8(a[i:]).MulAdd(archsimd.LoadFloat32x8(b[i:]), acc0)
 		i += 8
 	}
 
 	acc0 = acc0.Add(acc1)
 	var tmp [8]float32
-	acc0.Store(&tmp)
+	acc0.StoreArray(&tmp)
 	sum := tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 
 	for ; i < len(a); i++ {
@@ -64,13 +64,13 @@ func rmsNormSIMD(dst, src, weight []float32, eps float32) {
 	var acc archsimd.Float32x8
 	i := 0
 	for ; i+8 <= n; i += 8 {
-		v := archsimd.LoadFloat32x8Slice(src[i:])
+		v := archsimd.LoadFloat32x8(src[i:])
 		acc = v.MulAdd(v, acc)
 	}
 
 	// Could this be set as: var tmp archsimd.Float32x8
 	var tmp [8]float32
-	acc.Store(&tmp)
+	acc.StoreArray(&tmp)
 	sum := tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 
 	for ; i < n; i++ {
@@ -83,11 +83,11 @@ func rmsNormSIMD(dst, src, weight []float32, eps float32) {
 	vscale := archsimd.BroadcastFloat32x8(scale)
 	i = 0
 	for ; i+8 <= n; i += 8 {
-		vsrc := archsimd.LoadFloat32x8Slice(src[i:])
-		vw := archsimd.LoadFloat32x8Slice(weight[i:])
+		vsrc := archsimd.LoadFloat32x8(src[i:])
+		vw := archsimd.LoadFloat32x8(weight[i:])
 		v := vsrc.Mul(vscale)
 		v = v.Mul(vw)
-		v.StoreSlice(dst[i:])
+		v.Store(dst[i:])
 	}
 	for ; i < n; i++ {
 		dst[i] = src[i] * scale * weight[i]
@@ -108,7 +108,7 @@ func fastExpVec(x archsimd.Float32x8) archsimd.Float32x8 {
 
 	x = x.Max(minVal).Min(maxVal)
 
-	k := x.Mul(ln2Inv).RoundToEven().ConvertToInt32()
+	k := x.Mul(ln2Inv).Round().ConvertToInt32()
 
 	kf := k.ConvertToFloat32()
 	r := x.Sub(kf.Mul(ln2))
@@ -122,7 +122,7 @@ func fastExpVec(x archsimd.Float32x8) archsimd.Float32x8 {
 
 	bias := archsimd.BroadcastInt32x8(127)
 	exp := k.Add(bias).ShiftAllLeft(23)
-	scale := exp.AsFloat32x8()
+	scale := exp.ToBits().BitsToFloat32()
 
 	return poly.Mul(scale)
 }
@@ -192,16 +192,16 @@ func applyRoPESIMD(x []float32, nHead, headDim, pos int, invFreq []float64, atte
 
 		i := 0
 		for ; i+8 <= half; i += 8 {
-			x0 := archsimd.LoadFloat32x8Slice(lo[i:])
-			x1 := archsimd.LoadFloat32x8Slice(hi[i:])
-			c := archsimd.LoadFloat32x8Slice(cosVals[i:])
-			s := archsimd.LoadFloat32x8Slice(sinVals[i:])
+			x0 := archsimd.LoadFloat32x8(lo[i:])
+			x1 := archsimd.LoadFloat32x8(hi[i:])
+			c := archsimd.LoadFloat32x8(cosVals[i:])
+			s := archsimd.LoadFloat32x8(sinVals[i:])
 
 			y0 := x0.Mul(c).Sub(x1.Mul(s))
 			y1 := x0.MulAdd(s, x1.Mul(c))
 
-			y0.StoreSlice(lo[i:])
-			y1.StoreSlice(hi[i:])
+			y0.Store(lo[i:])
+			y1.Store(hi[i:])
 		}
 		for ; i < half; i++ {
 			x0 := lo[i]

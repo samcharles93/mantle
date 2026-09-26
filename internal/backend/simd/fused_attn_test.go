@@ -36,7 +36,7 @@ func TestFusedAttentionEquivalence(t *testing.T) {
 // positions, ensuring the delegation remains correct for different KV cache states.
 func TestFusedAttentionVariedPositions(t *testing.T) {
 	ops := newNoFastPathOps()
-	for pos := 0; pos < 4; pos++ {
+	for pos := range 4 {
 		t.Run(fmt.Sprintf("pos=%d", pos), func(t *testing.T) {
 			m, layer := newFusedAttentionFixture(ops)
 			input := []float32{0.1, 0.2}

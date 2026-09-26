@@ -2,6 +2,7 @@ package hf
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,7 +25,7 @@ func GetModelInfo(repo string) (*ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("hf: api error %d: %s", resp.StatusCode, url)
@@ -37,7 +38,7 @@ func GetModelInfo(repo string) (*ModelInfo, error) {
 	return &info, nil
 }
 
-func DownloadFile(repo, rpath, destDir string, progress func(current, total int64)) error {
+func DownloadFile(repo, rpath, destDir string, progress func(current, total int64)) (retErr error) {
 	url := fmt.Sprintf("https://huggingface.co/%s/resolve/main/%s", repo, rpath)
 	dest := filepath.Join(destDir, rpath)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
@@ -48,13 +49,13 @@ func DownloadFile(repo, rpath, destDir string, progress func(current, total int6
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() { retErr = errors.Join(retErr, out.Close()) }()
 
 	resp, err := http.Get(url)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("hf: download error %d: %s", resp.StatusCode, url)

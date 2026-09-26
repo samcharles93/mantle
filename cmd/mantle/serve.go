@@ -139,7 +139,7 @@ func serveCmd() *cli.Command {
 					if err != nil {
 						return echo.ErrNotFound
 					}
-					defer f.Close()
+					defer func() { _ = f.Close() }()
 
 					stat, err := f.Stat()
 					if err != nil {
@@ -159,7 +159,7 @@ func serveCmd() *cli.Command {
 						if err != nil {
 							return echo.ErrNotFound
 						}
-						defer f.Close()
+						defer func() { _ = f.Close() }()
 
 						stat, err := f.Stat()
 						if err != nil {

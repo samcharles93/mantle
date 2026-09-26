@@ -130,14 +130,16 @@ func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext 
 	native.ResetPerfCounters()
 	simd.ResetHostPerfCounters()
 
-	return &cudaRuntime{
+	rt := &cudaRuntime{
 		model:              runtimeModel,
 		ops:                ops,
 		stream:             stream,
 		blas:               blas,
 		managedFallbackLog: managedLog,
 		preloadCounters:    preloadCounters,
-	}, nil
+	}
+
+	return NewGraphRuntime(rt, coreInst), nil
 }
 
 type cudaRuntime struct {

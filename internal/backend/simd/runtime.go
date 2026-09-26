@@ -3,218 +3,27 @@ package simd
 import (
 	"fmt"
 	"math"
-	"strings"
-
-	instance "github.com/samcharles93/mantle/internal/backend/core"
+	"os"
 )
 
-// ForwardTokens processes multiple tokens in batch using GEMM for the projections.
-// This is more efficient than token-by-token for prompt prefill.
-// Returns the output logits for each token position.
+// ForwardTokens advances the model through each token and returns independent
+// logits for every position. The single-token path owns attention and KV updates.
 func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 	if len(tokens) == 0 {
 		return nil, fmt.Errorf("no tokens to process")
 	}
-	if m.Pos+len(tokens) > m.MaxContext {
+	if len(tokens) > m.MaxContext-m.Pos {
 		return nil, fmt.Errorf("context length exceeded: %d + %d > %d", m.Pos, len(tokens), m.MaxContext)
 	}
 
-	// GEMM path requires f32 weight data; bail for BF16/quantized models
-	// where Mat.Data is nil (data lives in Mat.Raw or Mat.Quant).
-	if len(m.Layers) > 0 {
-		l := &m.Layers[0]
-		if l.Wq != nil && l.Wq.Data == nil {
-			return nil, fmt.Errorf("ForwardTokens requires f32 weights, got %v", l.Wq.DType)
+	outputs := make([][]float32, 0, len(tokens))
+	for _, tok := range tokens {
+		logits, err := m.ForwardToken(tok)
+		if err != nil {
+			return nil, err
 		}
+		outputs = append(outputs, append([]float32(nil), logits...))
 	}
-	_, mambaFP := m.Ops().(mambaFastPath)
-	_, moeFP := m.Ops().(moeFastPath)
-	for i := range m.Layers {
-		if m.Layers[i].MoE != nil && !moeFP {
-			return nil, fmt.Errorf("ForwardTokens does not support MoE layers without fast-path")
-		}
-		if m.Layers[i].IsRecurrent {
-			return nil, fmt.Errorf("ForwardTokens does not support recurrent layers")
-		}
-		if m.Layers[i].Mamba != nil && !mambaFP {
-			return nil, fmt.Errorf("ForwardTokens does not support Mamba layers without fast-path")
-		}
-		if m.Layers[i].HeadDim != 0 && m.Layers[i].HeadDim != m.HeadDim {
-			return nil, fmt.Errorf("ForwardTokens does not support per-layer attention dimensions")
-		}
-		if m.Layers[i].SharedKVSource >= 0 || m.Layers[i].ValueFromKey || m.Layers[i].ApplyVNorm || m.Layers[i].Gemma4PLE != nil || m.Layers[i].Gemma4MoE != nil {
-			return nil, fmt.Errorf("ForwardTokens does not support Gemma4 runtime features")
-		}
-	}
-
-	// Get tiling configuration
-	tiling := TilingConfig(m.TilingConfig)
-	if tiling.TileM == 0 {
-		tiling = DefaultTilingConfig()
-	}
-
-	seqLen := len(tokens)
-	embd := m.Config.Config.EmbeddingLength
-	headDim := m.HeadDim
-	nHead := m.HeadCount
-	kvHeads := m.Layers[0].HeadKV
-
-	// Build input matrix X: [seqLen x embd]
-	X := instance.NewMat(seqLen, embd)
-	for i, tok := range tokens {
-		if tok < 0 || tok >= m.Config.Config.VocabSize {
-			return nil, fmt.Errorf("token id out of range: %d", tok)
-		}
-		m.Embeddings.RowTo(X.Data[i*X.Stride:], tok)
-	}
-	if scale := m.Config.Config.EmbeddingMultiplier; scale != 0 && scale != 1 {
-		s := float32(scale)
-		for i := range X.Data {
-			X.Data[i] *= s
-		}
-	}
-	if m.Config.Config.MuPEnabled && m.MuPScale != 1 {
-		for i := range X.Data {
-			X.Data[i] *= m.MuPScale
-		}
-	}
-
-	// Temporary matrices for GEMM
-	Q := instance.NewMat(seqLen, nHead*headDim)
-	K := instance.NewMat(seqLen, kvHeads*headDim)
-	V := instance.NewMat(seqLen, kvHeads*headDim)
-	attnOut := instance.NewMat(seqLen, embd)
-	ffnUp := instance.NewMat(seqLen, m.Config.Config.FFNLength)
-	ffnGate := instance.NewMat(seqLen, m.Config.Config.FFNLength)
-	ffnAct := instance.NewMat(seqLen, m.Config.Config.FFNLength)
-	// X_norm holds the normalized input for projections, preserving X for residual
-	X_norm := instance.NewMat(seqLen, embd)
-
-	// Process through layers
-	for layerIdx := range m.Layers {
-		layer := &m.Layers[layerIdx]
-
-		// RMSNorm each row: X -> X_norm
-		for i := range seqLen {
-			rowOff := i * X.Stride
-			RMSNorm(X_norm.Data[rowOff:rowOff+embd], X.Data[rowOff:rowOff+embd], layer.AttnNorm, m.RMSEpsilon)
-		}
-
-		// QKV projections using GEMM: X_norm @ W^T
-		cfg := SelectGemmConfigWithTiling(seqLen, embd, nHead*headDim, tiling)
-		GemmPar(cfg, &Q, &X_norm, layer.Wq, 1.0, 0.0, 0)
-		GemmPar(cfg, &K, &X_norm, layer.Wk, 1.0, 0.0, 0)
-		GemmPar(cfg, &V, &X_norm, layer.Wv, 1.0, 0.0, 0)
-
-		// Attention for each position
-		for i := range seqLen {
-			pos := m.Pos + i
-			qRow := Q.Data[i*Q.Stride : i*Q.Stride+nHead*headDim]
-			kRow := K.Data[i*K.Stride : i*K.Stride+kvHeads*headDim]
-			vRow := V.Data[i*V.Stride : i*V.Stride+kvHeads*headDim]
-			outRow := attnOut.Data[i*attnOut.Stride : i*attnOut.Stride+embd]
-
-			// Apply RoPE and attention
-			copy(m.Scratch.Q, qRow)
-			copy(m.Scratch.K, kRow)
-			copy(m.Scratch.V, vRow)
-
-			attnResult := Attention(m, layer, m.Scratch.Q[:embd], pos)
-			copy(outRow, attnResult)
-		}
-
-		// Post-Attention Norm (if any) - applied to branch output before residual?
-		// Note: modelspec maps `post_attention_layernorm` to `PostAttnNorm`.
-		// In Sandwich Norm, this might be applied to the residual branch?
-		// Standard Pre-Norm doesn't use this. Gemma 2 doesn't.
-		// If Gemma 3 uses this as "Sandwich", we apply it to `attnOut`.
-		if len(layer.PostAttnNorm) > 0 {
-			for i := range seqLen {
-				rowOff := i * attnOut.Stride
-				RMSNorm(m.Scratch.Tmp, attnOut.Data[rowOff:rowOff+embd], layer.PostAttnNorm, m.RMSEpsilon)
-				copy(attnOut.Data[rowOff:rowOff+embd], m.Scratch.Tmp)
-			}
-		}
-
-		// Residual: X = X + attnOut
-		for i := range seqLen {
-			xRow := X.Data[i*X.Stride : i*X.Stride+embd]
-			aRow := attnOut.Data[i*attnOut.Stride : i*attnOut.Stride+embd]
-			Add(xRow, aRow)
-		}
-
-		// FFN block
-		// RMSNorm each row: X -> X_norm
-		for i := range seqLen {
-			rowOff := i * X.Stride
-			RMSNorm(X_norm.Data[rowOff:rowOff+embd], X.Data[rowOff:rowOff+embd], layer.FfnNorm, m.RMSEpsilon)
-		}
-
-		// FFN projections using GEMM: X_norm @ W^T
-		cfg = SelectGemmConfigWithTiling(seqLen, embd, m.Config.Config.FFNLength, tiling)
-		GemmPar(cfg, &ffnUp, &X_norm, layer.FfnUp, 1.0, 0.0, 0)
-		GemmPar(cfg, &ffnGate, &X_norm, layer.FfnGate, 1.0, 0.0, 0)
-
-		// Gated activation: ffnAct = activation(ffnGate) * ffnUp
-		useGelu := strings.Contains(m.Config.Config.HiddenAct, "gelu")
-		for i := range seqLen {
-			upRow := ffnUp.Data[i*ffnUp.Stride : i*ffnUp.Stride+m.Config.Config.FFNLength]
-			gateRow := ffnGate.Data[i*ffnGate.Stride : i*ffnGate.Stride+m.Config.Config.FFNLength]
-			actRow := ffnAct.Data[i*ffnAct.Stride : i*ffnAct.Stride+m.Config.Config.FFNLength]
-			if useGelu {
-				FusedGeluAct(actRow, gateRow, upRow)
-			} else {
-				FusedSiluAct(actRow, gateRow, upRow)
-			}
-		}
-
-		// Down projection: ffnOut = ffnAct @ FfnDown
-		ffnOut := instance.NewMat(seqLen, embd)
-		cfg = SelectGemmConfigWithTiling(seqLen, m.Config.Config.FFNLength, embd, tiling)
-		GemmPar(cfg, &ffnOut, &ffnAct, layer.FfnDown, 1.0, 0.0, 0)
-
-		// Post-FFN Norm (Sandwich Norm)
-		if len(layer.PostFfnNorm) > 0 {
-			for i := range seqLen {
-				rowOff := i * ffnOut.Stride
-				RMSNorm(m.Scratch.Tmp, ffnOut.Data[rowOff:rowOff+embd], layer.PostFfnNorm, m.RMSEpsilon)
-				copy(ffnOut.Data[rowOff:rowOff+embd], m.Scratch.Tmp)
-			}
-		}
-
-		// Residual: X = X + ffnOut
-		for i := range seqLen {
-			xRow := X.Data[i*X.Stride : i*X.Stride+embd]
-			fRow := ffnOut.Data[i*ffnOut.Stride : i*ffnOut.Stride+embd]
-			Add(xRow, fRow)
-		}
-	}
-
-	// Output norm and projection to logits
-	logits := instance.NewMat(seqLen, m.Config.Config.VocabSize)
-	for i := range seqLen {
-		rowOff := i * X.Stride
-		RMSNorm(m.Scratch.Tmp, X.Data[rowOff:rowOff+embd], m.OutputNorm, m.RMSEpsilon)
-	}
-
-	// Output projection using GEMM
-	outCfg := SelectGemmConfigWithTiling(seqLen, embd, m.Config.Config.VocabSize, tiling)
-	GemmPar(outCfg, &logits, &X, m.Output, 1.0, 0.0, 0)
-
-	if softcap := m.Config.Config.FinalLogitSoftcap; softcap > 0 {
-		for i := range logits.Data {
-			logits.Data[i] = fastTanh(logits.Data[i]/softcap) * softcap
-		}
-	}
-
-	// Collect logits
-	outputs := make([][]float32, seqLen)
-	for i := range seqLen {
-		outputs[i] = make([]float32, m.Config.Config.VocabSize)
-		copy(outputs[i], logits.Data[i*logits.Stride:i*logits.Stride+m.Config.Config.VocabSize])
-	}
-
-	m.Pos += seqLen
 	return outputs, nil
 }
 
@@ -269,6 +78,14 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 				m.Scratch.Logits[i] = fastTanh(m.Scratch.Logits[i]/softcap) * softcap
 			}
 		}
+	} else if os.Getenv("MANTLE_DEBUG_GEN") != "" {
+		maxV := float32(0)
+		for _, v := range m.Scratch.Logits[:min(5, len(m.Scratch.Logits))] {
+			if v > maxV {
+				maxV = v
+			}
+		}
+		fmt.Fprintf(os.Stderr, "  DEBUG softcap: softcap=%f (skipped, <=0) max_first_5=%f\n", softcap, maxV)
 	}
 
 	m.Pos++

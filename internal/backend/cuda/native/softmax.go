@@ -41,14 +41,15 @@ import "C"
 
 import (
 	"fmt"
+	"math"
 )
 
 func SoftmaxRowsF32(data DeviceBuffer, rows, cols int, stream Stream) error {
 	if data.ptr == nil {
-		return fmt.Errorf("softmax buffer is nil")
+		return fmt.Errorf("native.SoftmaxRowsF32: softmax buffer is nil")
 	}
-	if rows <= 0 || cols <= 0 {
-		return fmt.Errorf("softmax dimensions must be > 0")
+	if rows <= 0 || cols <= 0 || rows > math.MaxInt32 || cols > math.MaxInt32 {
+		return fmt.Errorf("native.SoftmaxRowsF32: dimensions must be in [1, %d]", math.MaxInt32)
 	}
 	return cudaErr(C.mantleCudaSoftmaxRowsF32Wrapper(
 		(*C.float)(data.ptr),

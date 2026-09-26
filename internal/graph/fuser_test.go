@@ -436,10 +436,7 @@ func TestNoFuseWhenOutput(t *testing.T) {
 	// (no fuser searches for that combination). Even if it matched,
 	// the output node has no downstream uses, which would fail
 	// FuseSubgraph output-node checks.
-	if FuseLinear(g, 1, []OpType{OpFFNBlock, OpOutput}) {
-		// It happens to match FuseLinear's checks (use count=1, both ops
-		// match), but no real fuser uses this pattern. This test documents
-		// that such a pair is MATCHABLE by FuseLinear but NOT by any
-		// existing fuser.
+	if !FuseLinear(g, 1, []OpType{OpFFNBlock, OpOutput}) {
+		t.Fatal("expected the linear pattern to match")
 	}
 }

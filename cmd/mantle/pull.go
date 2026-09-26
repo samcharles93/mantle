@@ -41,7 +41,7 @@ func pullCmd() *cli.Command {
 			if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 				return cli.Exit(fmt.Sprintf("pull: failed to create temp dir: %v", err), 1)
 			}
-			defer os.RemoveAll(tmpDir)
+			defer func() { _ = os.RemoveAll(tmpDir) }()
 
 			log.Info("fetching model info", "repo", repo)
 			info, err := hf.GetModelInfo(repo)

@@ -360,10 +360,10 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			i := 0
 			if cpu.HasAVX2 {
 				for ; i+8 <= n; i += 8 {
-					vout := archsimd.LoadFloat32x8Slice(attnOut[i:])
-					vgate := archsimd.LoadFloat32x8Slice(gate[i:])
+					vout := archsimd.LoadFloat32x8(attnOut[i:])
+					vgate := archsimd.LoadFloat32x8(gate[i:])
 					vout = vout.Mul(fastSigmoidVec(vgate))
-					vout.StoreSlice(attnOut[i:])
+					vout.Store(attnOut[i:])
 				}
 			}
 			for ; i < n; i++ {
@@ -404,10 +404,10 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 				i := 0
 				if cpu.HasAVX2 {
 					for ; i+8 <= n; i += 8 {
-						vout := archsimd.LoadFloat32x8Slice(attnOut[i:])
-						vgate := archsimd.LoadFloat32x8Slice(gate[i:])
+						vout := archsimd.LoadFloat32x8(attnOut[i:])
+						vgate := archsimd.LoadFloat32x8(gate[i:])
 						vout = vout.Mul(fastSigmoidVec(vgate))
-						vout.StoreSlice(attnOut[i:])
+						vout.Store(attnOut[i:])
 					}
 				}
 				for ; i < n; i++ {
@@ -512,10 +512,10 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		i := 0
 		if cpu.HasAVX2 {
 			for ; i+8 <= n; i += 8 {
-				vout := archsimd.LoadFloat32x8Slice(attnOut[i:])
-				vgate := archsimd.LoadFloat32x8Slice(gate[i:])
+				vout := archsimd.LoadFloat32x8(attnOut[i:])
+				vgate := archsimd.LoadFloat32x8(gate[i:])
 				vout = vout.Mul(fastSigmoidVec(vgate))
-				vout.StoreSlice(attnOut[i:])
+				vout.Store(attnOut[i:])
 			}
 		}
 		for ; i < n; i++ {

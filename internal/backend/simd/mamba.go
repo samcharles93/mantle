@@ -66,9 +66,9 @@ func Mamba(m *Instance, layer *Layer, x []float32) []float32 {
 	i := 0
 	if cpu.HasAVX2 {
 		for ; i+8 <= n; i += 8 {
-			v := archsimd.LoadFloat32x8Slice(m.Scratch.MambaConv[i:])
+			v := archsimd.LoadFloat32x8(m.Scratch.MambaConv[i:])
 			v = fastSiluVec(v)
-			v.StoreSlice(m.Scratch.MambaConv[i:])
+			v.Store(m.Scratch.MambaConv[i:])
 		}
 	}
 	for ; i < n; i++ {
@@ -103,10 +103,10 @@ func Mamba(m *Instance, layer *Layer, x []float32) []float32 {
 		i := 0
 		if cpu.HasAVX2 {
 			for ; i+8 <= n; i += 8 {
-				vy := archsimd.LoadFloat32x8Slice(y[i:])
-				vz := archsimd.LoadFloat32x8Slice(m.Scratch.MambaZ[i:])
+				vy := archsimd.LoadFloat32x8(y[i:])
+				vz := archsimd.LoadFloat32x8(m.Scratch.MambaZ[i:])
 				vy = vy.Mul(fastSiluVec(vz))
-				vy.StoreSlice(y[i:])
+				vy.Store(y[i:])
 			}
 		}
 		for ; i < n; i++ {

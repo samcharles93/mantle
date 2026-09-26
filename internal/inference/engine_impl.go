@@ -241,14 +241,24 @@ func (e *EngineImpl) renderPrompt(req *Request) (string, error) {
 }
 
 // setupGraphExecution builds the computation graph for the current model and
-// wires it to the generator. It requires the SIMD backend (the only backend
-// that currently supports graph-based execution).
+// wires it to the generator. It requires a backend that supports graph-based execution.
 func (e *EngineImpl) setupGraphExecution(gen *Generator) {
-	simdInst, ok := e.model.(*simd.Instance)
-	if !ok {
+	var coreInst *core.Instance
+	var grRunner graphRunner
+
+	if provider, ok := e.model.(interface{ Instance() *core.Instance }); ok {
+		coreInst = provider.Instance()
+	} else if simdInst, ok := e.model.(*simd.Instance); ok {
+		coreInst = (*core.Instance)(simdInst)
+	}
+
+	if runner, ok := e.model.(graphRunner); ok {
+		grRunner = runner
+	}
+
+	if coreInst == nil || grRunner == nil {
 		return
 	}
-	coreInst := (*core.Instance)(simdInst)
 	cfg := &coreInst.Config.Config
 
 	var g *graph.Graph
@@ -272,5 +282,5 @@ func (e *EngineImpl) setupGraphExecution(gen *Generator) {
 	}
 	gen.useGraph = true
 	gen.engineGraph = g
-	gen.gr = simdInst
+	gen.gr = grRunner
 }

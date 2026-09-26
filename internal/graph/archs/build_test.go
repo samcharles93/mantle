@@ -9,7 +9,7 @@ import (
 
 func makeLayers(n int, headKV, headDim, attnWindow int, act string) []core.Layer {
 	layers := make([]core.Layer, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		layers[i] = core.Layer{
 			HeadKV:        headKV,
 			HeadDim:       headDim,
@@ -173,7 +173,7 @@ func TestDeterministicBuilder(t *testing.T) {
 	b := &LlamaBuilder{}
 
 	var first *graph.Graph
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		g, err := b.BuildGraph(&inst.Config.Config, inst)
 		if err != nil {
 			t.Fatalf("iteration %d: BuildGraph failed: %v", i, err)

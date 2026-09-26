@@ -40,12 +40,12 @@ func fusedSiluActAVX2(dst, gate, up []float32) {
 	signMask := archsimd.BroadcastInt32x8(0x7FFFFFFF)
 
 	for ; i+8 <= len(gate); i += 8 {
-		vgate := archsimd.LoadFloat32x8Slice(gate[i:])
-		vup := archsimd.LoadFloat32x8Slice(up[i:])
+		vgate := archsimd.LoadFloat32x8(gate[i:])
+		vup := archsimd.LoadFloat32x8(up[i:])
 
 		// Compute |x| by clearing sign bit
-		vgateInt := vgate.AsInt32x8()
-		vabs := vgateInt.And(signMask).AsFloat32x8()
+		vgateInt := vgate.ToBits().BitsToInt32()
+		vabs := vgateInt.And(signMask).ToBits().BitsToFloat32()
 
 		// sigmoid ≈ 0.5 + 0.5 * x / (1 + |x|)
 		vdenom := vone.Add(vabs)
@@ -54,7 +54,7 @@ func fusedSiluActAVX2(dst, gate, up []float32) {
 
 		// SiLU = gate * sigmoid * up
 		vsilu := vgate.Mul(vsig).Mul(vup)
-		vsilu.StoreSlice(dst[i:])
+		vsilu.Store(dst[i:])
 	}
 
 	// Handle remaining elements with same approximation
@@ -85,10 +85,10 @@ func FusedGeluAct(dst, gate, up []float32) {
 func fusedGeluActAVX2(dst, gate, up []float32) {
 	i := 0
 	for ; i+8 <= len(gate); i += 8 {
-		vgate := archsimd.LoadFloat32x8Slice(gate[i:])
-		vup := archsimd.LoadFloat32x8Slice(up[i:])
+		vgate := archsimd.LoadFloat32x8(gate[i:])
+		vup := archsimd.LoadFloat32x8(up[i:])
 		vact := fastGeluVec(vgate).Mul(vup)
-		vact.StoreSlice(dst[i:])
+		vact.Store(dst[i:])
 	}
 	for ; i < len(gate); i++ {
 		dst[i] = Gelu(gate[i]) * up[i]

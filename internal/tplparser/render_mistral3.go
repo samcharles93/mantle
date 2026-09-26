@@ -58,7 +58,7 @@ func renderMistral3(opts RenderOptions) (string, bool, error) {
 			}
 		case "tool":
 			b.WriteString("[TOOL_RESULTS]")
-			b.WriteString(fmt.Sprint(msg.Content))
+			fmt.Fprint(&b, msg.Content)
 			b.WriteString("[/TOOL_RESULTS]")
 		default:
 			return "", false, fmt.Errorf("mistral3: unsupported role %q", msg.Role)

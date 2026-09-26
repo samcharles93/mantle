@@ -7,9 +7,13 @@ import (
 
 func TestParamsTypeSwitch(t *testing.T) {
 	params := []NodeParams{
-		AttentionParams{}, FFNParams{}, MoEParams{},
-		MambaParams{}, DeltaNetParams{},
-		EmbedParams{}, OutputParams{},
+		AttentionParams{},
+		FFNParams{},
+		MoEParams{},
+		MambaParams{},
+		DeltaNetParams{},
+		EmbedParams{},
+		OutputParams{},
 	}
 	for _, p := range params {
 		switch p.(type) {
@@ -22,9 +26,13 @@ func TestParamsTypeSwitch(t *testing.T) {
 
 func TestParamsDistinct(t *testing.T) {
 	params := []NodeParams{
-		AttentionParams{}, FFNParams{}, MoEParams{},
-		MambaParams{}, DeltaNetParams{},
-		EmbedParams{}, OutputParams{},
+		AttentionParams{},
+		FFNParams{},
+		MoEParams{},
+		MambaParams{},
+		DeltaNetParams{},
+		EmbedParams{},
+		OutputParams{},
 	}
 	seen := map[reflect.Type]bool{}
 	for _, p := range params {
