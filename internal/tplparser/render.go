@@ -4,6 +4,14 @@ import "strings"
 
 // Render returns (output, ok). ok=false means the template is unsupported.
 func Render(opts RenderOptions) (string, bool, error) {
+	out, ok, err := render(opts)
+	if !ok || err != nil {
+		return out, ok, err
+	}
+	return ensureLeadingBOS(out, opts), true, nil
+}
+
+func render(opts RenderOptions) (string, bool, error) {
 	if opts.Template == "" {
 		return renderByArchDefault(opts)
 	}
@@ -14,6 +22,41 @@ func Render(opts RenderOptions) (string, bool, error) {
 		return out, ok, err
 	}
 	return "", false, nil
+}
+
+// ensureLeadingBOS prepends the tokenizer's BOS token when the source template
+// emits it as its very first content but the selected renderer did not write it.
+//
+// Renderers are selected by architecture/signature and re-implement the template
+// in Go rather than evaluating the Jinja source, so a template's explicit leading
+// BOS has to be honoured separately. MiniCPM5 is the motivating case: it is a
+// Llama-family model whose ChatML template starts with "{{- bos_token }}" and
+// mentions <tools>, so it dispatches to renderQwen3, which does not emit BOS.
+// Templates that do not open with bos_token are left completely untouched.
+func ensureLeadingBOS(out string, opts RenderOptions) string {
+	if opts.BOSToken == "" || !templateWantsLeadingBOS(opts.Template) {
+		return out
+	}
+	if strings.HasPrefix(out, opts.BOSToken) {
+		return out
+	}
+	return opts.BOSToken + out
+}
+
+// templateWantsLeadingBOS reports whether the template's first emitted content is
+// its bos_token, e.g. "{{- bos_token }}{%- if tools %}".
+func templateWantsLeadingBOS(tpl string) bool {
+	t := strings.TrimSpace(tpl)
+	if !strings.HasPrefix(t, "{{") {
+		return false
+	}
+	end := strings.Index(t, "}}")
+	if end < 0 {
+		return false
+	}
+	expr := strings.TrimSpace(t[2:end])
+	expr = strings.TrimSpace(strings.Trim(expr, "-"))
+	return expr == "bos_token"
 }
 
 func renderByArchDefault(opts RenderOptions) (string, bool, error) {

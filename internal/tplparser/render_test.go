@@ -120,3 +120,63 @@ func TestRenderUnsupported(t *testing.T) {
 		t.Fatalf("expected empty output for unsupported template, got %q", out)
 	}
 }
+
+// MiniCPM5's ChatML template opens with "{{- bos_token }}" and also mentions
+// <tools>, so signature dispatch sends it to the Qwen3 renderer, which never
+// writes a BOS. The template's explicit leading bos_token has to be honoured
+// separately, and a template that does not ask for one must stay untouched.
+func TestRenderHonoursLeadingBOSToken(t *testing.T) {
+	t.Parallel()
+
+	const bos = "<s>"
+	tpl := "{{- bos_token }}{%- if tools %}<tools></tools>{%- endif %}" +
+		"{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}" +
+		"{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+
+	out, ok, err := Render(RenderOptions{
+		Template:            tpl,
+		BOSToken:            bos,
+		AddGenerationPrompt: true,
+		Messages:            []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("render error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected a renderer match")
+	}
+	if !strings.HasPrefix(out, bos) {
+		t.Fatalf("expected BOS prefix, got %q", out)
+	}
+
+	// A template that opens with bos_token but dispatches to the ChatML renderer
+	// (which already writes it when add_bos_token is false) must not be doubled.
+	chatml := "{{- bos_token }}{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}"
+	once, ok, err := Render(RenderOptions{
+		Template: chatml,
+		BOSToken: bos,
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil || !ok {
+		t.Fatalf("render error: %v ok=%v", err, ok)
+	}
+	if n := strings.Count(once, bos); n != 1 {
+		t.Fatalf("expected exactly one BOS, got %d in %q", n, once)
+	}
+
+	// A template that does not ask for a leading bos_token must gain none, even
+	// though a BOS token is configured.
+	plain := "{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}"
+	noBOS, ok, err := Render(RenderOptions{
+		Template: plain,
+		BOSToken: bos,
+		AddBOS:   true,
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil || !ok {
+		t.Fatalf("render error: %v ok=%v", err, ok)
+	}
+	if strings.Contains(noBOS, bos) {
+		t.Fatalf("template without a leading bos_token must not gain one: %q", noBOS)
+	}
+}

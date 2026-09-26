@@ -363,6 +363,23 @@ func ParseHFTokenizerConfigBytes(tokJSON []byte, tokConfig []byte) (TokenizerCon
 		_ = json.Unmarshal(tokConfig, &cfg)
 	}
 
+	// TokenString(id) on TokenizerConfig cannot work without an id -> token table,
+	// and nothing else populates it. Without this, bos_token/eos_token resolve to
+	// "" at render time, so a template that opens with its bos_token (MiniCPM5's
+	// ChatML template does: "{{- bos_token }}") silently loses the BOS.
+	maxID := -1
+	for _, id := range encoder {
+		if id > maxID {
+			maxID = id
+		}
+	}
+	tokens := make([]string, maxID+1)
+	for tok, id := range encoder {
+		if id >= 0 {
+			tokens[id] = tok
+		}
+	}
+
 	out := TokenizerConfig{
 		AddBOS:       cfg.AddBOS,
 		AddEOS:       cfg.AddEOS,
@@ -371,6 +388,7 @@ func ParseHFTokenizerConfigBytes(tokJSON []byte, tokConfig []byte) (TokenizerCon
 		EOSTokenID:   -1,
 		PADTokenID:   -1,
 		UNKTokenID:   -1,
+		Tokens:       tokens,
 	}
 
 	resolveID := func(tok string, idPtr *int) int {
