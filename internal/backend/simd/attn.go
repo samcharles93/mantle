@@ -77,6 +77,29 @@ func layerIsKVSource(m *Instance, layer *Layer) bool {
 	return false
 }
 
+// splitFusedQGate extracts per-head query and gate rows from a fused Q+gate
+// projection output. The fused tensor interleaves rows per head:
+// [q_head0 | gate_head0 | q_head1 | gate_head1 | ...], matching the upstream
+// layout where q_proj output is viewed as (heads, 2*headDim) and chunked in two
+// along the last dim. q and gate must each be headDim*nHead long.
+//
+// gate is allowed to alias the second half of fused, which is how Attention
+// calls it (fused = AttnGate[:2*qDim], gate = AttnGate[qDim:2*qDim]). That
+// makes the gate step an in-place permutation, so queries are extracted first
+// and gate blocks are then moved in descending head order: a gate block's
+// source index is always <= its destination index, so no source that is still
+// needed can be overwritten. Splitting naively in ascending order corrupts the
+// queries of later heads.
+func splitFusedQGate(q, gate, fused []float32, headDim int) {
+	nHead := len(q) / headDim
+	for h := range nHead {
+		copy(q[h*headDim:(h+1)*headDim], fused[(2*h)*headDim:(2*h+1)*headDim])
+	}
+	for h := nHead - 1; h >= 0; h-- {
+		copy(gate[h*headDim:(h+1)*headDim], fused[(2*h+1)*headDim:(2*h+2)*headDim])
+	}
+}
+
 // Attention performs multi-head attention with optional RoPE, KV caching, and sliding window.
 // Implements the full attention mechanism including Q/K/V projections, attention computation,
 // and output projection.
@@ -196,7 +219,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 				qDim := nHead * headDim
 				fused := m.Scratch.AttnGate[:2*qDim]
 				project(fused, layer.Wq)
-				copy(q, fused[:qDim])
+				splitFusedQGate(q, m.Scratch.AttnGate[qDim:2*qDim], fused, headDim)
 			} else {
 				project(q, layer.Wq)
 			}
@@ -235,7 +258,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 			qDim := nHead * headDim
 			fused := m.Scratch.AttnGate[:2*qDim]
 			project(fused, layer.Wq)
-			copy(q, fused[:qDim])
+			splitFusedQGate(q, m.Scratch.AttnGate[qDim:2*qDim], fused, headDim)
 		} else {
 			project(q, layer.Wq)
 		}

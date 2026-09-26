@@ -413,3 +413,76 @@ func newAttentionFastPathFixture(ops Ops) (*Instance, *Layer) {
 	m.SetOps(ops)
 	return m, layer
 }
+
+// TestSplitFusedQGate pins the fused query+gate layout. Upstream
+// (Qwen3NextAttention / Qwen3_5Attention) does
+//
+//	q_proj(x).view(..., nHead, 2*headDim) then chunk(2, dim=-1)
+//
+// so the projection output interleaves per head as
+// [q_h0 | gate_h0 | q_h1 | gate_h1 | ...]. Splitting it as concatenated
+// halves ("[q...|gate...]") silently mixes query and gate values and was a
+// real bug for quantised models, where the fused mat is split at inference
+// time rather than at load time.
+func TestSplitFusedQGate(t *testing.T) {
+	t.Parallel()
+
+	const headDim = 4
+	const nHead = 3
+	fused := make([]float32, 2*nHead*headDim)
+	// Encode the head index and whether the value is query or gate.
+	for h := range nHead {
+		for d := range headDim {
+			fused[(2*h)*headDim+d] = float32(100*h + d)          // query
+			fused[(2*h+1)*headDim+d] = float32(1000 + 100*h + d) // gate
+		}
+	}
+
+	q := make([]float32, nHead*headDim)
+	gate := make([]float32, nHead*headDim)
+	splitFusedQGate(q, gate, fused, headDim)
+
+	for h := range nHead {
+		for d := range headDim {
+			wantQ := float32(100*h + d)
+			wantG := float32(1000 + 100*h + d)
+			if got := q[h*headDim+d]; got != wantQ {
+				t.Fatalf("q[head %d, dim %d] = %v, want %v", h, d, got, wantQ)
+			}
+			if got := gate[h*headDim+d]; got != wantG {
+				t.Fatalf("gate[head %d, dim %d] = %v, want %v", h, d, got, wantG)
+			}
+		}
+	}
+}
+
+// TestSplitFusedQGateInPlace guarantees the split is safe when the gate
+// destination aliases the fused source, which is how Attention calls it
+// (fused = AttnGate[:2*qDim], gate = AttnGate[qDim:2*qDim]).
+func TestSplitFusedQGateInPlace(t *testing.T) {
+	t.Parallel()
+
+	const headDim = 4
+	const nHead = 2
+	buf := make([]float32, 2*nHead*headDim)
+	for i := range buf {
+		buf[i] = float32(i + 1)
+	}
+	wantQ := make([]float32, nHead*headDim)
+	wantGate := make([]float32, nHead*headDim)
+	splitFusedQGate(wantQ, wantGate, buf, headDim)
+
+	q := make([]float32, nHead*headDim)
+	splitFusedQGate(q, buf[nHead*headDim:], buf, headDim)
+
+	for i := range q {
+		if q[i] != wantQ[i] {
+			t.Fatalf("in-place q[%d] = %v, want %v", i, q[i], wantQ[i])
+		}
+	}
+	for i := range wantGate {
+		if buf[nHead*headDim+i] != wantGate[i] {
+			t.Fatalf("in-place gate[%d] = %v, want %v", i, buf[nHead*headDim+i], wantGate[i])
+		}
+	}
+}
