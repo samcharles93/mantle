@@ -791,6 +791,104 @@ extern "C"
       out_h[d] = out_h[d] / (s_l + 1e-12f);
     }
   }
+
+  // Batched variant of attention_inner_f16_cache_f32_kernel. One block per
+  // (query row, head) pair: blockIdx.x selects the query row and blockIdx.y the
+  // head, so a single launch processes `n_tokens` rows. Query row `row` lives
+  // at q + row*n_head*head_dim and attends ring positions 0..(start_pos+row)
+  // with a zero window start. The per-block body is the same online-softmax
+  // recurrence as the single-query kernel, so the result is bit-identical to
+  // calling it once per row with pos = start_pos + row and start = 0.
+  __global__ void attention_inner_f16_cache_f32_batch_kernel(
+      const float *__restrict__ q, const uint16_t *__restrict__ cache_k,
+      const uint16_t *__restrict__ cache_v, float *__restrict__ out,
+      int n_tokens, int start_pos, int kv_stride, int head_dim, int n_head,
+      int kv_heads, int cache_len, float scale, float softcap)
+  {
+    const int row = blockIdx.x;
+    const int h = blockIdx.y;
+    const int tid = threadIdx.x;
+    if (row >= n_tokens || h >= n_head)
+      return;
+
+    const int pos = start_pos + row;
+    const int kv_head = (h * kv_heads) / n_head;
+    const float *qh = q + ((size_t)row * n_head + h) * head_dim;
+    float *out_h = out + ((size_t)row * n_head + h) * head_dim;
+
+    for (int d = tid; d < head_dim; d += blockDim.x)
+    {
+      out_h[d] = 0.0f;
+    }
+    __syncthreads();
+
+    __shared__ float partial[256];
+    __shared__ float s_m;
+    __shared__ float s_l;
+    __shared__ float s_alpha;
+    __shared__ float s_beta;
+
+    if (tid == 0)
+    {
+      s_m = -INFINITY;
+      s_l = 0.0f;
+    }
+    __syncthreads();
+
+    const bool use_ring = cache_len > 0 && cache_len < (pos + 1);
+
+    for (int t = 0; t <= pos; t++)
+    {
+      const int cache_pos = use_ring ? (t % cache_len) : t;
+      const int k_base = cache_pos * kv_stride + kv_head * head_dim;
+
+      float dot_part = 0.0f;
+      for (int d = tid; d < head_dim; d += blockDim.x)
+      {
+        const float kf = f16_to_f32(cache_k[k_base + d]);
+        dot_part += qh[d] * kf;
+      }
+      partial[tid] = dot_part;
+      __syncthreads();
+
+      for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
+      {
+        if (tid < stride)
+        {
+          partial[tid] += partial[tid + stride];
+        }
+        __syncthreads();
+      }
+
+      if (tid == 0)
+      {
+        float s = partial[0] * scale;
+        if (softcap > 0.0f)
+        {
+          s = tanhf(s / softcap) * softcap;
+        }
+        const float m_new = fmaxf(s_m, s);
+        s_alpha = __expf(s_m - m_new);
+        s_beta = __expf(s - m_new);
+        s_l = s_l * s_alpha + s_beta;
+        s_m = m_new;
+      }
+      __syncthreads();
+
+      const int v_base = cache_pos * kv_stride + kv_head * head_dim;
+      for (int d = tid; d < head_dim; d += blockDim.x)
+      {
+        const float vf = f16_to_f32(cache_v[v_base + d]);
+        out_h[d] = out_h[d] * s_alpha + s_beta * vf;
+      }
+      __syncthreads();
+    }
+
+    for (int d = tid; d < head_dim; d += blockDim.x)
+    {
+      out_h[d] = out_h[d] / (s_l + 1e-12f);
+    }
+  }
   __global__ void attention_inner_mixed_cache_f32_kernel(
       const float *__restrict__ q,
       const uint16_t *__restrict__ cache_k_f16,
@@ -851,6 +949,184 @@ extern "C"
     const bool use_ring = cache_len > 0 && cache_len < (pos + 1);
 
     for (int t = start; t <= pos; t++)
+    {
+      const int cache_pos = use_ring ? (t % cache_len) : t;
+      const int kv_base = cache_pos * kv_stride + kv_head * head_dim;
+      const int head_scale_base = (cache_pos * scale_stride) + (kv_head * blocks_per_head);
+
+      // --- 1. Dot Product (Q @ K) ---
+      float dot_part = 0.0f;
+      if (use_q8_k_cache)
+      {
+        const int8_t *k_q8 = cache_k_q8 + kv_base;
+        for (int d = tid; d < head_dim; d += blockDim.x)
+        {
+          float k_scale = cache_k_scales[head_scale_base + (d / 32)];
+          dot_part += qh[d] * (static_cast<float>(k_q8[d]) * k_scale);
+        }
+      }
+      else
+      {
+        const uint16_t *k_f16 = cache_k_f16 + kv_base;
+        for (int d = tid; d < head_dim; d += blockDim.x)
+        {
+          dot_part += qh[d] * f16_to_f32(k_f16[d]);
+        }
+      }
+
+      // Intra-block reduction for dot product
+      dot_part = warp_reduce_sum(dot_part);
+      if (lane == 0)
+        partial[warp] = dot_part;
+      __syncthreads();
+
+      if (warp == 0)
+      {
+        float block_dot = (lane < warp_count) ? partial[lane] : 0.0f;
+        block_dot = warp_reduce_sum(block_dot);
+        if (lane == 0)
+          partial[0] = block_dot;
+      }
+      __syncthreads();
+
+      // --- 2. Online Softmax Update ---
+      if (tid == 0)
+      {
+        float s = partial[0] * scale;
+        if (softcap > 0.0f)
+          s = tanhf(s / softcap) * softcap;
+
+        const float m_new = fmaxf(s_m, s);
+        s_alpha = __expf(s_m - m_new);
+        s_beta = __expf(s - m_new);
+        s_l = s_l * s_alpha + s_beta;
+        s_m = m_new;
+      }
+      __syncthreads();
+
+      // --- 3. Weighted Sum (Score @ V) ---
+      if (register_out)
+      {
+        if (tid < head_dim)
+        {
+          float v_val;
+          if (use_q8_v_cache)
+          {
+            float v_scale = cache_v_scales[head_scale_base + (tid / 32)];
+            v_val = static_cast<float>(cache_v_q8[kv_base + tid]) * v_scale;
+          }
+          else
+          {
+            v_val = f16_to_f32(cache_v_f16[kv_base + tid]);
+          }
+          out_acc = out_acc * s_alpha + s_beta * v_val;
+        }
+      }
+      else
+      {
+        for (int d = tid; d < head_dim; d += blockDim.x)
+        {
+          float v_val;
+          if (use_q8_v_cache)
+          {
+            float v_scale = cache_v_scales[head_scale_base + (d / 32)];
+            v_val = static_cast<float>(cache_v_q8[kv_base + d]) * v_scale;
+          }
+          else
+          {
+            v_val = f16_to_f32(cache_v_f16[kv_base + d]);
+          }
+          out_h[d] = out_h[d] * s_alpha + s_beta * v_val;
+        }
+      }
+      __syncthreads();
+    }
+
+    // --- 4. Final Normalization ---
+    const float inv_l = 1.0f / (s_l + 1e-12f);
+    if (register_out)
+    {
+      if (tid < head_dim)
+        out_h[tid] = out_acc * inv_l;
+    }
+    else
+    {
+      for (int d = tid; d < head_dim; d += blockDim.x)
+      {
+        out_h[d] *= inv_l;
+      }
+    }
+  }
+
+  // Batched variant of attention_inner_mixed_cache_f32_kernel. Same (query row,
+  // head) block mapping and the same online-softmax recurrence as the
+  // single-query mixed kernel; query row `row` lives at q +
+  // row*n_head*head_dim and attends ring positions 0..(start_pos+row) with a
+  // zero window start. Numerically identical to calling the single-query mixed
+  // kernel once per row with pos = start_pos + row and start = 0.
+  __global__ void attention_inner_mixed_cache_f32_batch_kernel(
+      const float *__restrict__ q,
+      const uint16_t *__restrict__ cache_k_f16,
+      const uint16_t *__restrict__ cache_v_f16,
+      const int8_t *__restrict__ cache_k_q8,
+      const int8_t *__restrict__ cache_v_q8,
+      const float *__restrict__ cache_k_scales,
+      const float *__restrict__ cache_v_scales,
+      float *__restrict__ out,
+      int use_q8_k, int use_q8_v, int n_tokens, int start_pos, int kv_stride,
+      int head_dim, int n_head, int kv_heads, int cache_len, float scale,
+      float softcap)
+  {
+    const int row = blockIdx.x;
+    const int h = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int lane = tid & (WARP_SIZE - 1);
+    const int warp = tid / WARP_SIZE;
+    const int warp_count = blockDim.x / WARP_SIZE;
+
+    if (row >= n_tokens || h >= n_head)
+      return;
+
+    const int pos = start_pos + row;
+    const int kv_head = (h * kv_heads) / n_head;
+    const float *qh = q + ((size_t)row * n_head + h) * head_dim;
+    float *out_h = out + ((size_t)row * n_head + h) * head_dim;
+    const bool use_q8_k_cache = use_q8_k != 0;
+    const bool use_q8_v_cache = use_q8_v != 0;
+    const bool register_out = head_dim <= blockDim.x;
+
+    float out_acc = 0.0f;
+
+    // Zero out shared/global memory if not using the register optimization
+    if (!register_out)
+    {
+      for (int d = tid; d < head_dim; d += blockDim.x)
+      {
+        out_h[d] = 0.0f;
+      }
+      __syncthreads();
+    }
+
+    __shared__ float partial[WARP_SIZE];
+    __shared__ float s_m;
+    __shared__ float s_l;
+    __shared__ float s_alpha;
+    __shared__ float s_beta;
+
+    if (tid == 0)
+    {
+      s_m = -INFINITY;
+      s_l = 0.0f;
+    }
+    __syncthreads();
+
+    // Reusable constants for block-wise indexing
+    const int blocks_per_head = head_dim / 32;
+    const int scale_stride = kv_stride / 32;
+
+    const bool use_ring = cache_len > 0 && cache_len < (pos + 1);
+
+    for (int t = 0; t <= pos; t++)
     {
       const int cache_pos = use_ring ? (t % cache_len) : t;
       const int kv_base = cache_pos * kv_stride + kv_head * head_dim;
@@ -1230,6 +1506,70 @@ extern "C"
         q, cacheKF16, cacheVF16, cacheKQ8, cacheVQ8, cacheKScales, cacheVScales,
         out, useQ8K, useQ8V, pos, start, kvStride, headDim, nHead, kvHeads,
         cacheLen, scale, softcap);
+    return (int)cudaGetLastError();
+  }
+
+  int mantleCudaAttentionInnerF16CacheF32Batch(
+      const float *q, const uint16_t *cacheK, const uint16_t *cacheV,
+      float *out, int nTokens, int startPos, int kvStride, int headDim,
+      int nHead, int kvHeads, int cacheLen, float scale, float softcap,
+      cudaStream_t stream)
+  {
+    if (!q || !cacheK || !cacheV || !out || nTokens <= 0 || startPos < 0 ||
+        kvStride <= 0 || headDim <= 0 || nHead <= 0 || kvHeads <= 0 ||
+        cacheLen <= 0)
+    {
+      return cudaErrorInvalidValue;
+    }
+    const int threads = 256;
+    dim3 block(threads);
+    // grid.x is the query row (large limit), grid.y the head (small).
+    dim3 grid(nTokens, nHead);
+    attention_inner_f16_cache_f32_batch_kernel<<<grid, block, 0, stream>>>(
+        q, cacheK, cacheV, out, nTokens, startPos, kvStride, headDim, nHead,
+        kvHeads, cacheLen, scale, softcap);
+    return (int)cudaGetLastError();
+  }
+
+  int mantleCudaAttentionInnerMixedCacheF32Batch(
+      const float *q, const uint16_t *cacheKF16, const uint16_t *cacheVF16,
+      const int8_t *cacheKQ8, const int8_t *cacheVQ8, const float *cacheKScales,
+      const float *cacheVScales, float *out, int useQ8K, int useQ8V,
+      int nTokens, int startPos, int kvStride, int headDim, int nHead,
+      int kvHeads, int cacheLen, float scale, float softcap,
+      cudaStream_t stream)
+  {
+    if (!q || !out || nTokens <= 0 || startPos < 0 || kvStride <= 0 ||
+        headDim <= 0 || nHead <= 0 || kvHeads <= 0 || cacheLen <= 0)
+    {
+      return cudaErrorInvalidValue;
+    }
+    if (useQ8K)
+    {
+      if (!cacheKQ8 || !cacheKScales)
+        return cudaErrorInvalidValue;
+    }
+    else if (!cacheKF16)
+    {
+      return cudaErrorInvalidValue;
+    }
+    if (useQ8V)
+    {
+      if (!cacheVQ8 || !cacheVScales)
+        return cudaErrorInvalidValue;
+    }
+    else if (!cacheVF16)
+    {
+      return cudaErrorInvalidValue;
+    }
+
+    const int threads = 256;
+    dim3 block(threads);
+    dim3 grid(nTokens, nHead);
+    attention_inner_mixed_cache_f32_batch_kernel<<<grid, block, 0, stream>>>(
+        q, cacheKF16, cacheVF16, cacheKQ8, cacheVQ8, cacheKScales, cacheVScales,
+        out, useQ8K, useQ8V, nTokens, startPos, kvStride, headDim, nHead,
+        kvHeads, cacheLen, scale, softcap);
     return (int)cudaGetLastError();
   }
 }
