@@ -704,6 +704,15 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	m.SetHostCapabilities(opts.HostCaps)
 	m.BindDefaultOps()
 	initInstanceScratch(m)
+	if len(opts.HiddenTapLayers) > 0 {
+		// One batched chunk is the largest forward a tap buffer need hold; the
+		// sequential fallback captures one row per step and reports that through
+		// HiddenTaps.Rows.
+		capacity := max(m.MaxBatch, 1)
+		if err := m.asCore().SetHiddenTapLayers(opts.HiddenTapLayers, capacity); err != nil {
+			return nil, err
+		}
+	}
 	updateInstanceRoPE(m)
 	adjustGemmaNorms(m, cfg)
 	return m, nil

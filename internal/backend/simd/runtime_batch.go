@@ -302,6 +302,11 @@ type batchPrefillChunk struct {
 	up   []float32 // [n,ffn]
 	gate []float32 // [n,ffn]
 	act  []float32 // [n,ffn]
+
+	// tapBase is the tap row of this chunk's first position. Hidden-tap capture
+	// writes row tapBase+r; a prompt longer than the tap buffer's capacity
+	// therefore leaves HiddenTaps.Rows short of the prompt length.
+	tapBase int
 }
 
 // forEachBatchLogits runs a whole prompt through the batched path, splitting it
@@ -327,6 +332,10 @@ func (m *Instance) forEachBatchLogits(tokens []int, keep func(logits []float32))
 	startPos := m.Pos
 	n := len(tokens)
 
+	// Taps describe the forward just performed, so the row counter restarts
+	// here; HiddenTaps.Rows ends up holding this prompt's captured row count.
+	m.beginForwardCapture()
+
 	// Pre-flight, before any chunk can store a KV row: EnsurePos only allocates
 	// backing storage and never writes cache contents.
 	for i := range m.Layers {
@@ -342,6 +351,7 @@ func (m *Instance) forEachBatchLogits(tokens []int, keep func(logits []float32))
 		// store/attend interleaving is decided per chunk by the same rule the
 		// single-chunk path uses.
 		chunk := newBatchPrefillChunk(m, tokens[start:end], m.Pos)
+		chunk.tapBase = start
 		chunk.forEachRow(keep)
 	}
 	return nil
@@ -419,6 +429,10 @@ func (p *batchPrefillChunk) forEachRow(keep func(logits []float32)) {
 		}
 	}
 
+	// Hidden taps: the embedding output (layer -1) then each layer's post-FFN
+	// residual, written row-by-row for the whole chunk. Both are read-only.
+	p.m.captureTapBatch(-1, p.tapBase, n, p.x)
+
 	for i := range m.Layers {
 		layer := &m.Layers[i]
 		for r := range n {
@@ -436,6 +450,7 @@ func (p *batchPrefillChunk) forEachRow(keep func(logits []float32)) {
 		for r := range n {
 			Add(p.x[r*hidden:(r+1)*hidden], p.proj[r*hidden:(r+1)*hidden])
 		}
+		p.m.captureTapBatch(i, p.tapBase, n, p.x)
 	}
 
 	logits := m.Scratch.Logits

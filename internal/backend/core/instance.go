@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/samcharles93/mantle/internal/hostcaps"
@@ -32,6 +33,11 @@ type Instance struct {
 	RopeCosTable       []float32 // Precomputed cosine values for RoPE
 	RopeSinTable       []float32 // Precomputed sine values for RoPE
 	TilingConfig       TilingConfig
+
+	// HiddenTaps captures decoder-layer residual outputs for the DSpark draft
+	// model's context taps. Disabled until SetHiddenTapLayers is called; see
+	// HiddenTaps for the buffer contract.
+	HiddenTaps HiddenTaps
 
 	attnPoolOnce sync.Once
 	attnPool     *AttnPool
@@ -369,4 +375,137 @@ func (m *Instance) GetEffectiveContextLength() int {
 // implement graph-based execution yet.
 func (m *Instance) GraphCompute(_ any, _ any) ([]float32, error) {
 	return nil, fmt.Errorf("GraphCompute not implemented for this backend")
+}
+
+// HiddenTaps captures the post-layer residual output (the "hidden state") of
+// selected decoder layers for the current forward. It supplies the context taps
+// the DSpark draft model consumes.
+//
+// Capture is opt-in and off by default: with no Layers configured no buffer is
+// allocated and each per-layer capture hook is one length check. The buffer
+// holds only the rows of the most recent forward — it is deliberately not a
+// whole-context cache. At 4096 tokens a five-tap MiniCPM5 context would need
+// about 160 MiB, whereas one eight-row verification block costs 320 KiB.
+//
+// The layer list is caller-supplied on purpose: AGENTS.md forbids inferring
+// runtime behaviour from container contents, so it is never read from the MCF.
+type HiddenTaps struct {
+	// Layers lists the tapped decoder layer indices in concatenation order: slot
+	// i of the buffer is Layers[i]'s output. -1 selects the embedding output (the
+	// input to decoder layer 0). The list is strictly increasing, matching the
+	// reference's target_layer_ids order.
+	Layers []int
+	// Slots maps a decoder layer index to its tap slot, or -1 when that layer is
+	// not tapped. It is the per-layer hot-path lookup.
+	Slots []int
+	// EmbeddingSlot is the tap slot for layer index -1, or -1 when the embedding
+	// output is not tapped.
+	EmbeddingSlot int
+	// Host holds len(Layers)*Capacity*Hidden floats laid out slot-major: row r of
+	// slot s starts at (s*Capacity+r)*Hidden. A forward overwrites it; nothing
+	// accumulates across forwards.
+	Host []float32
+	// Hidden is the residual width (the model's embedding length).
+	Hidden int
+	// Capacity is the number of rows Host holds per tap.
+	Capacity int
+	// Rows is the number of rows captured by the most recent forward. It is
+	// authoritative: a consumer that expected more rows than this is looking at
+	// an incomplete capture — for example a prompt that fell back to the
+	// single-token path, which captures one row per step.
+	Rows int
+}
+
+// Enabled reports whether hidden-tap capture is configured.
+func (t *HiddenTaps) Enabled() bool {
+	return t != nil && len(t.Layers) > 0
+}
+
+// SlotFor returns the tap slot for decoder layer layerIdx, or -1 when that
+// layer is not tapped. layerIdx == -1 selects the embedding output.
+func (t *HiddenTaps) SlotFor(layerIdx int) int {
+	if !t.Enabled() {
+		return -1
+	}
+	if layerIdx == -1 {
+		return t.EmbeddingSlot
+	}
+	if layerIdx < 0 || layerIdx >= len(t.Slots) {
+		return -1
+	}
+	return t.Slots[layerIdx]
+}
+
+// StoreRow records the Hidden-wide residual x as row row of tap slot slot. It
+// ignores an untapped slot or an out-of-range row, so a forward larger than
+// Capacity leaves Rows short of the requested row count instead of silently
+// wrapping onto earlier rows.
+func (t *HiddenTaps) StoreRow(slot, row int, x []float32) {
+	if slot < 0 || row < 0 || row >= t.Capacity || len(x) < t.Hidden {
+		return
+	}
+	base := (slot*t.Capacity + row) * t.Hidden
+	copy(t.Host[base:base+t.Hidden], x[:t.Hidden])
+	if row+1 > t.Rows {
+		t.Rows = row + 1
+	}
+}
+
+// SetHiddenTapLayers enables capture of decoder-layer residual outputs. layers
+// are decoder layer indices in concatenation order; -1 selects the embedding
+// output. The list must be strictly increasing and every entry must lie in
+// [-1, len(m.Layers)-1]; capacity is the number of rows one forward may capture.
+// An empty list disables capture and releases the buffer.
+func (m *Instance) SetHiddenTapLayers(layers []int, capacity int) error {
+	if m == nil {
+		return fmt.Errorf("hidden taps: nil instance")
+	}
+	if len(layers) == 0 {
+		m.HiddenTaps = HiddenTaps{}
+		return nil
+	}
+	if m.Config == nil || m.Config.Config.EmbeddingLength <= 0 {
+		return fmt.Errorf("hidden taps: model has no embedding length")
+	}
+	if capacity <= 0 {
+		return fmt.Errorf("hidden taps: capacity must be positive, got %d", capacity)
+	}
+	prev := -2
+	for _, l := range layers {
+		if l < -1 || l >= len(m.Layers) {
+			return fmt.Errorf("hidden tap layer %d out of range [-1, %d]", l, len(m.Layers)-1)
+		}
+		if l <= prev {
+			return fmt.Errorf("hidden tap layers must be strictly increasing: %d follows %d", l, prev)
+		}
+		prev = l
+	}
+	hidden := m.Config.Config.EmbeddingLength
+	if capacity > math.MaxInt/hidden {
+		return fmt.Errorf("hidden taps: row size overflows int")
+	}
+	rowFloats := capacity * hidden
+	if len(layers) > math.MaxInt/rowFloats {
+		return fmt.Errorf("hidden taps: buffer size overflows int")
+	}
+	taps := HiddenTaps{
+		Layers:        append([]int(nil), layers...),
+		Slots:         make([]int, len(m.Layers)),
+		EmbeddingSlot: -1,
+		Hidden:        hidden,
+		Capacity:      capacity,
+		Host:          make([]float32, rowFloats*len(layers)),
+	}
+	for i := range taps.Slots {
+		taps.Slots[i] = -1
+	}
+	for slot, l := range taps.Layers {
+		if l == -1 {
+			taps.EmbeddingSlot = slot
+		} else {
+			taps.Slots[l] = slot
+		}
+	}
+	m.HiddenTaps = taps
+	return nil
 }
