@@ -36,8 +36,11 @@ type Instance struct {
 	attnPoolOnce sync.Once
 	attnPool     *AttnPool
 
-	Scratch ScratchBuffers
-	ops     Ops
+	// MaxBatch is the largest number of positions one batched prefill call can
+	// process. It sizes the Batch* scratch buffers; 0 disables the batched path.
+	MaxBatch int
+	Scratch  ScratchBuffers
+	ops      Ops
 
 	hostCaps *hostcaps.Snapshot
 
@@ -263,6 +266,20 @@ type ScratchBuffers struct {
 	MambaDT   []float32
 	MambaY    []float32
 	MambaOut  []float32
+
+	// Batched prefill scratch. Each buffer holds [MaxBatch, width] rows for the
+	// same quantity as its single-token counterpart above, so a whole prompt can
+	// be projected with one dense GEMM per weight matrix.
+	BatchX       []float32 // [MaxBatch, embd] hidden state
+	BatchNorm    []float32 // [MaxBatch, embd] pre-norm output
+	BatchProj    []float32 // [MaxBatch, embd] attention, then FFN, block output
+	BatchQ       []float32 // [MaxBatch, qDim]
+	BatchK       []float32 // [MaxBatch, kvStride]
+	BatchV       []float32 // [MaxBatch, kvStride]
+	BatchAttnOut []float32 // [MaxBatch, qDim]
+	BatchFfnUp   []float32 // [MaxBatch, ffn]
+	BatchFfnGate []float32 // [MaxBatch, ffn]
+	BatchFfnAct  []float32 // [MaxBatch, ffn]
 }
 
 // Ops returns the ops interface for this instance.
