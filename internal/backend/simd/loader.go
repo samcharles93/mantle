@@ -1579,6 +1579,7 @@ func initInstanceScratch(m *Instance) {
 		m.Scratch.MambaOut = make([]float32, embd)
 	}
 	_ = m.GetAttnPool()
+	sizeBatchScratch(m)
 }
 
 func updateInstanceRoPE(m *Instance) {

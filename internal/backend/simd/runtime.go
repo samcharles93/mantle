@@ -1,19 +1,32 @@
 package simd
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
 )
 
 // ForwardTokens advances the model through each token and returns independent
-// logits for every position. The single-token path owns attention and KV updates.
+// logits for every position. Plain dense models run the whole prompt as one
+// batched block (runtime_batch.go); everything else, and any pre-flight refusal,
+// falls back to the single-token path, which owns attention and KV updates.
 func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 	if len(tokens) == 0 {
 		return nil, fmt.Errorf("no tokens to process")
 	}
 	if len(tokens) > m.MaxContext-m.Pos {
 		return nil, fmt.Errorf("context length exceeded: %d + %d > %d", m.Pos, len(tokens), m.MaxContext)
+	}
+
+	plan, err := m.newBatchPrefillPlan(tokens)
+	if err == nil {
+		// The plan validated every condition and grew every KV slot it writes,
+		// so run cannot fail part way through the prompt.
+		return plan.run(), nil
+	}
+	if !errors.Is(err, errBatchIneligible) {
+		return nil, err
 	}
 
 	outputs := make([][]float32, 0, len(tokens))
