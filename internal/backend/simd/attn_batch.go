@@ -5,7 +5,7 @@ import (
 	"simd/archsimd"
 )
 
-// This file holds the per-block batched kernels driven by batchPrefillPlan. Each
+// This file holds the per-block batched kernels driven by batchPrefillChunk. Each
 // mirrors the corresponding sequential block (attn.go's Attention, ffn.go's FFN)
 // for the plain dense case that batchEligible accepts, applied to [n,width]
 // blocks instead of one token at a time.
@@ -33,7 +33,7 @@ func batchLayerRoPE(m *Instance, layer *Layer) (apply bool, invFreq []float64, a
 // output in p.proj. Positions are startPos..startPos+n-1; the batch never
 // carries a sliding window (the gate rejects AttnWindow > 0), so every query
 // window starts at 0.
-func (p *batchPrefillPlan) attentionBlock(layer *Layer) {
+func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 	m := p.m
 	n := p.n
 	headDim := m.HeadDim
@@ -124,7 +124,7 @@ func (p *batchPrefillPlan) attentionBlock(layer *Layer) {
 
 // ffnBlock runs the dense gated FFN for every row and leaves the down projection
 // in p.proj.
-func (p *batchPrefillPlan) ffnBlock(layer *Layer) {
+func (p *batchPrefillChunk) ffnBlock(layer *Layer) {
 	ffn := p.ffn
 	p.gemmRows(p.up, p.norm, layer.FfnUp)
 	p.gemmRows(p.gate, p.norm, layer.FfnGate)

@@ -26,8 +26,10 @@ import (
 const (
 	cpuBatchedPrefillEnv = "MANTLE_CPU_BATCHED_PREFILL"
 
-	// defaultMaxBatch caps how many prompt positions one batched call runs.
-	// sizeBatchScratch sizes the [batch,width] scratch buffers from it.
+	// defaultMaxBatch is the number of prompt positions one batched chunk
+	// processes. sizeBatchScratch sizes the [chunk,width] scratch buffers from
+	// it, so cache and scratch stay bounded while a prompt is split into as many
+	// chunks as it needs.
 	defaultMaxBatch = 32
 )
 
@@ -139,8 +141,6 @@ func (m *Instance) batchIneligibleReason(tokens []int) string {
 		return "flash attention config selects a different sequential path"
 	case m.MaxBatch <= 0:
 		return "batch scratch is not allocated"
-	case n > m.MaxBatch:
-		return fmt.Sprintf("batch of %d exceeds MaxBatch %d", n, m.MaxBatch)
 	case m.Pos < 0 || m.Pos+n > m.MaxContext:
 		return fmt.Sprintf("batch of %d at position %d exceeds context %d", n, m.Pos, m.MaxContext)
 	case len(m.Scratch.Scores) < m.Pos+n:
@@ -180,12 +180,13 @@ func (m *Instance) batchIneligibleReason(tokens []int) string {
 
 	qDim := m.HeadCount * m.HeadDim
 	kvStride := m.MaxKVStride
+	chunk := min(n, m.MaxBatch)
 	scratch := &m.Scratch
-	if len(scratch.BatchX) < n*hidden || len(scratch.BatchNorm) < n*hidden ||
-		len(scratch.BatchProj) < n*hidden || len(scratch.BatchQ) < n*qDim ||
-		len(scratch.BatchAttnOut) < n*qDim || len(scratch.BatchK) < n*kvStride ||
-		len(scratch.BatchV) < n*kvStride || len(scratch.BatchFfnUp) < n*ffn ||
-		len(scratch.BatchFfnGate) < n*ffn || len(scratch.BatchFfnAct) < n*ffn {
+	if len(scratch.BatchX) < chunk*hidden || len(scratch.BatchNorm) < chunk*hidden ||
+		len(scratch.BatchProj) < chunk*hidden || len(scratch.BatchQ) < chunk*qDim ||
+		len(scratch.BatchAttnOut) < chunk*qDim || len(scratch.BatchK) < chunk*kvStride ||
+		len(scratch.BatchV) < chunk*kvStride || len(scratch.BatchFfnUp) < chunk*ffn ||
+		len(scratch.BatchFfnGate) < chunk*ffn || len(scratch.BatchFfnAct) < chunk*ffn {
 		return "batch scratch buffers are too small for this prompt"
 	}
 	return ""
@@ -275,11 +276,11 @@ func (m *Instance) batchLayerIneligible(i, ffnWidth int) string {
 	return ""
 }
 
-// batchPrefillPlan owns the [n,width] row buffers and per-row positions of one
-// batched prefill call. newBatchPrefillPlan refuses (with errBatchIneligible)
-// unless the gate passes, so run() cannot fail and never needs a mid-prompt
-// fallback.
-type batchPrefillPlan struct {
+// batchPrefillChunk owns the [n,width] row buffers and per-row positions of one
+// chunk of a batched prefill (n <= MaxBatch). forEachRow cannot fail and never
+// needs a mid-prompt fallback: batchIneligibleReason validates the whole prompt
+// before any chunk runs, and newBatchPrefillChunk only slices the scratch.
+type batchPrefillChunk struct {
 	m        *Instance
 	ops      Ops
 	tokens   []int
@@ -303,28 +304,31 @@ type batchPrefillPlan struct {
 	act  []float32 // [n,ffn]
 }
 
-// newBatchPrefillPlan validates tokens against the gate and grows every KV slot
-// the batch will write. Both happen before the first store, so an ineligible
-// prompt leaves the model exactly as it was.
-func (m *Instance) newBatchPrefillPlan(tokens []int) (*batchPrefillPlan, error) {
+// forEachBatchLogits runs a whole prompt through the batched path, splitting it
+// into chunks of at most MaxBatch positions, and calls keep once per position
+// with that position's logits (the model-owned logits buffer, reused for every
+// row, so keep must copy anything it retains).
+//
+// The caller may fall back to the per-token path only when this returns
+// errBatchIneligible. That is guaranteed to mean nothing has been mutated
+// because of one invariant: every gate predicate is evaluated against the FULL
+// prompt, every KV slot the prompt will touch is grown, and every scratch
+// buffer is capacity-checked against the largest chunk BEFORE the first chunk
+// issues its first StoreKV. A chunk cannot refuse after that point, so no
+// partially prefilled state can ever be handed back.
+func (m *Instance) forEachBatchLogits(tokens []int, keep func(logits []float32)) error {
 	if !cpuBatchedPrefillEnabled() {
-		return nil, errBatchIneligible
+		return errBatchIneligible
 	}
 	if why := m.batchIneligibleReason(tokens); why != "" {
-		return nil, fmt.Errorf("%w: %s", errBatchIneligible, why)
+		return fmt.Errorf("%w: %s", errBatchIneligible, why)
 	}
 
-	n := len(tokens)
-	hidden := m.Config.Config.EmbeddingLength
-	qDim := m.HeadCount * m.HeadDim
-	kvStride := m.MaxKVStride
-	ffn := m.Layers[0].FfnUp.R
 	startPos := m.Pos
-	scratch := &m.Scratch
+	n := len(tokens)
 
-	// EnsurePos only allocates backing storage; it never writes cache contents,
-	// so growing all n slots up front keeps the pre-flight phase side-effect
-	// free apart from memory.
+	// Pre-flight, before any chunk can store a KV row: EnsurePos only allocates
+	// backing storage and never writes cache contents.
 	for i := range m.Layers {
 		cache := &m.Layers[i].AttnCache
 		for r := range n {
@@ -332,7 +336,30 @@ func (m *Instance) newBatchPrefillPlan(tokens []int) (*batchPrefillPlan, error) 
 		}
 	}
 
-	return &batchPrefillPlan{
+	for start := 0; start < n; start += m.MaxBatch {
+		end := min(start+m.MaxBatch, n)
+		// Each chunk plans against its own start position, so the ring-wrap
+		// store/attend interleaving is decided per chunk by the same rule the
+		// single-chunk path uses.
+		chunk := newBatchPrefillChunk(m, tokens[start:end], m.Pos)
+		chunk.forEachRow(keep)
+	}
+	return nil
+}
+
+// newBatchPrefillChunk slices the instance's batch scratch for one chunk of at
+// most MaxBatch positions. Callers must have passed batchIneligibleReason for
+// the whole prompt first; this constructor cannot fail and must never be given
+// a chunk larger than MaxBatch.
+func newBatchPrefillChunk(m *Instance, tokens []int, startPos int) *batchPrefillChunk {
+	n := len(tokens)
+	hidden := m.Config.Config.EmbeddingLength
+	qDim := m.HeadCount * m.HeadDim
+	kvStride := m.MaxKVStride
+	ffn := m.Layers[0].FfnUp.R
+	scratch := &m.Scratch
+
+	return &batchPrefillChunk{
 		m:        m,
 		ops:      m.Ops(),
 		tokens:   tokens,
@@ -353,23 +380,25 @@ func (m *Instance) newBatchPrefillPlan(tokens []int) (*batchPrefillPlan, error) 
 		up:       scratch.BatchFfnUp[:n*ffn],
 		gate:     scratch.BatchFfnGate[:n*ffn],
 		act:      scratch.BatchFfnAct[:n*ffn],
-	}, nil
+	}
 }
 
-// gemmRows computes dst[n, w.R] = src[n, w.C] * wᵀ over the whole batch block.
-// dst and src are contiguous [n,width] plan buffers whose widths the gate sized
+// gemmRows computes dst[n, w.R] = src[n, w.C] * wᵀ over the whole chunk block.
+// dst and src are contiguous [n,width] chunk buffers whose widths the gate sized
 // to w.R and w.C, so GemmParWT's dimension check cannot fire.
-func (p *batchPrefillPlan) gemmRows(dst, src []float32, w *Mat) {
+func (p *batchPrefillChunk) gemmRows(dst, src []float32, w *Mat) {
 	n := p.n
 	rows := Mat{R: n, C: w.R, Stride: w.R, DType: mcf.DTypeF32, Data: dst[:n*w.R]}
 	block := Mat{R: n, C: w.C, Stride: w.C, DType: mcf.DTypeF32, Data: src[:n*w.C]}
 	GemmParWT(SelectGemmConfig(n, w.C, w.R), &rows, &block, w, 1, 0, 0)
 }
 
-// run executes the batched prefill and returns one logits row per position. It
+// forEachRow executes the chunk and calls keep once per position with that
+// position's logits. keep receives the model-owned logits buffer, which is
+// reused for every row, so it must copy anything it retains. forEachRow
 // allocates nothing on the model and cannot fail: everything it needs was
-// validated and allocated by newBatchPrefillPlan.
-func (p *batchPrefillPlan) run() [][]float32 {
+// validated and allocated by batchIneligibleReason and newBatchPrefillChunk.
+func (p *batchPrefillChunk) forEachRow(keep func(logits []float32)) {
 	m := p.m
 	n := p.n
 	hidden := p.hidden
@@ -410,7 +439,6 @@ func (p *batchPrefillPlan) run() [][]float32 {
 	}
 
 	logits := m.Scratch.Logits
-	outputs := make([][]float32, n)
 	for r := range n {
 		FusedRMSNormMatVec(p.ops, logits, m.Output, p.x[r*hidden:(r+1)*hidden], m.OutputNorm, m.RMSEpsilon, m.Scratch.Tmp)
 		if scale := cfg.LMHeadMultiplier; scale != 0 && scale != 1 {
@@ -424,8 +452,7 @@ func (p *batchPrefillPlan) run() [][]float32 {
 				logits[i] = fastTanh(logits[i]/softcap) * softcap
 			}
 		}
-		outputs[r] = append([]float32(nil), logits...)
+		keep(logits)
 	}
 	m.Pos += n
-	return outputs
 }
