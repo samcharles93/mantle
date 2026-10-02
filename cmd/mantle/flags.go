@@ -1,6 +1,12 @@
 package main
 
-import "github.com/urfave/cli/v3"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/urfave/cli/v3"
+)
 
 var (
 	modelPath         string
@@ -50,6 +56,30 @@ func commonModelFlags() []cli.Flag {
 			Destination: &backend,
 		},
 	}
+}
+
+// parseTapLayers parses the comma-separated --capture-tap-layers value. An
+// empty value disables hidden-tap capture; the backend then validates ordering
+// and range against the loaded model.
+func parseTapLayers(s string) ([]int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	parts := strings.Split(s, ",")
+	layers := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("capture-tap-layers: empty layer index")
+		}
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("capture-tap-layers: %q is not an integer", part)
+		}
+		layers = append(layers, n)
+	}
+	return layers, nil
 }
 
 func commonTokenizerFlags() []cli.Flag {

@@ -84,6 +84,13 @@ func runDecoderLayers(m *Instance, rt *tokenRuntimeState) error {
 	ds := rt.ds
 	bf := rt.bf
 
+	// The embedding output is the input to decoder layer 0, i.e. the reference's
+	// hidden_states[0] / layer_id -1 tap.
+	m.beginForwardCapture()
+	if err := rt.captureTapRow(m, -1, x); err != nil {
+		return err
+	}
+
 	for i := range m.Layers {
 		layer := &m.Layers[i]
 
@@ -183,6 +190,9 @@ func runDecoderLayers(m *Instance, rt *tokenRuntimeState) error {
 			if err := rt.debug.logLayerHidden(rt, i); err != nil {
 				return err
 			}
+			if err := rt.captureTapRow(m, i, x); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -195,6 +205,9 @@ func runDecoderLayers(m *Instance, rt *tokenRuntimeState) error {
 			return fmt.Errorf("ffn residual fast path failed: %w", err)
 		}
 		if err := rt.debug.logLayerHidden(rt, i); err != nil {
+			return err
+		}
+		if err := rt.captureTapRow(m, i, x); err != nil {
 			return err
 		}
 	}

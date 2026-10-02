@@ -53,6 +53,7 @@ func runCmd() *cli.Command {
 		noSWA          bool
 		cudaWeightMode string
 		gpuLayers      int64
+		captureTaps    string
 		// Tiling configuration
 		tileM int64
 		tileN int64
@@ -297,6 +298,13 @@ func runCmd() *cli.Command {
 			Value:       -1,
 			Destination: &gpuLayers,
 		},
+		&cli.StringFlag{
+			Name:        "capture-tap-layers",
+			Category:    "Performance",
+			Usage:       "comma-separated decoder layer indices whose residual outputs are captured as hidden-state taps (-1 = embedding output); empty disables capture",
+			Sources:     cli.EnvVars("MANTLE_CAPTURE_TAP_LAYERS"),
+			Destination: &captureTaps,
+		},
 		// Tiling configuration
 		&cli.Int64Flag{
 			Name:        "tile-m",
@@ -456,6 +464,11 @@ func runCmd() *cli.Command {
 			loader.LoadOptions.CacheTypeK = c.String("cache-type-k")
 			loader.LoadOptions.CacheTypeV = c.String("cache-type-v")
 			loader.LoadOptions.GpuLayers = int(gpuLayers)
+			tapLayers, err := parseTapLayers(captureTaps)
+			if err != nil {
+				return cli.Exit("error: "+err.Error(), 1)
+			}
+			loader.LoadOptions.HiddenTapLayers = tapLayers
 			loadResult, err := loader.Load(ctx, modelPath, int(maxContext))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)

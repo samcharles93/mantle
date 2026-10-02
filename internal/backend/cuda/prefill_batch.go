@@ -343,6 +343,7 @@ func (b *batchedBuffers) all() []native.DeviceBuffer {
 
 type batchedLayerPlan struct {
 	layer    *instance.Layer
+	index    int
 	kvStride int
 	kvHeads  int
 	interm   int
@@ -402,6 +403,12 @@ type batchedPrefillPlan struct {
 	outNormDev native.DeviceBuffer
 	outWeight  deviceMat
 
+	// tapRows is the number of hidden-tap rows this forward captures (0 when tap
+	// capture is disabled or the buffer is too small). tapDev holds the compact
+	// [taps, tapRows, hidden] device copy, laid out like core.HiddenTaps.Host.
+	tapRows int
+	tapDev  native.DeviceBuffer
+
 	hostEmbed  []float32
 	hostLogits []float32
 }
@@ -414,6 +421,9 @@ func (p *batchedPrefillPlan) free() {
 		if b.Ptr() != nil {
 			_ = b.Free()
 		}
+	}
+	if p.tapDev.Ptr() != nil {
+		_ = p.tapDev.Free()
 	}
 	for i := range p.layers {
 		for _, b := range []native.DeviceBuffer{p.layers[i].wqBiasDev, p.layers[i].wkBiasDev, p.layers[i].wvBiasDev} {
@@ -581,6 +591,23 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 		}
 		p.buf.conv = b
 	}
+
+	// Hidden-tap capture, when the caller enabled it: a compact [taps, rows,
+	// hidden] device buffer that each tapped layer copies into with a D2D copy.
+	// One D2D per tapped layer, one host read at the end, no per-layer host sync.
+	// A forward wider than the host buffer captures its first Capacity rows and
+	// reports the short row count through HiddenTaps.Rows.
+	if taps := &m.HiddenTaps; taps.Enabled() {
+		p.tapRows = min(p.n, taps.Capacity)
+		if p.tapRows > 0 {
+			elems := len(taps.Layers) * p.tapRows * taps.Hidden
+			b, err := allocF32Elems(elems)
+			if err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: alloc hidden taps (%d elems): %w", elems, err))
+			}
+			p.tapDev = b
+		}
+	}
 	p.hostLogits = make([]float32, p.vocab)
 
 	// Upload the embeddings once.
@@ -593,6 +620,7 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 		l := &m.Layers[i]
 		lp := batchedLayerPlan{
 			layer:     l,
+			index:     i,
 			kvStride:  l.HeadKV * headDim,
 			kvHeads:   l.HeadKV,
 			interm:    l.FfnUp.R,
@@ -734,8 +762,26 @@ func (p *batchedPrefillPlan) run() ([]float32, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	// The embedding output (layer -1) is still in p.buf.x before the first layer
+	// overwrites it, so copy it now when that tap is configured.
+	if p.tapRows > 0 {
+		if slot := p.inst.HiddenTaps.SlotFor(-1); slot >= 0 {
+			if err := p.copyTapSlot(slot, p.buf.x); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	for i := range p.layers {
 		if err := p.runLayer(&p.layers[i]); err != nil {
+			return nil, err
+		}
+	}
+
+	// The whole tap set crosses to the host once, after the layer loop, so no
+	// tapped layer pays a host sync.
+	if p.tapRows > 0 {
+		if err := p.readTaps(); err != nil {
 			return nil, err
 		}
 	}
@@ -933,10 +979,65 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 		return fmt.Errorf("cuda batched prefill: ffn residual: %w", err)
 	}
 
+	// p.buf.x is now this layer's post-FFN residual. Copy the captured rows on
+	// device; the host read happens once, after the whole layer loop.
+	if p.tapRows > 0 {
+		if slot := p.inst.HiddenTaps.SlotFor(lp.index); slot >= 0 {
+			if err := p.copyTapSlot(slot, p.buf.x); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Record the last position written to this layer's device KV cache,
 	// exactly as the device fast paths do. The batched path always writes the
 	// whole batch, so this is startPos+N-1.
 	o.lastDevKVPos[lp.layer] = p.startPos + p.n - 1
+	return nil
+}
+
+// copyTapSlot issues the device-to-device copy of the first tapRows rows of src
+// into the compact tap buffer's slot region. It performs no host sync.
+func (p *batchedPrefillPlan) copyTapSlot(slot int, src native.DeviceBuffer) error {
+	taps := &p.inst.HiddenTaps
+	rowBytes := taps.Hidden * int(unsafe.Sizeof(float32(0)))
+	bytes := int64(p.tapRows * taps.Hidden * int(unsafe.Sizeof(float32(0))))
+	dst := devSub(p.tapDev, slot*p.tapRows*rowBytes)
+	if err := native.MemcpyD2DAsync(dst, src, bytes, p.o.stream); err != nil {
+		return fmt.Errorf("cuda batched prefill: copy hidden tap slot %d: %w", slot, err)
+	}
+	return nil
+}
+
+// readTaps copies the captured rows from device into core.HiddenTaps.Host and
+// publishes the captured row count. It is one D2H per tap in the common case
+// where the forward fits the buffer, and one per tap only when the forward was
+// wider than Capacity.
+func (p *batchedPrefillPlan) readTaps() error {
+	taps := &p.inst.HiddenTaps
+	elem := int(unsafe.Sizeof(float32(0)))
+	if len(taps.Host) == 0 {
+		return nil
+	}
+	if p.tapRows == taps.Capacity {
+		// The compact device layout matches the host layout exactly.
+		bytes := int64(len(taps.Layers) * p.tapRows * taps.Hidden * elem)
+		if err := native.MemcpyD2H(unsafe.Pointer(&taps.Host[0]), p.tapDev, bytes); err != nil {
+			return fmt.Errorf("cuda batched prefill: read hidden taps: %w", err)
+		}
+		taps.Rows = p.tapRows
+		return nil
+	}
+	rowBytes := taps.Hidden * elem
+	for slot := range taps.Layers {
+		dst := unsafe.Pointer(&taps.Host[slot*taps.Capacity*taps.Hidden])
+		src := devSub(p.tapDev, slot*p.tapRows*rowBytes)
+		bytes := int64(p.tapRows * rowBytes)
+		if err := native.MemcpyD2H(dst, src, bytes); err != nil {
+			return fmt.Errorf("cuda batched prefill: read hidden tap slot %d: %w", slot, err)
+		}
+	}
+	taps.Rows = p.tapRows
 	return nil
 }
 
