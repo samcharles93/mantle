@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="${SCRIPT_DIR}/../internal/backend/cuda/native/build"
+NATIVE_DIR="${SCRIPT_DIR}/../internal/backend/cuda/native"
+BUILD_DIR="${NATIVE_DIR}/build"
 
 mkdir -p "${BUILD_DIR}"
 
@@ -48,28 +49,75 @@ if [ "${TARGET_CAP}" -lt "${DETECTED_CAP}" ]; then
 	ARCH_FLAGS+=(-gencode "arch=compute_${TARGET_CAP},code=compute_${TARGET_CAP}")
 fi
 
+# Host compiler selection: nvcc rejects GCC newer than the maximum its
+# host_config.h advertises. When the default g++ is too new, fall back to the
+# newest installed supported g++-N. MANTLE_CUDA_HOST_COMPILER overrides this.
+HOST_FLAGS=()
+if [ -n "${MANTLE_CUDA_HOST_COMPILER:-}" ]; then
+	HOST_FLAGS=(-ccbin "${MANTLE_CUDA_HOST_COMPILER}")
+elif command -v g++ >/dev/null 2>&1; then
+	NVCC_REAL="$(readlink -f "$(command -v nvcc)")"
+	HOST_CONFIG="$(dirname "${NVCC_REAL}")/../include/crt/host_config.h"
+	if [ ! -f "${HOST_CONFIG}" ]; then
+		HOST_CONFIG="/usr/local/cuda/include/crt/host_config.h"
+	fi
+	MAX_GCC_MAJOR="$(
+		grep -oE 'gcc versions later than [0-9]+' "${HOST_CONFIG}" 2>/dev/null \
+			| grep -oE '[0-9]+' \
+			| head -1
+	)"
+	DEFAULT_GXX_MAJOR="$(g++ -dumpversion 2>/dev/null | cut -d. -f1)"
+	if [ -n "${MAX_GCC_MAJOR}" ] && [ -n "${DEFAULT_GXX_MAJOR}" ] \
+		&& [ "${DEFAULT_GXX_MAJOR}" -gt "${MAX_GCC_MAJOR}" ]; then
+		SELECTED_GXX=""
+		for ((v = MAX_GCC_MAJOR; v >= 10; v--)); do
+			if command -v "g++-${v}" >/dev/null 2>&1; then
+				SELECTED_GXX="$(command -v "g++-${v}")"
+				break
+			fi
+		done
+		if [ -z "${SELECTED_GXX}" ]; then
+			echo "error: nvcc supports host GCC <= ${MAX_GCC_MAJOR}, but default g++ is major ${DEFAULT_GXX_MAJOR} and no g++-N fallback (10..${MAX_GCC_MAJOR}) is installed." >&2
+			echo "Install a supported g++ or set MANTLE_CUDA_HOST_COMPILER=/path/to/g++." >&2
+			exit 1
+		fi
+		echo "Default g++ major (${DEFAULT_GXX_MAJOR}) exceeds nvcc's supported maximum (${MAX_GCC_MAJOR}); using ${SELECTED_GXX}." >&2
+		HOST_FLAGS=(-ccbin "${SELECTED_GXX}")
+	fi
+fi
+
+KERNELS=(
+	softmax
+	fused_rmsnorm_matvec
+	rmsnorm
+	add_vectors
+	shortconv
+	round_bf16
+	scale_round_bf16
+	attn_fused
+	mamba_depthwise_conv
+	mamba_activation
+	mamba_ssm_scan
+	mamba_dt
+	rmsnorm_gated
+	deltanet_l2norm
+	deltanet_recurrent
+	moe_router
+	moe_accumulate
+)
+
 echo "Detected compute capability: sm_${DETECTED_CAP}"
 if [ "${TARGET_CAP}" != "${DETECTED_CAP}" ]; then
 	echo "nvcc does not support sm_${DETECTED_CAP}; using sm_${TARGET_CAP} (+PTX forward-compat)." >&2
 fi
-echo "Compiling CUDA kernels with: ${ARCH_FLAGS[*]}"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/softmax.cu" -o "${BUILD_DIR}/softmax.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/fused_rmsnorm_matvec.cu" -o "${BUILD_DIR}/fused_rmsnorm_matvec.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/rmsnorm.cu" -o "${BUILD_DIR}/rmsnorm.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/add_vectors.cu" -o "${BUILD_DIR}/add_vectors.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/shortconv.cu" -o "${BUILD_DIR}/shortconv.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/round_bf16.cu" -o "${BUILD_DIR}/round_bf16.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/scale_round_bf16.cu" -o "${BUILD_DIR}/scale_round_bf16.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/attn_fused.cu" -o "${BUILD_DIR}/attn_fused.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/mamba_depthwise_conv.cu" -o "${BUILD_DIR}/mamba_depthwise_conv.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/mamba_activation.cu" -o "${BUILD_DIR}/mamba_activation.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/mamba_ssm_scan.cu" -o "${BUILD_DIR}/mamba_ssm_scan.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/mamba_dt.cu" -o "${BUILD_DIR}/mamba_dt.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/rmsnorm_gated.cu" -o "${BUILD_DIR}/rmsnorm_gated.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/deltanet_l2norm.cu" -o "${BUILD_DIR}/deltanet_l2norm.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/deltanet_recurrent.cu" -o "${BUILD_DIR}/deltanet_recurrent.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/moe_router.cu" -o "${BUILD_DIR}/moe_router.o"
-nvcc -O3 -lineinfo "${ARCH_FLAGS[@]}" -c "${SCRIPT_DIR}/../internal/backend/cuda/native/moe_accumulate.cu" -o "${BUILD_DIR}/moe_accumulate.o"
-ar rcs "${BUILD_DIR}/libmantle_cuda_kernels.a" "${BUILD_DIR}/softmax.o" "${BUILD_DIR}/fused_rmsnorm_matvec.o" "${BUILD_DIR}/rmsnorm.o" "${BUILD_DIR}/add_vectors.o" "${BUILD_DIR}/shortconv.o" "${BUILD_DIR}/round_bf16.o" "${BUILD_DIR}/scale_round_bf16.o" "${BUILD_DIR}/attn_fused.o" "${BUILD_DIR}/mamba_depthwise_conv.o" "${BUILD_DIR}/mamba_activation.o" "${BUILD_DIR}/mamba_ssm_scan.o" "${BUILD_DIR}/mamba_dt.o" "${BUILD_DIR}/rmsnorm_gated.o" "${BUILD_DIR}/deltanet_l2norm.o" "${BUILD_DIR}/deltanet_recurrent.o" "${BUILD_DIR}/moe_router.o" "${BUILD_DIR}/moe_accumulate.o"
+echo "Compiling CUDA kernels with: ${ARCH_FLAGS[*]} ${HOST_FLAGS[*]:-}"
+
+OBJECTS=()
+for k in "${KERNELS[@]}"; do
+	nvcc -O3 -lineinfo "${HOST_FLAGS[@]}" "${ARCH_FLAGS[@]}" -c "${NATIVE_DIR}/${k}.cu" -o "${BUILD_DIR}/${k}.o"
+	OBJECTS+=("${BUILD_DIR}/${k}.o")
+done
+
+ar rcs "${BUILD_DIR}/libmantle_cuda_kernels.a" "${OBJECTS[@]}"
 
 echo "CUDA kernels build complete: ${BUILD_DIR}/libmantle_cuda_kernels.a"
