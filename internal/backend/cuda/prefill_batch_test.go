@@ -439,51 +439,47 @@ func TestBatchedPrefillGateRejectsRoPELess(t *testing.T) {
 	compareBatchLogits(t, "gate-reject", got, want, 1e-5, 1e-5)
 }
 
-// TestBatchedPrefillGateRejectsSoftcap verifies the gate falls back when
-// FinalLogitSoftcap is non-trivial (the batched output head applies it while
-// the sequential CUDA oracle's observable output does not).
-func TestBatchedPrefillGateRejectsSoftcap(t *testing.T) {
+// TestBatchedPrefillAppliesLogitPostprocess verifies the batched output head
+// matches the sequential oracle for models that set FinalLogitSoftcap or
+// LMHeadMultiplier. These models used to be rejected by the gate, because the
+// sequential CUDA path's flushLastResult clobbered its own postprocessing; now
+// that the oracle applies the knobs, the batched path must match it rather than
+// decline. TestForwardTokenAppliesLogitPostprocessCUDA is the counterpart that
+// proves the sequential path really applies them, so this comparison cannot
+// pass vacuously.
+func TestBatchedPrefillAppliesLogitPostprocess(t *testing.T) {
 	if !cudaAvailable(t) {
 		return
 	}
-	d := defaultBatchTestDims()
-	d.finalSoftcap = 10
-	tokens := []int{1, 6}
 
-	gr, cleanup := newBatchTestRuntime(t, batchTestModel(d))
-	defer cleanup()
-	if gr.batchedPrefillEligible(tokens) {
-		t.Fatal("model with FinalLogitSoftcap > 0 must be rejected by the batched gate")
+	cases := []struct {
+		name   string
+		apply  func(*batchTestDims)
+		tokens []int
+	}{
+		{"softcap", func(d *batchTestDims) { d.finalSoftcap = 10 }, []int{1, 6}},
+		{"lm_head_multiplier", func(d *batchTestDims) { d.lmHeadMult = 1.5 }, []int{2, 5}},
 	}
-	got, err := gr.PrefillTokens(tokens)
-	if err != nil {
-		t.Fatalf("fallback PrefillTokens: %v", err)
-	}
-	want := sequentialOracle(t, d, tokens)
-	compareBatchLogits(t, "gate-reject-softcap", got, want, 1e-5, 1e-5)
-}
 
-// TestBatchedPrefillGateRejectsLMHeadMultiplier verifies the gate falls back
-// when LMHeadMultiplier is not 0 or 1.
-func TestBatchedPrefillGateRejectsLMHeadMultiplier(t *testing.T) {
-	if !cudaAvailable(t) {
-		return
-	}
-	d := defaultBatchTestDims()
-	d.lmHeadMult = 1.5
-	tokens := []int{2, 5}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := defaultBatchTestDims()
+			tc.apply(&d)
 
-	gr, cleanup := newBatchTestRuntime(t, batchTestModel(d))
-	defer cleanup()
-	if gr.batchedPrefillEligible(tokens) {
-		t.Fatal("model with LMHeadMultiplier not in {0,1} must be rejected by the batched gate")
+			gr, cleanup := newBatchTestRuntime(t, batchTestModel(d))
+			defer cleanup()
+			if !gr.batchedPrefillEligible(tc.tokens) {
+				t.Fatal("model with non-trivial logit postprocessing should be eligible for batched prefill")
+			}
+			got, err := gr.PrefillTokens(tc.tokens)
+			if err != nil {
+				t.Fatalf("batched PrefillTokens: %v", err)
+			}
+			got = append([]float32(nil), got...)
+			want := sequentialOracle(t, d, tc.tokens)
+			compareBatchLogits(t, "postprocess-"+tc.name, got, want, 1e-5, 1e-5)
+		})
 	}
-	got, err := gr.PrefillTokens(tokens)
-	if err != nil {
-		t.Fatalf("fallback PrefillTokens: %v", err)
-	}
-	want := sequentialOracle(t, d, tokens)
-	compareBatchLogits(t, "gate-reject-lmhead", got, want, 1e-5, 1e-5)
 }
 
 // TestBatchedPrefillKillSwitch verifies MANTLE_CUDA_BATCHED_PREFILL=0 forces

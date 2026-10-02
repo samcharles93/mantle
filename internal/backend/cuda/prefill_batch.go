@@ -99,20 +99,12 @@ func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
 	if o.blas == (native.BlasHandle{}) || o.stream == (native.Stream{}) {
 		return false
 	}
-	// The sequential CUDA path's observable output is the RAW device logits:
-	// ForwardToken applies LMHeadMultiplier/FinalLogitSoftcap to m.Scratch.Logits,
-	// but the deferred EndToken cleanup calls flushLastResult, which D2Hs o.yDev
-	// (set by DeviceMatVec via setLastResult) back over that same slice and
-	// clobbers the postprocessing. The batched path applies the knobs correctly,
-	// so it must decline (fall back to sequential) whenever they are non-trivial,
-	// otherwise it would change model output. This lane intentionally does not
-	// fix the sequential path; see the separately tracked CUDA-CPU bug.
-	if m.Config.Config.FinalLogitSoftcap > 0 {
-		return false
-	}
-	if lm := m.Config.Config.LMHeadMultiplier; lm != 0 && lm != 1 {
-		return false
-	}
+	// Note: models that set FinalLogitSoftcap or LMHeadMultiplier are eligible.
+	// The sequential oracle applies both (simd/runtime.go ForwardToken forces
+	// the pending device result to host before postprocessing), and the batched
+	// output head applies the same transform via batchedLogitPostprocess, so the
+	// two agree. These used to be excluded because the sequential path's
+	// flushLastResult clobbered its own postprocessing.
 	if !useAttentionInnerFastPath() || !useFFNFastPath() {
 		return false
 	}
@@ -1006,10 +998,9 @@ func devSub(buf native.DeviceBuffer, byteOffset int) native.DeviceBuffer {
 }
 
 // batchedLogitPostprocess applies the same host-side output-head postprocessing
-// the sequential ForwardToken path computes after the device matvec. The gateway
-// currently rejects models with a non-trivial FinalLogitSoftcap or
-// LMHeadMultiplier, so this is a no-op for every eligible model; it is kept so
-// the output head is correct if those constraints are ever relaxed.
+// the sequential ForwardToken path applies after its device matvec, so the
+// batched output head matches the sequential oracle for models that set
+// FinalLogitSoftcap or LMHeadMultiplier.
 func batchedLogitPostprocess(logits []float32, m *instance.Instance) {
 	if scale := m.Config.Config.LMHeadMultiplier; scale != 0 && scale != 1 {
 		s := float32(scale)

@@ -51,6 +51,22 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 	usedDeviceHead := false
 	if ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp, x, m.OutputNorm, m.RMSEpsilon) {
 		usedDeviceHead = ds.DeviceMatVec(m.Scratch.Logits, m.Output, m.Scratch.Tmp)
+		if usedDeviceHead {
+			scale := m.Config.Config.LMHeadMultiplier
+			if (scale != 0 && scale != 1) || m.Config.Config.FinalLogitSoftcap > 0 {
+				// The device MatVec result reaches m.Scratch.Logits only when
+				// EndToken flushes it. The postprocessing below reads and
+				// rewrites that slice, so force the copy now: otherwise the
+				// host math would run on the previous token's values and the
+				// deferred flush would then overwrite the postprocessed
+				// logits with the raw device result, silently ignoring
+				// LMHeadMultiplier and FinalLogitSoftcap.
+				//
+				// Only forced when postprocessing actually applies, so the
+				// common no-multiplier/no-softcap case keeps the deferred copy.
+				syncDeviceSlice(ops, m.Scratch.Logits)
+			}
+		}
 	}
 	if err := consumeFastPathError(ops); err != nil {
 		return nil, fmt.Errorf("output head fast path failed: %w", err)
