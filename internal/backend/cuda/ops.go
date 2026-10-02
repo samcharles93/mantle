@@ -54,7 +54,7 @@ type Ops struct {
 	graphCacheMax      int
 	graphCacheStats    GraphCacheStats
 
-	managedLayerBufs map[int]managedLayerRange
+	managedLayerBufs map[int][]managedLayerRange
 
 	// Dynamic KV cache bounding: effective context length for allocation (0 = use layer max)
 	effectiveContextLen int
@@ -296,7 +296,7 @@ func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 		quantGraphs:             make(map[quantGraphKey]native.GraphExec),
 		ffnQuantGraphs:          make(map[ffnQuantGraphKey]native.GraphExec),
 		graphCacheMax:           gm,
-		managedLayerBufs:        make(map[int]managedLayerRange),
+		managedLayerBufs:        make(map[int][]managedLayerRange),
 		scratchDevBufs:          make(map[uintptr]native.DeviceBuffer),
 		scratchDevBytes:         make(map[uintptr]int),
 		scratchDevValid:         make(map[uintptr]bool),
@@ -795,51 +795,48 @@ func (o *Ops) preloadLayerManaged(layer *model.Layer) error {
 	return nil
 }
 
+// managedRanges returns one range per managed allocation. cudaMemPrefetchAsync
+// rejects a range that spans more than one allocation, so a layer's managed
+// buffers must never be coalesced into a single min/max span.
+func managedRanges(bufs []native.DeviceBuffer) []managedLayerRange {
+	var ranges []managedLayerRange
+	for _, b := range bufs {
+		if b.Ptr() == nil || !b.Managed() || b.Nbytes() <= 0 {
+			continue
+		}
+		ranges = append(ranges, managedLayerRange{start: b.Ptr(), bytes: b.Nbytes()})
+	}
+	return ranges
+}
+
 func (o *Ops) recordManagedLayerBufs(layerIdx int, layer *model.Layer) {
-	var lo, hi uintptr
+	var bufs []native.DeviceBuffer
 	for _, mat := range layerMats(layer) {
 		if mat == nil {
 			continue
 		}
-		if dm, ok := o.weights[mat]; ok && dm.buf.Managed() {
-			p := uintptr(dm.buf.Ptr())
-			end := p + uintptr(dm.buf.Nbytes())
-			if lo == 0 || p < lo {
-				lo = p
-			}
-			if end > hi {
-				hi = end
-			}
+		if dm, ok := o.weights[mat]; ok {
+			bufs = append(bufs, dm.buf)
 		}
 		if qm, ok := o.qweights[mat]; ok {
-			for _, b := range []native.DeviceBuffer{qm.q, qm.scales, qm.superScales, qm.subScales} {
-				if b.Ptr() != nil && b.Managed() {
-					p := uintptr(b.Ptr())
-					end := p + uintptr(b.Nbytes())
-					if lo == 0 || p < lo {
-						lo = p
-					}
-					if end > hi {
-						hi = end
-					}
-				}
-			}
+			bufs = append(bufs, qm.q, qm.scales, qm.superScales, qm.subScales)
 		}
 	}
-	if lo != 0 && hi > lo {
-		o.managedLayerBufs[layerIdx] = managedLayerRange{
-			start: unsafe.Pointer(lo),
-			bytes: int64(hi - lo),
-		}
+	if ranges := managedRanges(bufs); len(ranges) > 0 {
+		o.managedLayerBufs[layerIdx] = ranges
 	}
 }
 
 func (o *Ops) PrefetchLayer(layerIdx int) {
-	r, ok := o.managedLayerBufs[layerIdx]
+	ranges, ok := o.managedLayerBufs[layerIdx]
 	if !ok || o.prefetchStream.Ptr() == nil {
 		return
 	}
-	_ = native.MemPrefetchAsync(native.DeviceBufferFromRaw(r.start), r.bytes, 0, o.prefetchStream)
+	// cudaMemPrefetchAsync rejects a range that spans more than one managed
+	// allocation, so each allocation is prefetched on its own.
+	for _, r := range ranges {
+		_ = native.MemPrefetchAsync(native.DeviceBufferFromRaw(r.start), r.bytes, 0, o.prefetchStream)
+	}
 }
 
 func (o *Ops) ensureManagedMat(mat *model.Mat) error {

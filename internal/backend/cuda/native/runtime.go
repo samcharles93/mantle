@@ -31,8 +31,22 @@ extern cudaError_t cudaMemcpyAsync(void* dst, const void* src, unsigned long lon
 extern cudaError_t cudaMallocHost(void** ptr, unsigned long long size);
 extern cudaError_t cudaFreeHost(void* ptr);
 extern cudaError_t cudaDeviceGetAttribute(int* value, int attr, int device);
-extern cudaError_t cudaMemAdvise(const void* devPtr, unsigned long long count, int advice, int device);
-extern cudaError_t cudaMemPrefetchAsync(const void* devPtr, unsigned long long count, int dstDevice, cudaStream_t stream);
+
+// CUDA 13 replaced the plain `int device` argument of cudaMemAdvise and
+// cudaMemPrefetchAsync with a `struct cudaMemLocation { type, id }` passed by
+// value. Declaring the pre-13 ABI makes the driver read type=0
+// (cudaMemLocationTypeInvalid) out of the argument register, so every call fails
+// with cudaErrorInvalidValue ("Invalid location type"). cudaMemLocationTypeDevice
+// is 1 and cudaMemPrefetchAsync additionally gained a flags argument.
+typedef struct cudaMemLocation {
+	int type;
+	int id;
+} cudaMemLocation;
+
+#define MANTLE_CUDA_MEM_LOCATION_DEVICE 1
+
+extern cudaError_t cudaMemAdvise(const void* devPtr, unsigned long long count, int advice, cudaMemLocation location);
+extern cudaError_t cudaMemPrefetchAsync(const void* devPtr, unsigned long long count, cudaMemLocation location, unsigned int flags, cudaStream_t stream);
 
 typedef void* cudaEvent_t;
 extern cudaError_t cudaEventCreate(cudaEvent_t* event);
@@ -220,11 +234,17 @@ static int mantleCudaDeviceGetAttribute(int* value, int attr, int device) {
 }
 
 static int mantleCudaMemAdvise(const void* devPtr, unsigned long long count, int advice, int device) {
-	return (int)cudaMemAdvise(devPtr, count, advice, device);
+	cudaMemLocation location;
+	location.type = MANTLE_CUDA_MEM_LOCATION_DEVICE;
+	location.id = device;
+	return (int)cudaMemAdvise(devPtr, count, advice, location);
 }
 
 static int mantleCudaMemPrefetchAsync(const void* devPtr, unsigned long long count, int dstDevice, cudaStream_t stream) {
-	return (int)cudaMemPrefetchAsync(devPtr, count, dstDevice, stream);
+	cudaMemLocation location;
+	location.type = MANTLE_CUDA_MEM_LOCATION_DEVICE;
+	location.id = dstDevice;
+	return (int)cudaMemPrefetchAsync(devPtr, count, location, 0u, stream);
 }
 
 static int mantleCudaEventCreate(cudaEvent_t* event) {
