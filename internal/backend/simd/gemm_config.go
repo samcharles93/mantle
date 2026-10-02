@@ -40,6 +40,10 @@ type GemmConfig struct {
 
 	UseSIMD    bool
 	UsePackedB bool
+
+	// BTransposed selects C = A*Bᵀ, where B is stored [n,k] (the standard
+	// weight layout). Set by GemmParWT; see gemm_batch.go.
+	BTransposed bool
 }
 
 // DefaultTilingConfig returns the default tiling configuration,

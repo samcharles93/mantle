@@ -6,6 +6,14 @@ import "simd/archsimd"
 func gemmRangeRows(
 	cfg GemmConfig, C, A, B *Mat, alpha, beta float32, rs, re int, packB []float32,
 ) {
+	if cfg.BTransposed {
+		// For BTransposed, rs/re are output-COLUMN bounds, not row bounds:
+		// each worker owns a column strip and packs every weight tile in it
+		// exactly once. See GemmParWT in gemm_batch.go.
+		gemmRangeColsWT(cfg, C, A, B, rs, re, packB)
+		return
+	}
+
 	tm := cfg.TileM
 	tn := cfg.TileN
 	tk := cfg.TileK
