@@ -26,8 +26,6 @@ const (
 	batchTestMaxCtx  = 64
 )
 
-func batchTestKVStride() int { return batchTestKVHeads * batchTestHeadDim }
-
 // batchTestDims describes one synthetic model.
 type batchTestDims struct {
 	vocab    int

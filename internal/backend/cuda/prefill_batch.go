@@ -815,9 +815,15 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 		}
 	}
 
-	// Per-row RoPE, KV store and attention. This is the only place the batched
-	// path mutates shared KV state; the store happens before the attention read
-	// so row i attends to itself.
+	// Per-row RoPE and KV store.
+	//
+	// Ring constraint: the batched attention kernel needs every row resident
+	// before it reads, so store-all-then-attend is only equivalent to the
+	// sequential oracle when the batch does not wrap the cache. Once startPos+N
+	// exceeds cacheLen, later stores overwrite slots that earlier queries still
+	// read (position t lives at t%cacheLen), so those rows must interleave
+	// store-then-attend exactly as the sequential path does.
+	wrapInBatch := p.startPos+p.n > lp.cacheLen
 	qRowBytes := p.qDim * int(unsafe.Sizeof(float32(0)))
 	kRowBytes := lp.kvStride * int(unsafe.Sizeof(float32(0)))
 	for i := range p.n {
@@ -853,24 +859,50 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 			}
 		}
 
-		attnRow := devSub(p.buf.attn, i*qRowBytes)
+		if wrapInBatch {
+			attnRow := devSub(p.buf.attn, i*qRowBytes)
+			if lp.useQ8K || lp.useQ8V {
+				if err := native.AttentionInnerMixedCacheF32(
+					qRow, lp.cache.kF16, lp.cache.vF16,
+					lp.cache.kQ8, lp.cache.vQ8, lp.cache.kQ8Scales, lp.cache.vQ8Scales,
+					attnRow, lp.useQ8K, lp.useQ8V,
+					pos, 0, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
+					lp.cacheLen, lp.scale, p.softcap, stream,
+				); err != nil {
+					return fmt.Errorf("cuda batched prefill: attention (pos=%d): %w", pos, err)
+				}
+			} else {
+				if err := native.AttentionInnerF16CacheF32(
+					qRow, lp.cache.kF16, lp.cache.vF16, attnRow,
+					pos, 0, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
+					lp.cacheLen, lp.scale, p.softcap, stream,
+				); err != nil {
+					return fmt.Errorf("cuda batched prefill: attention (pos=%d): %w", pos, err)
+				}
+			}
+		}
+	}
+
+	// Attention for all N rows in a single launch, valid because no row was
+	// overwritten during the stores above.
+	if !wrapInBatch {
 		if lp.useQ8K || lp.useQ8V {
-			if err := native.AttentionInnerMixedCacheF32(
-				qRow, lp.cache.kF16, lp.cache.vF16,
+			if err := native.AttentionInnerMixedCacheF32Batch(
+				p.buf.q, lp.cache.kF16, lp.cache.vF16,
 				lp.cache.kQ8, lp.cache.vQ8, lp.cache.kQ8Scales, lp.cache.vQ8Scales,
-				attnRow, lp.useQ8K, lp.useQ8V,
-				pos, 0, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
+				p.buf.attn, lp.useQ8K, lp.useQ8V,
+				p.n, p.startPos, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
 				lp.cacheLen, lp.scale, p.softcap, stream,
 			); err != nil {
-				return fmt.Errorf("cuda batched prefill: attention (pos=%d): %w", pos, err)
+				return fmt.Errorf("cuda batched prefill: batched attention: %w", err)
 			}
 		} else {
-			if err := native.AttentionInnerF16CacheF32(
-				qRow, lp.cache.kF16, lp.cache.vF16, attnRow,
-				pos, 0, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
+			if err := native.AttentionInnerF16CacheF32Batch(
+				p.buf.q, lp.cache.kF16, lp.cache.vF16, p.buf.attn,
+				p.n, p.startPos, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
 				lp.cacheLen, lp.scale, p.softcap, stream,
 			); err != nil {
-				return fmt.Errorf("cuda batched prefill: attention (pos=%d): %w", pos, err)
+				return fmt.Errorf("cuda batched prefill: batched attention: %w", err)
 			}
 		}
 	}
