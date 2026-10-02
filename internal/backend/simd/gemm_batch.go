@@ -25,6 +25,9 @@ func GemmParWT(cfg GemmConfig, C, A, W *Mat, alpha, beta float32, workers int) {
 	if A.C != W.C || C.R != A.R || C.C != W.R {
 		panic("gemm: dimension mismatch (want A[m,k] * W[n,k]^T -> C[m,n])")
 	}
+	if !supportedGemmWeight(W) {
+		panic("gemm: GemmParWT supports f32/f16/bf16 weights only (got quint8 style Raw storage)")
+	}
 	if C.R == 0 || C.C == 0 {
 		return
 	}
@@ -133,6 +136,17 @@ func gemmSerialWT(cfg GemmConfig, C, A, W *Mat, alpha, beta float32) {
 
 // --- weight decoding -------------------------------------------------------
 
+// supportedGemmWeight reports whether GemmParWT can consume w. Weights are
+// either f32 in Data, or 2-byte f16/bf16 in Raw. Quantised storage (q8/q4/k*)
+// lives in Raw at a different element width and would decode as garbage, so it
+// must be rejected rather than silently mis-read.
+func supportedGemmWeight(w *Mat) bool {
+	if w.Data != nil {
+		return true
+	}
+	return w.DType == mcf.DTypeF16 || w.DType == mcf.DTypeBF16
+}
+
 // matElem returns W[row,col] as f32, decoding f16/bf16 storage when needed.
 // It must stay equivalent to Mat.RowTo for the same element.
 func matElem(w *Mat, row, col int) float32 {
@@ -141,10 +155,14 @@ func matElem(w *Mat, row, col int) float32 {
 	}
 	off := (row*w.Stride + col) * 2
 	u := uint16(w.Raw[off]) | uint16(w.Raw[off+1])<<8
-	if w.DType == mcf.DTypeBF16 {
+	switch w.DType {
+	case mcf.DTypeBF16:
 		return core.BF16ToFloat32(u)
+	case mcf.DTypeF16:
+		return core.FP16ToFloat32(u)
+	default:
+		panic("gemm: GemmParWT supports f32/f16/bf16 weights only")
 	}
-	return core.FP16ToFloat32(u)
 }
 
 func scaleRowsBeta(C *Mat, rs, re int, beta float32) {
@@ -189,8 +207,10 @@ func packBTileWT(dst []float32, w *Mat, k0, kMax, j0, jMax int) {
 	}
 
 	decode := core.BF16ToFloat32
-	if w.DType != mcf.DTypeBF16 {
+	if w.DType == mcf.DTypeF16 {
 		decode = core.FP16ToFloat32
+	} else if w.DType != mcf.DTypeBF16 {
+		panic("gemm: GemmParWT supports f32/f16/bf16 weights only")
 	}
 	for jj := 0; jj < width; jj++ {
 		src := ((j0+jj)*w.Stride + k0) * 2

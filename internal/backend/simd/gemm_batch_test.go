@@ -165,6 +165,27 @@ func TestGemmParWTNoAllocs(t *testing.T) {
 	}
 }
 
+func TestGemmParWTRejectsQuantisedWeights(t *testing.T) {
+	t.Parallel()
+
+	const m, k, n = 4, 8, 6
+	a := NewMatFromData(m, k, make([]float32, m*k))
+	c := NewMat(m, n)
+	// Built directly rather than via NewMatFromRaw, which refuses quantised
+	// dtypes. The loader constructs these Mat values itself, and one must never
+	// be handed to this kernel as though it were f16/bf16: the 2-byte decode
+	// would read garbage without erroring.
+	w := Mat{R: n, C: k, Stride: k, DType: mcf.DTypeQ8, Raw: make([]byte, n*k)}
+	cfg := SelectGemmConfig(m, k, n)
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("GemmParWT accepted q8 weight storage; it must reject quantised weights")
+		}
+	}()
+	GemmParWT(cfg, &c, &a, &w, 1, 0, 1)
+}
+
 func BenchmarkGemmParWT(b *testing.B) {
 	cases := []struct {
 		name string
