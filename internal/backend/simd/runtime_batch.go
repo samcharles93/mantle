@@ -18,7 +18,9 @@ import (
 //
 // Two invariants hold throughout:
 //
-//   - batchEligible only accepts plain dense attention+FFN layers whose
+//   - batchEligible only accepts layers the batched kernels reproduce exactly:
+//     dense attention (full or sliding window, with per-head q/k norms, an
+//     output gate and sandwich norms) or recurrent short-conv blocks, all with
 //     projections GemmParWT can decode. Anything else falls back per prompt.
 //   - Every condition is checked and every KV slot the batch will write is
 //     allocated before the first StoreKV, so the decision to take the batched
@@ -27,11 +29,28 @@ const (
 	cpuBatchedPrefillEnv = "MANTLE_CPU_BATCHED_PREFILL"
 
 	// defaultMaxBatch is the number of prompt positions one batched chunk
-	// processes. sizeBatchScratch sizes the [chunk,width] scratch buffers from
-	// it, so cache and scratch stay bounded while a prompt is split into as many
-	// chunks as it needs.
-	defaultMaxBatch = 32
+	// processes when MANTLE_CPU_MAX_BATCH does not override it. sizeBatchScratch
+	// sizes the [chunk,width] scratch buffers from it, so cache and scratch stay
+	// bounded while a prompt is split into as many chunks as it needs.
+	defaultMaxBatch = 64
+
+	// cpuMaxBatchEnv overrides the chunk size, for tuning prefill throughput
+	// against scratch memory on a given host.
+	cpuMaxBatchEnv = "MANTLE_CPU_MAX_BATCH"
 )
+
+// cpuMaxBatch reports the chunk size the batched prefill path runs with:
+// MANTLE_CPU_MAX_BATCH when it holds a positive integer, otherwise
+// defaultMaxBatch. The value is clamped to [1, 4096] so a stray setting cannot
+// make the [chunk,width] scratch buffers absurdly large.
+func cpuMaxBatch() int {
+	if v, ok := os.LookupEnv(cpuMaxBatchEnv); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return min(max(n, 1), 4096)
+		}
+	}
+	return defaultMaxBatch
+}
 
 // errBatchIneligible marks a pre-flight refusal from the batched prefill gate.
 // No KV cache slot has been written when it is returned, so the caller can
@@ -92,7 +111,19 @@ func sizeBatchScratch(m *Instance) {
 		ffn = hidden
 	}
 
-	n := defaultMaxBatch
+	// The short-conv state staging buffer is sized from the widest recurrent
+	// kernel; the attention gate rows from the widest gate (never above qDim,
+	// which the gate enforces per layer).
+	convState := 0
+	for i := range m.Layers {
+		if m.Layers[i].IsRecurrent && m.Layers[i].ShortConvKernel != nil {
+			if k := m.Layers[i].ShortConvKernel.C - 1; k > convState {
+				convState = k
+			}
+		}
+	}
+
+	n := cpuMaxBatch()
 	m.MaxBatch = n
 	scratch := &m.Scratch
 	scratch.BatchX = make([]float32, n*hidden)
@@ -105,6 +136,11 @@ func sizeBatchScratch(m *Instance) {
 	scratch.BatchFfnUp = make([]float32, n*ffn)
 	scratch.BatchFfnGate = make([]float32, n*ffn)
 	scratch.BatchFfnAct = make([]float32, n*ffn)
+	scratch.BatchScProj = make([]float32, n*3*hidden)
+	scratch.BatchScBx = make([]float32, n*hidden)
+	scratch.BatchScConv = make([]float32, n*hidden)
+	scratch.BatchAttnGate = make([]float32, n*qDim)
+	scratch.BatchScState = make([]float32, convState*hidden)
 }
 
 // batchEligible reports whether tokens can run through the batched prefill
@@ -119,6 +155,20 @@ func (m *Instance) batchEligible(tokens []int) bool {
 // when the batch is eligible. The reason is carried in the fallback error so an
 // unexpectedly unbatched model is diagnosable.
 func (m *Instance) batchIneligibleReason(tokens []int) string {
+	return m.batchIneligibleReasonMode(tokens, false)
+}
+
+// batchIneligibleReasonMode is batchIneligibleReason for a specific caller shape.
+// nonCausal blocks (ForwardBlockNonCausal) additionally refuse the features the
+// non-causal batch does not reproduce: recurrent layers, gated attention,
+// sliding windows, sandwich norms and sliding attention types all keep the
+// plain dense-only contract there.
+func (m *Instance) batchIneligibleReasonMode(tokens []int, nonCausal bool) string {
+	if nonCausal {
+		if why := m.nonCausalIneligible(); why != "" {
+			return why
+		}
+	}
 	if m == nil || m.Config == nil {
 		return "no model config"
 	}
@@ -181,14 +231,43 @@ func (m *Instance) batchIneligibleReason(tokens []int) string {
 		len(scratch.BatchProj) < chunk*hidden || len(scratch.BatchQ) < chunk*qDim ||
 		len(scratch.BatchAttnOut) < chunk*qDim || len(scratch.BatchK) < chunk*kvStride ||
 		len(scratch.BatchV) < chunk*kvStride || len(scratch.BatchFfnUp) < chunk*ffn ||
-		len(scratch.BatchFfnGate) < chunk*ffn || len(scratch.BatchFfnAct) < chunk*ffn {
+		len(scratch.BatchFfnGate) < chunk*ffn || len(scratch.BatchFfnAct) < chunk*ffn ||
+		len(scratch.BatchScProj) < chunk*3*hidden || len(scratch.BatchScBx) < chunk*hidden ||
+		len(scratch.BatchScConv) < chunk*hidden || len(scratch.BatchAttnGate) < chunk*qDim {
 		return "batch scratch buffers are too small for this prompt"
 	}
 	return ""
 }
 
-// batchLayerIneligible reports why layer i cannot be run as part of a dense
-// batch, or "" when it can. ffnWidth is the model-wide dense FFN width.
+// nonCausalIneligible names the first layer feature a non-causal block forward
+// (speculative draft blocks) does not reproduce, or "" when all layers are
+// plain dense full-attention layers.
+func (m *Instance) nonCausalIneligible() string {
+	if m == nil {
+		return "no instance"
+	}
+	for i := range m.Layers {
+		layer := &m.Layers[i]
+		why := fmt.Sprintf("layer %d: ", i)
+		switch {
+		case layer.IsRecurrent:
+			return why + "recurrent (short-conv) block in a non-causal block"
+		case layer.AttnGate != nil || layer.FusedQGate:
+			return why + "gated attention in a non-causal block"
+		case layer.AttnWindow > 0 || layer.AttnType == "sliding_attention":
+			return why + "sliding window in a non-causal block"
+		case len(layer.PostAttnNorm) > 0 || len(layer.PostFfnNorm) > 0:
+			return why + "sandwich norm in a non-causal block"
+		}
+	}
+	return ""
+}
+
+// batchLayerIneligible reports why layer i cannot be run as part of a batch,
+// or "" when it can. ffnWidth is the model-wide dense FFN width. Recurrent
+// (short-conv) layers and attention layers are checked against their own
+// weight sets: a hybrid layer runs one block or the other, mirroring
+// computeAttentionBranch in runtime_decode.go.
 func (m *Instance) batchLayerIneligible(i, ffnWidth int) string {
 	layer := &m.Layers[i]
 	why := fmt.Sprintf("layer %d: ", i)
@@ -202,8 +281,6 @@ func (m *Instance) batchLayerIneligible(i, ffnWidth int) string {
 		return why + "mamba block"
 	case layer.DeltaNet != nil:
 		return why + "deltanet block"
-	case layer.IsRecurrent:
-		return why + "recurrent (short-conv) block"
 	case layer.MoE != nil:
 		return why + "mixture-of-experts FFN"
 	case layer.Gemma4MoE != nil:
@@ -214,39 +291,58 @@ func (m *Instance) batchLayerIneligible(i, ffnWidth int) string {
 		// runDecoderLayers routes any non-unit LayerScale through the gemma4
 		// BF16-rounding FFN block, which the batched path does not reproduce.
 		return why + "non-unit layer scale"
-	case layer.SharedKVSource >= 0:
-		return why + "shared KV source"
-	case layer.FusedQGate || layer.AttnGate != nil:
-		return why + "fused or gated attention"
-	case layer.ValueFromKey:
-		return why + "value-from-key projection"
-	case layer.ApplyVNorm:
-		return why + "value norm"
-	case layer.AttnWindow > 0:
-		return why + "sliding attention window"
-	case layer.AttnType != "" && layer.AttnType != "full_attention":
-		return why + "non-full attention type"
+	case layer.FusedQGate:
+		return why + "fused q gate"
 	case layer.RoundActivationsBF16:
 		return why + "bf16 activation rounding"
 	case layer.NoRoPE:
 		return why + "rope disabled"
-	case len(layer.PostAttnNorm) > 0:
-		return why + "post-attention norm"
-	case len(layer.PostFfnNorm) > 0:
-		return why + "post-ffn norm"
 	case len(layer.AttnQNorm) > 0 && len(layer.AttnQNorm) != headDim,
 		len(layer.AttnKNorm) > 0 && len(layer.AttnKNorm) != headDim:
 		return why + "per-head q/k norm is not [headDim]"
 	case len(layer.WqBias) > 0 || len(layer.WkBias) > 0 || len(layer.WvBias) > 0:
 		return why + "qkv bias"
-	case layer.HeadDim != headDim || layer.HeadKV <= 0:
-		return why + "head dim or kv head count differs from the instance"
-	case layer.HeadKV*headDim != kvStride:
-		return why + "kv stride differs from the instance maximum"
 	case len(layer.AttnNorm) != hidden:
 		return why + "attention norm is not [hidden]"
 	case len(layer.FfnNorm) != hidden:
 		return why + "ffn norm is not [hidden]"
+	case len(layer.PostAttnNorm) > 0 && len(layer.PostAttnNorm) != hidden:
+		return why + "post-attention norm is not [hidden]"
+	case len(layer.PostFfnNorm) > 0 && len(layer.PostFfnNorm) != hidden:
+		return why + "post-ffn norm is not [hidden]"
+	case layer.FfnUp == nil || layer.FfnUp.R != ffnWidth || layer.FfnUp.C != hidden:
+		return why + "ffn up projection shape differs"
+	case layer.FfnGate == nil || layer.FfnGate.R != ffnWidth || layer.FfnGate.C != hidden:
+		return why + "ffn gate projection shape differs"
+	case layer.FfnDown == nil || layer.FfnDown.R != hidden || layer.FfnDown.C != ffnWidth:
+		return why + "ffn down projection shape differs"
+	}
+	for _, w := range []*Mat{layer.FfnUp, layer.FfnGate, layer.FfnDown} {
+		if !supportedGemmWeight(w) {
+			return why + "quantised FFN weight"
+		}
+	}
+
+	if layer.IsRecurrent {
+		return m.batchShortConvIneligible(layer, why, hidden)
+	}
+
+	switch {
+	case layer.SharedKVSource >= 0:
+		return why + "shared KV source"
+	case layer.ValueFromKey:
+		return why + "value-from-key projection"
+	case layer.ApplyVNorm:
+		return why + "value norm"
+	case layer.AttnType != "" && layer.AttnType != "full_attention" && layer.AttnType != "sliding_attention":
+		return why + "non-full attention type"
+	case layer.AttnGate != nil &&
+		(layer.AttnGate.R != qDim && layer.AttnGate.R != m.HeadCount || layer.AttnGate.C != hidden):
+		return why + "attention gate is not [qDim|heads,hidden]"
+	case layer.HeadDim != headDim || layer.HeadKV <= 0:
+		return why + "head dim or kv head count differs from the instance"
+	case layer.HeadKV*headDim != kvStride:
+		return why + "kv stride differs from the instance maximum"
 	case layer.AttnCache.CacheLen <= 0 || layer.AttnCache.KvStride != kvStride:
 		return why + "attention cache is not a full-size ring of the instance kv stride"
 	case layer.Wq == nil || layer.Wq.R != qDim || layer.Wq.C != hidden:
@@ -257,16 +353,38 @@ func (m *Instance) batchLayerIneligible(i, ffnWidth int) string {
 		return why + "value projection is not [kvDim,hidden]"
 	case layer.Wo == nil || layer.Wo.R != hidden || layer.Wo.C != qDim:
 		return why + "output projection is not [hidden,qDim]"
-	case layer.FfnUp == nil || layer.FfnUp.R != ffnWidth || layer.FfnUp.C != hidden:
-		return why + "ffn up projection shape differs"
-	case layer.FfnGate == nil || layer.FfnGate.R != ffnWidth || layer.FfnGate.C != hidden:
-		return why + "ffn gate projection shape differs"
-	case layer.FfnDown == nil || layer.FfnDown.R != hidden || layer.FfnDown.C != ffnWidth:
-		return why + "ffn down projection shape differs"
 	}
-	for _, w := range []*Mat{layer.Wq, layer.Wk, layer.Wv, layer.Wo, layer.FfnUp, layer.FfnGate, layer.FfnDown} {
-		if !supportedGemmWeight(w) {
+	for _, w := range []*Mat{layer.Wq, layer.Wk, layer.Wv, layer.Wo, layer.AttnGate} {
+		if w != nil && !supportedGemmWeight(w) {
 			return why + "quantised projection weight"
+		}
+	}
+	return ""
+}
+
+// batchShortConvIneligible reports why a recurrent (short-conv) layer cannot run
+// as part of a batch, or "" when its weights and state fit the batched kernels.
+func (m *Instance) batchShortConvIneligible(layer *Layer, why string, hidden int) string {
+	kernel := layer.ShortConvKernel
+	switch {
+	case kernel == nil || kernel.Data == nil || kernel.R != hidden:
+		// The batched conv reads kernel rows directly, so the kernel must be
+		// f32 in Data (the loader's readTensorF32 layout), not raw 2-byte.
+		return why + "short-conv kernel is not f32 [hidden,kernelLen]"
+	case kernel.C < 1:
+		return why + "short-conv kernel length is zero"
+	case layer.ShortConvInProj == nil || layer.ShortConvInProj.R != 3*hidden || layer.ShortConvInProj.C != hidden:
+		return why + "short-conv in projection is not [3*hidden,hidden]"
+	case layer.ShortConvOutProj == nil || layer.ShortConvOutProj.R != hidden || layer.ShortConvOutProj.C != hidden:
+		return why + "short-conv out projection is not [hidden,hidden]"
+	case len(layer.ShortConvState.Buf) != (kernel.C-1)*hidden:
+		return why + "short-conv state size does not match the kernel"
+	case len(m.Scratch.BatchScState) < (kernel.C-1)*hidden:
+		return why + "batch short-conv state scratch is too small"
+	}
+	for _, w := range []*Mat{layer.ShortConvInProj, layer.ShortConvOutProj} {
+		if !supportedGemmWeight(w) {
+			return why + "quantised short-conv projection weight"
 		}
 	}
 	return ""
@@ -288,16 +406,21 @@ type batchPrefillChunk struct {
 	kvStride int
 	useGelu  bool
 
-	x    []float32 // [n,hidden] hidden state
-	norm []float32 // [n,hidden] pre-norm scratch
-	proj []float32 // [n,hidden] block output, reused by the attention and FFN blocks
-	q    []float32 // [n,qDim]
-	k    []float32 // [n,kvStride]
-	v    []float32 // [n,kvStride]
-	attn []float32 // [n,qDim]
-	up   []float32 // [n,ffn]
-	gate []float32 // [n,ffn]
-	act  []float32 // [n,ffn]
+	x        []float32 // [n,hidden] hidden state
+	norm     []float32 // [n,hidden] pre-norm scratch, then post-block norm
+	proj     []float32 // [n,hidden] block output, reused by the attention/conv and FFN blocks
+	q        []float32 // [n,qDim]
+	k        []float32 // [n,kvStride]
+	v        []float32 // [n,kvStride]
+	attn     []float32 // [n,qDim]
+	up       []float32 // [n,ffn]
+	gate     []float32 // [n,ffn]
+	act      []float32 // [n,ffn]
+	scProj   []float32 // [n,3*hidden] short-conv in_proj output
+	scBx     []float32 // [n,hidden] gated conv input (the future state rows)
+	scConv   []float32 // [n,hidden] conv output, then out_proj input
+	attnGate []float32 // [n,gateRows] attention gate rows
+	scState  []float32 // [(maxKernelLen-1), hidden] state staging copy
 
 	// tapBase is the tap row of this chunk's first position. Hidden-tap capture
 	// writes row tapBase+r; a prompt longer than the tap buffer's capacity
@@ -343,9 +466,13 @@ func (m *Instance) forEachBatchLogits(tokens []int, emit logitEmit, keep func(lo
 	m.beginForwardCapture()
 
 	// Pre-flight, before any chunk can store a KV row: EnsurePos only allocates
-	// backing storage and never writes cache contents.
+	// backing storage and never writes cache contents. Recurrent (short-conv)
+	// layers carry no KV cache (CacheLen 0) and are skipped.
 	for i := range m.Layers {
 		cache := &m.Layers[i].AttnCache
+		if cache.CacheLen <= 0 {
+			continue
+		}
 		for r := range n {
 			cache.EnsurePos((startPos + r) % cache.CacheLen)
 		}
@@ -400,6 +527,11 @@ func newBatchPrefillChunk(m *Instance, tokens []int, startPos int) *batchPrefill
 		up:       scratch.BatchFfnUp[:n*ffn],
 		gate:     scratch.BatchFfnGate[:n*ffn],
 		act:      scratch.BatchFfnAct[:n*ffn],
+		scProj:   scratch.BatchScProj[:n*3*hidden],
+		scBx:     scratch.BatchScBx[:n*hidden],
+		scConv:   scratch.BatchScConv[:n*hidden],
+		attnGate: scratch.BatchAttnGate[:n*qDim],
+		scState:  scratch.BatchScState,
 	}
 }
 
@@ -472,18 +604,18 @@ func (p *batchPrefillChunk) forEachRow(emit logitEmit, keep func(logits []float3
 		for r := range n {
 			p.ops.RMSNorm(p.norm[r*hidden:(r+1)*hidden], p.x[r*hidden:(r+1)*hidden], layer.AttnNorm, m.RMSEpsilon)
 		}
-		p.attentionBlock(layer)
-		for r := range n {
-			Add(p.x[r*hidden:(r+1)*hidden], p.proj[r*hidden:(r+1)*hidden])
+		if layer.IsRecurrent {
+			p.shortConvBlock(layer)
+		} else {
+			p.attentionBlock(layer)
 		}
+		p.addBlockResidual(layer.PostAttnNorm)
 
 		for r := range n {
 			p.ops.RMSNorm(p.norm[r*hidden:(r+1)*hidden], p.x[r*hidden:(r+1)*hidden], layer.FfnNorm, m.RMSEpsilon)
 		}
 		p.ffnBlock(layer)
-		for r := range n {
-			Add(p.x[r*hidden:(r+1)*hidden], p.proj[r*hidden:(r+1)*hidden])
-		}
+		p.addBlockResidual(layer.PostFfnNorm)
 		p.m.captureTapBatch(i, p.tapBase, n, p.x)
 	}
 
@@ -560,7 +692,7 @@ func (m *Instance) ForwardBlockNonCausal(tokens []int, keep func(row int, logits
 			return fmt.Errorf("non-causal block: layer %d cache of %d cannot hold positions up to %d", i, cl, m.Pos+n)
 		}
 	}
-	if why := m.batchIneligibleReason(tokens); why != "" {
+	if why := m.batchIneligibleReasonMode(tokens, true); why != "" {
 		return fmt.Errorf("non-causal block: %s", why)
 	}
 	if useSmallBatchBF16(m.Output, n) {

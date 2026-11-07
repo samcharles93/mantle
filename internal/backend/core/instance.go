@@ -286,6 +286,14 @@ type ScratchBuffers struct {
 	BatchFfnUp   []float32 // [MaxBatch, ffn]
 	BatchFfnGate []float32 // [MaxBatch, ffn]
 	BatchFfnAct  []float32 // [MaxBatch, ffn]
+	// Batch short-conv and attention-gate rows for hybrid (recurrent) layers.
+	BatchScProj   []float32 // [MaxBatch, 3*embd] short-conv in_proj output
+	BatchScBx     []float32 // [MaxBatch, embd] gated conv input (state rows)
+	BatchScConv   []float32 // [MaxBatch, embd] conv output, then out_proj input
+	BatchAttnGate []float32 // [MaxBatch, gateRows] attention gate rows
+	// BatchScState stages [maxKernelLen-1, embd] of short-conv state while a
+	// chunk rotates the carried state forward.
+	BatchScState []float32
 	// BatchLogits holds [n, vocab] logits when a small batch needs every row's
 	// logits. It is grown on demand, before a forward mutates any state.
 	BatchLogits []float32

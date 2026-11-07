@@ -68,7 +68,7 @@ func LoadDSparkDraftMCF(mf *mcfstore.File, configJSON []byte, target *core.Insta
 	if got, want := inst.Config.Config.RopeFreqBase, cfg.RopeParameters.RopeTheta; got != want {
 		return nil, fmt.Errorf("dspark: loaded rope base %g, config says %g", got, want)
 	}
-	if why := inst.batchIneligibleReason(make([]int, cfg.BlockSize)); why != "" {
+	if why := inst.batchIneligibleReasonMode(make([]int, cfg.BlockSize), true); why != "" {
 		return nil, fmt.Errorf("dspark: draft decoder cannot run batched blocks: %s", why)
 	}
 

@@ -6,9 +6,11 @@ import (
 )
 
 // This file holds the per-block batched kernels driven by batchPrefillChunk. Each
-// mirrors the corresponding sequential block (attn.go's Attention, ffn.go's FFN)
-// for the plain dense case that batchEligible accepts, applied to [n,width]
-// blocks instead of one token at a time.
+// mirrors the corresponding sequential block (attn.go's Attention, ffn.go's FFN,
+// shortconv.go's ShortConv) for every layer shape batchEligible accepts — dense
+// or sliding attention with q/k norms, an output gate and sandwich norms, or a
+// recurrent short-conv block — applied to [n,width] blocks instead of one token
+// at a time.
 
 // batchLayerRoPE resolves the RoPE tables for a layer exactly as Attention does:
 // the layer override wins, then the model tables, then the local (sliding)
@@ -29,10 +31,10 @@ func batchLayerRoPE(m *Instance, layer *Layer) (apply bool, invFreq []float64, a
 	return apply, invFreq, attnScale
 }
 
-// attentionBlock runs the dense attention block for every row and leaves the Wo
-// output in p.proj. Positions are startPos..startPos+n-1; the batch never
-// carries a sliding window (the gate rejects AttnWindow > 0), so every query
-// window starts at 0.
+// attentionBlock runs the attention block for every row and leaves the Wo
+// output in p.proj. Positions are startPos..startPos+n-1; a sliding-window
+// layer starts each row's window at max(pos-window+1, 0), exactly as the
+// per-token path does (a non-causal block keeps the full window).
 func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 	m := p.m
 	n := p.n
@@ -83,8 +85,11 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 	}
 	attendRow := func(r int) {
 		pos := p.startPos + r
+		start := 0
 		if p.nonCausal {
 			pos = p.startPos + n - 1
+		} else if layer.AttnWindow > 0 {
+			start = max(pos-layer.AttnWindow+1, 0)
 		}
 		cache.EnsurePos(pos % cacheLen)
 		ctx := AttnContext{
@@ -100,7 +105,7 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 			AttnOut:   p.attn[r*qDim : (r+1)*qDim],
 			Ops:       p.ops,
 			Pos:       pos,
-			Start:     0,
+			Start:     start,
 			KvStride:  kvStride,
 			HeadDim:   headDim,
 			NHead:     nHead,
@@ -131,7 +136,62 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 		}
 	}
 
+	// Attention output gate (LFM3-style): one gate projection over the normed
+	// input per row, then sigmoid scaling of the attention output before Wo.
+	// Per-head gates (rows == head count) scale a whole head; otherwise the
+	// gate is per element, matching applyAttnOutputGate in attn.go.
+	if layer.AttnGate != nil {
+		gateR := layer.AttnGate.R
+		p.gemmRows(p.attnGate, p.norm, layer.AttnGate)
+		if gateR == nHead && nHead != qDim {
+			for r := range n {
+				row := p.attn[r*qDim : (r+1)*qDim]
+				g := p.attnGate[r*gateR : (r+1)*gateR]
+				for h := range nHead {
+					s := Sigmoid(g[h])
+					for i := h * headDim; i < (h+1)*headDim; i++ {
+						row[i] *= s
+					}
+				}
+			}
+		} else {
+			for r := range n {
+				row := p.attn[r*qDim : (r+1)*qDim]
+				g := p.attnGate[r*gateR : (r+1)*gateR]
+				i := 0
+				if cpu.HasAVX2 {
+					for ; i+8 <= qDim; i += 8 {
+						vout := archsimd.LoadFloat32x8(row[i:])
+						vgate := archsimd.LoadFloat32x8(g[i:])
+						vout = vout.Mul(fastSigmoidVec(vgate))
+						vout.Store(row[i:])
+					}
+				}
+				for ; i < qDim; i++ {
+					row[i] *= Sigmoid(g[i])
+				}
+			}
+		}
+	}
+
 	p.gemmRows(p.proj, p.attn, layer.Wo)
+}
+
+// addBlockResidual adds the block output left in p.proj to the residual rows,
+// applying the sandwich (post-block) norm first when the layer has one, the
+// same order runDecoderLayers uses: norm the block output, then add.
+func (p *batchPrefillChunk) addBlockResidual(postNorm []float32) {
+	hidden := p.hidden
+	if len(postNorm) > 0 {
+		for r := range p.n {
+			p.ops.RMSNorm(p.norm[r*hidden:(r+1)*hidden], p.proj[r*hidden:(r+1)*hidden], postNorm, p.m.RMSEpsilon)
+			Add(p.x[r*hidden:(r+1)*hidden], p.norm[r*hidden:(r+1)*hidden])
+		}
+		return
+	}
+	for r := range p.n {
+		Add(p.x[r*hidden:(r+1)*hidden], p.proj[r*hidden:(r+1)*hidden])
+	}
 }
 
 // ffnBlock runs the dense gated FFN for every row and leaves the down projection

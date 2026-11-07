@@ -14,6 +14,8 @@ Checked against `/work/models/mcf/MiniCPM5-2B.mcf` on CPU and CUDA (RTX 3050, 23
 
 Batched CPU prefill now covers per-head q/k norm, so Qwen3-family models use it (Qwen3-0.6B prompt processing 21 to 32 tok/s).
 
+Batched CPU prefill also covers hybrid short-conv + attention layers (LFM2/LFM3 shape): recurrent conv blocks with state carry across chunk boundaries, sliding windows, per-head and per-element attention output gates, sandwich norms, and per-layer zero-tail RoPE. LFM3-1.7B prompt processing went from 7.1 to 17.0 tok/s on a 469-token prompt (default chunk 64; `MANTLE_CPU_MAX_BATCH` tunes the chunk size, about 19 tok/s at 256). Greedy output is identical to the per-token path, and `TestLFM3ReferenceLogits` passes with `PrefillTokens` on the batched path.
+
 ## Open work
 
 1. DSpark (CPU first): the draft model loads (`LoadDSparkDraftMCF`), K/V is injected from the target's hidden taps, and a draft block runs with the Markov and confidence heads. The draft decoder is a regular `Instance` (standard Qwen3 layers, loaded with the target's embeddings and LM head through `LoadModelOptions.SharedEmbeddings`/`SharedOutput`), and blocks use the batch path's non-causal mode (`ForwardBlockNonCausal`). On the real pair, drafts match the target's greedy output for 5.1 of 7 tokens per block (`TestDSparkDraftAcceptance`, with `MANTLE_DSPARK_TARGET` and `MANTLE_DSPARK_DRAFT` set). Still needed: the speculative loop (batched verification, accept/reject, KV rollback, sampling at T>0), CLI wiring, then CUDA. The draft MCF was repacked with its `config.json`. Model shape comes from it; speculation on/off, draft length and confidence threshold will be CLI flags.

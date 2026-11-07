@@ -170,10 +170,10 @@ func TestHiddenTapFallbackStillCaptures(t *testing.T) {
 func TestHiddenTapGateRejectionStillCaptures(t *testing.T) {
 	tokens := []int{1, 3, 2}
 	m := newBatchParityInstance(t, batchParityContext, mcf.DTypeF32)
-	m.Layers[1].AttnWindow = 2 // sliding window: rejected by the gate
+	m.Layers[1].SharedKVSource = 0 // shared KV source: rejected by the gate
 	enableHiddenTaps(t, m, []int{0, 1})
 	if m.batchEligible(tokens) {
-		t.Fatal("sliding-window model must not be eligible for a batch")
+		t.Fatal("shared-KV model must not be eligible for a batch")
 	}
 	if _, err := m.ForwardTokens(tokens); err != nil {
 		t.Fatalf("fallback ForwardTokens: %v", err)

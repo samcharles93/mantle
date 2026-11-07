@@ -319,15 +319,27 @@ func TestBatchPrefillGateRejects(t *testing.T) {
 		{name: "layer scale", mutate: func(m *Instance) { m.Layers[1].LayerScale = 0.5 }},
 		{name: "shared kv source", mutate: func(m *Instance) { m.Layers[1].SharedKVSource = 0 }},
 		{name: "fused q gate", mutate: func(m *Instance) { m.Layers[0].FusedQGate = true }},
-		{name: "attention gate", mutate: func(m *Instance) { m.Layers[0].AttnGate = &core.Mat{R: 8, C: 8, Stride: 8} }},
+		{name: "attention gate shape", mutate: func(m *Instance) {
+			m.Layers[0].AttnGate = &core.Mat{R: 3, C: 8, Stride: 8, DType: mcf.DTypeF32, Data: make([]float32, 24)}
+		}},
+		{name: "attention gate quantised", mutate: func(m *Instance) {
+			m.Layers[0].AttnGate = &core.Mat{R: 8, C: 8, Stride: 8, DType: mcf.DTypeQ8, Raw: make([]byte, 64)}
+		}},
 		{name: "value from key", mutate: func(m *Instance) { m.Layers[0].ValueFromKey = true }},
 		{name: "value norm", mutate: func(m *Instance) { m.Layers[0].ApplyVNorm = true }},
-		{name: "sliding window", mutate: func(m *Instance) { m.Layers[0].AttnWindow = 4 }},
-		{name: "sliding attention type", mutate: func(m *Instance) { m.Layers[0].AttnType = "sliding_attention" }},
+		{name: "non-full attention type", mutate: func(m *Instance) { m.Layers[0].AttnType = "linear_attention" }},
 		{name: "round activations bf16", mutate: func(m *Instance) { m.Layers[0].RoundActivationsBF16 = true }},
 		{name: "no rope", mutate: func(m *Instance) { m.Layers[0].NoRoPE = true }},
-		{name: "post-attention norm", mutate: func(m *Instance) { m.Layers[0].PostAttnNorm = make([]float32, 8) }},
-		{name: "post-ffn norm", mutate: func(m *Instance) { m.Layers[0].PostFfnNorm = make([]float32, 8) }},
+		{name: "post-attention norm width", mutate: func(m *Instance) { m.Layers[0].PostAttnNorm = make([]float32, 4) }},
+		{name: "post-ffn norm width", mutate: func(m *Instance) { m.Layers[0].PostFfnNorm = make([]float32, 4) }},
+		{name: "short-conv bad state", mutate: func(m *Instance) {
+			l := &m.Layers[0]
+			l.IsRecurrent, l.HeadKV = true, 0
+			l.ShortConvKernel = &core.Mat{R: 8, C: 4, Stride: 4, DType: mcf.DTypeF32, Data: make([]float32, 32)}
+			l.ShortConvInProj = &core.Mat{R: 24, C: 8, Stride: 8, DType: mcf.DTypeF32, Data: make([]float32, 192)}
+			l.ShortConvOutProj = &core.Mat{R: 8, C: 8, Stride: 8, DType: mcf.DTypeF32, Data: make([]float32, 64)}
+			l.ShortConvState.Buf = make([]float32, 8) // want 3*8
+		}},
 		{name: "q/k norm width", mutate: func(m *Instance) { m.Layers[0].AttnQNorm = make([]float32, m.HeadDim+1) }},
 		{name: "qkv bias", mutate: func(m *Instance) { m.Layers[0].WqBias = make([]float32, 8) }},
 		{name: "head dim", mutate: func(m *Instance) { m.Layers[0].HeadDim = 8 }},
@@ -372,10 +384,10 @@ func TestBatchPrefillGateFallbackMatchesOracle(t *testing.T) {
 	batched := newBatchParityInstance(t, batchParityContext, mcf.DTypeF32)
 	sequential := newBatchParityInstance(t, batchParityContext, mcf.DTypeF32)
 	for _, m := range []*Instance{batched, sequential} {
-		m.Layers[1].AttnWindow = 2 // sliding window: rejected by the gate
+		m.Layers[1].SharedKVSource = 0 // shared KV source: rejected by the gate
 	}
 	if batched.batchEligible(tokens) {
-		t.Fatal("sliding-window model must not be eligible for a batch")
+		t.Fatal("shared-KV model must not be eligible for a batch")
 	}
 
 	want := sequentialLogits(t, sequential, tokens)
@@ -542,10 +554,10 @@ func TestPrefillTokensGateRejectionFallsBack(t *testing.T) {
 	batched := newBatchParityInstance(t, batchParityContext, mcf.DTypeF32)
 	sequential := newBatchParityInstance(t, batchParityContext, mcf.DTypeF32)
 	for _, m := range []*Instance{batched, sequential} {
-		m.Layers[1].AttnWindow = 2 // sliding window: rejected by the gate
+		m.Layers[1].SharedKVSource = 0 // shared KV source: rejected by the gate
 	}
 	if batched.batchEligible(tokens) {
-		t.Fatal("sliding-window model must not be eligible for a batch")
+		t.Fatal("shared-KV model must not be eligible for a batch")
 	}
 
 	want := sequentialPrefillLogits(t, sequential, tokens)
@@ -582,6 +594,7 @@ func longTokens(n int) []int {
 // realistic 207-token prompt. Every logits row must still match the per-token
 // oracle and the batch scratch must not grow with the prompt.
 func TestBatchPrefillChunkBoundaries(t *testing.T) {
+	t.Setenv(cpuMaxBatchEnv, "32") // keep 33/65 as one-token-into-the-next-chunk
 	for _, n := range []int{33, 64, 65, 207} {
 		t.Run(fmt.Sprintf("n%d", n), func(t *testing.T) {
 			tokens := longTokens(n)
@@ -649,6 +662,7 @@ func TestBatchPrefillChunkRingWrap(t *testing.T) {
 // leaves the state a following single-token step needs, exactly like the
 // sequential prefill of the same prompt.
 func TestPrefillTokensChunkedStateEquivalence(t *testing.T) {
+	t.Setenv(cpuMaxBatchEnv, "32")
 	tokens := longTokens(40) // two chunks
 	batched := withLongContext(newBatchParityInstance(t, batchParityContext, mcf.DTypeF32), 41)
 	sequential := withLongContext(newBatchParityInstance(t, batchParityContext, mcf.DTypeF32), 41)
@@ -691,10 +705,10 @@ func TestPrefillTokensLongPromptRejectionFallsBack(t *testing.T) {
 	batched := withLongContext(newBatchParityInstance(t, batchParityContext, mcf.DTypeF32), 41)
 	sequential := withLongContext(newBatchParityInstance(t, batchParityContext, mcf.DTypeF32), 41)
 	for _, m := range []*Instance{batched, sequential} {
-		m.Layers[1].AttnWindow = 2 // sliding window: rejected by the gate
+		m.Layers[1].SharedKVSource = 0 // shared KV source: rejected by the gate
 	}
 	if batched.batchEligible(tokens) {
-		t.Fatal("sliding-window model must not be eligible for a batch")
+		t.Fatal("shared-KV model must not be eligible for a batch")
 	}
 
 	want := sequentialPrefillLogits(t, sequential, tokens)
@@ -727,7 +741,8 @@ func TestBatchPrefillMCFParity(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("model not available: %v", err)
 	}
-	const promptN = 40 // two chunks of defaultMaxBatch, i.e. across a chunk boundary
+	t.Setenv(cpuMaxBatchEnv, "32")
+	const promptN = 40 // two 32-row chunks, i.e. across a chunk boundary
 
 	load := func() *Instance {
 		t.Helper()
