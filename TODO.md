@@ -35,6 +35,6 @@
 
 - [ ] Architecture Support
   - [X] Gemma3 text support: verified against HF transformers (testdata/gemma3_reference.json, short + past-512 sliding-window prompts; TestGemma3ReferenceLogits with MANTLE_GEMMA3_MCF). Multimodal (vision) variant still open.
-  - [ ] Granite support
+  - [X] Granite support: granitemoehybrid (granite-4.0-350M) verified against HF transformers (TestGraniteReferenceLogits with MANTLE_GRANITE_MCF); fused gate+up split + attention/logits/residual/embedding multipliers wired.
   - [ ] Improve ease of use for adding new architectures
 

@@ -68,11 +68,12 @@ func (m *Instance) Compute(ctx *graph.ComputeContext, g *graph.Graph) ([]float32
 				if err != nil {
 					return nil, err
 				}
-				// Copy input to output and add residual.
+				// Copy input to output and add residual (scaled by the
+				// model's residual multiplier when set, as Granite does).
 				n := len(input)
 				out := make([]float32, n)
 				copy(out, input)
-				Add(out, residual)
+				addScaled(out, residual, m.Config.Config.ResidualScale())
 				tensors[node.Output] = out
 				continue
 			}
@@ -95,7 +96,7 @@ func (m *Instance) Compute(ctx *graph.ComputeContext, g *graph.Graph) ([]float32
 				RMSNorm(m.Scratch.Tmp, input, normWeight, m.RMSEpsilon)
 				out := make([]float32, len(m.Scratch.Tmp))
 				copy(out, m.Scratch.Tmp)
-				Add(out, residual)
+				addScaled(out, residual, m.Config.Config.ResidualScale())
 				tensors[node.Output] = out
 				layerIdx = li + 1
 				continue

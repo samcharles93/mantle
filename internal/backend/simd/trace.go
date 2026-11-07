@@ -167,7 +167,7 @@ func (m *Instance) traceForwardToken(tok int) ([]float32, *tokenTrace, error) {
 			opOut = m.Scratch.Tmp2
 		}
 		tt.AttentionOutputs[i] = cloneVec(opOut[:len(x)])
-		Add(x, opOut)
+		addScaled(x, opOut, m.Config.Config.ResidualScale())
 		if usesGemma4BF16Rounding(layer) {
 			roundBF16SliceInPlace(x)
 		}
@@ -212,7 +212,7 @@ func (m *Instance) traceForwardToken(tok int) ([]float32, *tokenTrace, error) {
 			return nil, nil, err
 		}
 		tt.FfnOutputs[i] = cloneVec(ffnOut)
-		Add(x, ffnOut)
+		addScaled(x, ffnOut, m.Config.Config.ResidualScale())
 		tt.PostFfnHidden[i] = cloneVec(x)
 		tt.HiddenStates[i+1] = cloneVec(x)
 	}

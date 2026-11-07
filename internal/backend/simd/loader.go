@@ -300,7 +300,8 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			DeltaHeadValueDim:      cfg.LinearValueHeadDim,
 			DeltaConvKernel:        cfg.LinearConvKernel,
 			EmbeddingMultiplier:    cfg.EmbeddingMultiplier,
-			LMHeadMultiplier:       cfg.LMHeadMultiplier,
+			LMHeadMultiplier:       lmHeadMultiplier(cfg),
+			ResidualMultiplier:     residualMultiplier(cfg),
 			AttentionInMultiplier:  cfg.AttentionInMultiplier,
 			AttentionOutMultiplier: cfg.AttentionOutMultiplier,
 			AttnLogitSoftcap:       float32(cfg.AttnLogitSoftcapping),
@@ -433,17 +434,35 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			layer.PostFfnNorm = postFfnNorm
 		}
 		if !isMoELayer {
-			layer.FfnGate, err = loadMat(src, names.FfnGate(i))
-			if err != nil {
-				return nil, err
-			}
-			layer.FfnDown, err = loadMat(src, names.FfnDown(i))
-			if err != nil {
-				return nil, err
-			}
-			layer.FfnUp, err = loadMat(src, names.FfnUp(i))
-			if err != nil {
-				return nil, err
+			if names.FfnGateUp != nil {
+				// Fused gate+up ([2*ffn, hidden], gate in the first row half),
+				// as GraniteMoeHybrid's shared_mlp input_linear is chunked.
+				fused, err := loadMat(src, names.FfnGateUp(i))
+				if err != nil {
+					return nil, err
+				}
+				if fused.R%2 != 0 || fused.C <= 0 {
+					return nil, fmt.Errorf("layer %d: fused gate+up %s is [%d,%d], want even rows", i, names.FfnGateUp(i), fused.R, fused.C)
+				}
+				gate, up := splitFusedGateUp(fused)
+				down, err := loadMat(src, names.FfnDown(i))
+				if err != nil {
+					return nil, err
+				}
+				layer.FfnGate, layer.FfnUp, layer.FfnDown = gate, up, down
+			} else {
+				layer.FfnGate, err = loadMat(src, names.FfnGate(i))
+				if err != nil {
+					return nil, err
+				}
+				layer.FfnDown, err = loadMat(src, names.FfnDown(i))
+				if err != nil {
+					return nil, err
+				}
+				layer.FfnUp, err = loadMat(src, names.FfnUp(i))
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 
@@ -1722,4 +1741,44 @@ func needsOneCenteredRMSNorm(cfg *model.HFConfig) bool {
 		}
 	}
 	return oneCentered
+}
+
+// splitFusedGateUp splits a fused gate+up matrix ([2*ffn, hidden], gate in the
+// first row half, as GraniteMoeHybridMLP's input_linear is chunked) into the
+// separate gate and up views the FFN runtime takes. The views share the fused
+// backing storage, so no bytes are copied.
+func splitFusedGateUp(fused *core.Mat) (gate, up *core.Mat) {
+	half := fused.R / 2
+	gate = &core.Mat{R: half, C: fused.C, Stride: fused.Stride, DType: fused.DType}
+	up = &core.Mat{R: half, C: fused.C, Stride: fused.Stride, DType: fused.DType}
+	if fused.Data != nil {
+		gate.Data = fused.Data[:half*fused.Stride]
+		up.Data = fused.Data[half*fused.Stride:]
+	} else {
+		off := half * fused.Stride * 2 // 2-byte f16/bf16 elements
+		gate.Raw = fused.Raw[:off]
+		up.Raw = fused.Raw[off:]
+	}
+	return gate, up
+}
+
+// lmHeadMultiplier maps the HF config's logits_scaling (logits are divided by
+// it, as Granite does) onto the runtime's multiplicative LMHeadMultiplier.
+func lmHeadMultiplier(cfg *model.HFConfig) float64 {
+	if cfg.LMHeadMultiplier != 0 {
+		return cfg.LMHeadMultiplier
+	}
+	if cfg.LogitsScaling > 0 {
+		return 1.0 / cfg.LogitsScaling
+	}
+	return 0
+}
+
+// residualMultiplier normalizes the HF config's residual_multiplier (1 when
+// unset, as in most architectures).
+func residualMultiplier(cfg *model.HFConfig) float32 {
+	if cfg.ResidualMultiplier != 0 {
+		return float32(cfg.ResidualMultiplier)
+	}
+	return 1
 }

@@ -182,15 +182,27 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 // same order runDecoderLayers uses: norm the block output, then add.
 func (p *batchPrefillChunk) addBlockResidual(postNorm []float32) {
 	hidden := p.hidden
+	scale := p.m.Config.Config.ResidualScale()
 	if len(postNorm) > 0 {
 		for r := range p.n {
 			p.ops.RMSNorm(p.norm[r*hidden:(r+1)*hidden], p.proj[r*hidden:(r+1)*hidden], postNorm, p.m.RMSEpsilon)
-			Add(p.x[r*hidden:(r+1)*hidden], p.norm[r*hidden:(r+1)*hidden])
+			addScaled(p.x[r*hidden:(r+1)*hidden], p.norm[r*hidden:(r+1)*hidden], scale)
 		}
 		return
 	}
 	for r := range p.n {
-		Add(p.x[r*hidden:(r+1)*hidden], p.proj[r*hidden:(r+1)*hidden])
+		addScaled(p.x[r*hidden:(r+1)*hidden], p.proj[r*hidden:(r+1)*hidden], scale)
+	}
+}
+
+// addScaled adds scale*src to dst (no-op scaling at 1).
+func addScaled(dst, src []float32, scale float32) {
+	if scale == 1 {
+		Add(dst, src)
+		return
+	}
+	for i := range src {
+		dst[i] += src[i] * scale
 	}
 }
 

@@ -25,6 +25,10 @@ Quant-cache matvec was reworked (fused per-block int32 dots + scalar scale combi
 - llama.cpp reference on the same GPU (Q8_0 GGUF, ngl 99): pp512 4657 tok/s, tg128 75.3 tok/s. Mantle CUDA prefill is still per-token (the batch gate rejects device ops), hence the large prefill gap; decode gap is 2x.
 - CPU: bf16 prefill 17.0 tok/s (batched), decode 5.9; q8 decode 6.9 (batched prefill is f32/bf16-only, quant weights take the per-token path).
 
+## Granite
+
+granite-4.0-350M (granitemoehybrid) runs and matches HF transformers logits to 1e-5 on the last-position top-10 plus greedy continuation (TestGraniteReferenceLogits, MANTLE_GRANITE_MCF). The arch adds a fused gate+up MLP split (shared_mlp.input_linear, per-layer) and the attention_multiplier / logits_scaling / residual_multiplier / embedding_multiplier scalars.
+
 ## Open work
 
 1. DSpark (CPU first): the draft model loads (`LoadDSparkDraftMCF`), K/V is injected from the target's hidden taps, and a draft block runs with the Markov and confidence heads. The draft decoder is a regular `Instance` (standard Qwen3 layers, loaded with the target's embeddings and LM head through `LoadModelOptions.SharedEmbeddings`/`SharedOutput`), and blocks use the batch path's non-causal mode (`ForwardBlockNonCausal`). On the real pair, drafts match the target's greedy output for 5.1 of 7 tokens per block (`TestDSparkDraftAcceptance`, with `MANTLE_DSPARK_TARGET` and `MANTLE_DSPARK_DRAFT` set). Still needed: the speculative loop (batched verification, accept/reject, KV rollback, sampling at T>0), CLI wiring, then CUDA. The draft MCF was repacked with its `config.json`. Model shape comes from it; speculation on/off, draft length and confidence threshold will be CLI flags.

@@ -72,8 +72,13 @@ type HFConfig struct {
 	AttnLogitSoftcapping  float64 `json:"attn_logit_softcapping"`
 	FinalLogitSoftcapping float64 `json:"final_logit_softcapping"`
 
-	EmbeddingMultiplier    float64   `json:"embedding_multiplier"`
-	LMHeadMultiplier       float64   `json:"lm_head_multiplier"`
+	EmbeddingMultiplier float64 `json:"embedding_multiplier"`
+	LMHeadMultiplier    float64 `json:"lm_head_multiplier"`
+	// Granite-style scalars: attention score multiplier, final logits divisor
+	// and the per-branch residual multiplier.
+	AttentionMultiplier    float64   `json:"attention_multiplier"`
+	LogitsScaling          float64   `json:"logits_scaling"`
+	ResidualMultiplier     float64   `json:"residual_multiplier"`
 	AttentionInMultiplier  float64   `json:"attention_in_multiplier"`
 	AttentionOutMultiplier float64   `json:"attention_out_multiplier"`
 	SSMInMultiplier        float64   `json:"ssm_in_multiplier"`
@@ -226,6 +231,10 @@ type ArchNames struct {
 	FfnUp   func(layer int) string
 	FfnGate func(layer int) string
 	FfnDown func(layer int) string
+	// FfnGateUp names a fused gate+up projection ([2*ffn, hidden], gate in the
+	// first half of the rows) used by architectures like GraniteMoeHybrid's
+	// shared MLP. When set, FfnGate/FfnUp are derived from it by splitting rows.
+	FfnGateUp func(layer int) string
 
 	PerLayerEmbedding       string
 	PerLayerModelProjection string
@@ -751,6 +760,8 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 			cfg.EmbeddingMultiplier = math.Sqrt(float64(cfg.HiddenSize))
 		}
 		return gemmaSpec(), nil
+	case hasArch("granitemoehybrid"):
+		return graniteMoeHybridSpec(), nil
 	case hasArch("granite"):
 		return graniteSpec(), nil
 	case hasArch("mistral3"):

@@ -48,6 +48,11 @@ func buildLayerLoadConfigs(cfg *model.HFConfig, spec *model.ArchSpec, blockCount
 		if lc.AttnType == "sliding_attention" && cfg.SlidingWindow > 0 {
 			lc.AttnWindow = cfg.SlidingWindow
 		}
+		if cfg.AttentionMultiplier != 0 {
+			// Granite-style attention score multiplier replaces the default
+			// 1/sqrt(headDim) scaling.
+			lc.AttnScale = float32(cfg.AttentionMultiplier)
+		}
 		if spec.UseLayerTypes && isNonAttentionLayerType(lc.AttnType) {
 			lc.HeadKV = 0
 			lc.AttnScale = 0

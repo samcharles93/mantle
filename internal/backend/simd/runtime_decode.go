@@ -134,7 +134,7 @@ func runDecoderLayers(m *Instance, rt *tokenRuntimeState) error {
 			ops.RMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
 			opOut = m.Scratch.Tmp2
 		}
-		addResidual(ds, x, opOut)
+		addResidualScaled(ds, x, opOut, m.Config.Config.ResidualScale())
 		if usesGemma4BF16Rounding(layer) {
 			if !deviceRoundBF16InPlace(ops, x) {
 				syncDeviceSlice(ops, x)
@@ -200,7 +200,7 @@ func runDecoderLayers(m *Instance, rt *tokenRuntimeState) error {
 		if err != nil {
 			return err
 		}
-		addResidual(ds, x, ffnOut)
+		addResidualScaled(ds, x, ffnOut, m.Config.Config.ResidualScale())
 		if err := consumeFastPathError(ops); err != nil {
 			return fmt.Errorf("ffn residual fast path failed: %w", err)
 		}

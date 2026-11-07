@@ -522,6 +522,54 @@ func lfm3Spec() *ArchSpec {
 	return spec
 }
 
+// IBM GraniteMoeHybrid (e.g. granite-4.0-350M): attention layers with a
+// shared, tied MLP (shared_mlp, stored once on layer 0) whose input_linear is
+// a fused gate+up projection, plus embedding/attention/residual/logit scalars.
+func graniteMoeHybridSpec() *ArchSpec {
+	// Note: shared_mlp is per-layer (shared between the MoE and dense branch
+	// within a layer), not tied across layers.
+	return &ArchSpec{
+		Name: "granitemoehybrid",
+		Names: ArchNames{
+			Embedding:  "model.embed_tokens.weight",
+			OutputNorm: "model.norm.weight",
+			OutputCandidates: func() []string {
+				return []string{
+					"lm_head.weight",
+					"model.lm_head.weight",
+					"output.weight",
+					"model.output.weight",
+					"model.embed_tokens.weight", // tie_word_embeddings
+				}
+			},
+			AttnNorm: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.input_layernorm.weight", layer)
+			},
+			FfnNorm: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.post_attention_layernorm.weight", layer)
+			},
+			Wq: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.self_attn.q_proj.weight", layer)
+			},
+			Wk: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.self_attn.k_proj.weight", layer)
+			},
+			Wv: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.self_attn.v_proj.weight", layer)
+			},
+			Wo: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.self_attn.o_proj.weight", layer)
+			},
+			FfnGateUp: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.shared_mlp.input_linear.weight", layer)
+			},
+			FfnDown: func(layer int) string {
+				return fmt.Sprintf("model.layers.%d.shared_mlp.output_linear.weight", layer)
+			},
+		},
+	}
+}
+
 // IBM Granite
 func graniteSpec() *ArchSpec {
 	return &ArchSpec{

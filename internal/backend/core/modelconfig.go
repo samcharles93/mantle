@@ -29,6 +29,7 @@ type Config struct {
 	DeltaConvKernel    int
 
 	EmbeddingMultiplier    float64
+	ResidualMultiplier     float32
 	LMHeadMultiplier       float64
 	AttentionInMultiplier  float64
 	AttentionOutMultiplier float64
@@ -66,6 +67,15 @@ type Config struct {
 	CacheTypeK          string
 	CacheTypeV          string
 	HiddenAct           string
+}
+
+// ResidualScale returns the residual multiplier, normalizing the zero value
+// (unset) to 1 so hand-built instances behave like loaded models.
+func (c *Config) ResidualScale() float32 {
+	if c == nil || c.ResidualMultiplier == 0 {
+		return 1
+	}
+	return c.ResidualMultiplier
 }
 
 const (

@@ -124,11 +124,26 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 }
 
 func addResidual(ds DeviceStateOps, dst, src []float32) {
-	if ds != nil && ds.DeviceAdd(dst, src) {
-		return
+	addResidualScaled(ds, dst, src, 1)
+}
+
+// addResidualScaled adds scale*src to dst. scale is the model's residual
+// multiplier (Granite scales each branch output before the residual add); at
+// 1 the original device fast path is used unchanged.
+func addResidualScaled(ds DeviceStateOps, dst, src []float32, scale float32) {
+	if scale == 1 {
+		if ds != nil && ds.DeviceAdd(dst, src) {
+			return
+		}
 	}
 	if ds != nil {
 		ds.SyncHostState(dst)
+		ds.SyncHostState(src)
+	}
+	if scale != 1 {
+		for i := range src {
+			src[i] *= scale
+		}
 	}
 	Add(dst, src)
 	if ds != nil {
