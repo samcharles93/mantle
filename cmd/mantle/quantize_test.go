@@ -34,9 +34,9 @@ func TestLoadQuantAssignmentsAndMethodFor(t *testing.T) {
 		want string
 	}{
 		{"model.layers.0.self_attn.q_proj.weight", "q8"}, // exact beats glob
-		{"model.layers.0.self_attn.k_proj.weight", "k3"}, // layer glob beats nothing... layers.* 
+		{"model.layers.0.self_attn.k_proj.weight", "k3"}, // layer glob beats nothing... layers.*
 		{"model.layers.1.mlp.up_proj.weight", "k2"},      // longer glob (layers.1.*) beats layers.*
-		{"model.layers.9.mlp.up_proj.weight", "k3"},      // layers.* 
+		{"model.layers.9.mlp.up_proj.weight", "k3"},      // layers.*
 		{"model.embed_tokens.weight", "k6"},              // exact
 		{"model.norm.weight", "k4"},                      // default
 	}
