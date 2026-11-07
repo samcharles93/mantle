@@ -23,7 +23,7 @@ Quant-cache matvec was reworked (fused per-block int32 dots + scalar scale combi
 - bf16 MCF: 18/24 layers in VRAM, 6 PCIe-managed, decode 9.5 tok/s.
 - q8 MCF (1.85 GB, all 24 layers resident): decode 36.9 tok/s, prefill 40.6 tok/s on a 469-token prompt. k4 (0.95 GB): decode 31.2, prefill 34.1.
 - llama.cpp reference on the same GPU (Q8_0 GGUF, ngl 99): pp512 4657 tok/s, tg128 75.3 tok/s. Mantle CUDA prefill is still per-token (the batch gate rejects device ops), hence the large prefill gap; decode gap is 2x.
-- CPU: bf16 prefill 17.0 tok/s (batched), decode 5.9; q8 decode 6.9 (batched prefill is f32/bf16-only, quant weights take the per-token path).
+- CPU: bf16 prefill 31 tok/s (batched), decode 8.5; k4/q8 decode 11.7/11.6 after the fused quant-dot fix (were 4.1/6.9). Quant weights still take the per-token prefill path on CPU (prefill 11-13 tok/s), since the batch GEMM is f32/bf16-only.
 
 ## Granite
 
@@ -32,7 +32,7 @@ granite-4.0-350M (granitemoehybrid) runs and matches HF transformers logits to 1
 ## Open work
 
 1. DSpark (CPU first): the draft model loads (`LoadDSparkDraftMCF`), K/V is injected from the target's hidden taps, and a draft block runs with the Markov and confidence heads. The draft decoder is a regular `Instance` (standard Qwen3 layers, loaded with the target's embeddings and LM head through `LoadModelOptions.SharedEmbeddings`/`SharedOutput`), and blocks use the batch path's non-causal mode (`ForwardBlockNonCausal`). On the real pair, drafts match the target's greedy output for 5.1 of 7 tokens per block (`TestDSparkDraftAcceptance`, with `MANTLE_DSPARK_TARGET` and `MANTLE_DSPARK_DRAFT` set). Still needed: the speculative loop (batched verification, accept/reject, KV rollback, sampling at T>0), CLI wiring, then CUDA. The draft MCF was repacked with its `config.json`. Model shape comes from it; speculation on/off, draft length and confidence threshold will be CLI flags.
-2. Performance vs llama.cpp on the RTX 3050 (Q8_0, ngl 99): llama-bench pp512 4657 / tg128 75.3 tok/s; Mantle LFM3-1.7B.q8 CUDA is at prefill 40.6 / decode 36.9 tok/s (prefill still per-token on CUDA — the batch gate rejects device ops; that is the main remaining gap).
+2. Performance vs llama.cpp on the RTX 3050 (Q8_0, ngl 99): llama-bench pp512 4657 / tg128 75.3 tok/s; Mantle LFM3-1.7B.q8 CUDA is at prefill ~41 / decode ~37-45 tok/s. Remaining gaps: (a) CUDA batched prefill only covers dense f32/bf16 layers (hybrid LFM3 and quant weights fall back to per-token; Qwen3-0.6B dense bf16 reaches 448 tok/s prefill, k4 441 in dequant mode); (b) decode ~1.7x behind llama.cpp.
 3. `mantle trace` is CPU-only, so CPU and CUDA logits can't be compared directly.
 4. Dependency bumps for existing modules (urfave/cli, echo, golang.org/x/*).
 5. Items in `TODO.md`: Gemma3 marked broken, Granite, CI, docs.
