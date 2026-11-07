@@ -175,6 +175,16 @@ func TestBatchPrefillParityConfigVariants(t *testing.T) {
 			m.Config.Config.FinalLogitSoftcap = 10
 		}},
 		{"embedding multiplier", func(m *Instance) { m.Config.Config.EmbeddingMultiplier = 0.9 }},
+		{"per-head q/k norm", func(m *Instance) {
+			for i := range m.Layers {
+				q, k := make([]float32, m.HeadDim), make([]float32, m.HeadDim)
+				for j := range q {
+					q[j] = 0.5 + 0.1*float32((i+j)%7)
+					k[j] = 1.5 - 0.1*float32((2*i+j)%5)
+				}
+				m.Layers[i].AttnQNorm, m.Layers[i].AttnKNorm = q, k
+			}
+		}},
 		{"muP", func(m *Instance) {
 			m.Config.Config.MuPEnabled = true
 			m.MuPScale = 2
@@ -319,7 +329,7 @@ func TestBatchPrefillGateRejects(t *testing.T) {
 		{name: "no rope", mutate: func(m *Instance) { m.Layers[0].NoRoPE = true }},
 		{name: "post-attention norm", mutate: func(m *Instance) { m.Layers[0].PostAttnNorm = make([]float32, 8) }},
 		{name: "post-ffn norm", mutate: func(m *Instance) { m.Layers[0].PostFfnNorm = make([]float32, 8) }},
-		{name: "q/k norm", mutate: func(m *Instance) { m.Layers[0].AttnQNorm = make([]float32, 4) }},
+		{name: "q/k norm width", mutate: func(m *Instance) { m.Layers[0].AttnQNorm = make([]float32, m.HeadDim+1) }},
 		{name: "qkv bias", mutate: func(m *Instance) { m.Layers[0].WqBias = make([]float32, 8) }},
 		{name: "head dim", mutate: func(m *Instance) { m.Layers[0].HeadDim = 8 }},
 		{name: "attention norm width", mutate: func(m *Instance) { m.Layers[0].AttnNorm = make([]float32, 4) }},

@@ -99,26 +99,38 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		}
 	}
 
-	emb, err := loadMat(src, names.Embedding)
-	if err != nil {
-		return nil, err
+	emb := opts.SharedEmbeddings
+	if emb == nil {
+		var err error
+		if emb, err = loadMat(src, names.Embedding); err != nil {
+			return nil, err
+		}
 	}
 	outNorm, err := loadVec(src, names.OutputNorm)
 	if err != nil {
 		return nil, err
 	}
-	candidates := []string{names.Embedding}
-	if names.OutputCandidates != nil {
-		candidates = names.OutputCandidates()
-	}
-	output, outputName, err := loadMatCandidates(src, candidates)
-	if err != nil {
-		return nil, err
-	}
+	output := opts.SharedOutput
 	if output == nil {
-		return nil, fmt.Errorf("missing output projection (tried %v)", candidates)
+		candidates := []string{names.Embedding}
+		if names.OutputCandidates != nil {
+			candidates = names.OutputCandidates()
+		}
+		if output, _, err = loadMatCandidates(src, candidates); err != nil {
+			return nil, err
+		}
+		if output == nil {
+			return nil, fmt.Errorf("missing output projection (tried %v)", candidates)
+		}
 	}
-	_ = outputName
+	for _, shared := range []struct {
+		name string
+		m    *core.Mat
+	}{{"shared embeddings", opts.SharedEmbeddings}, {"shared output", opts.SharedOutput}} {
+		if shared.m != nil && (shared.m.R != cfg.VocabSize || shared.m.C != cfg.HiddenSize) {
+			return nil, fmt.Errorf("%s are [%d %d], config wants [%d %d]", shared.name, shared.m.R, shared.m.C, cfg.VocabSize, cfg.HiddenSize)
+		}
+	}
 
 	blockCount, err := blockCountForConfig(cfg, spec)
 	if err != nil {

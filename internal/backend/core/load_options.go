@@ -16,4 +16,11 @@ type LoadModelOptions struct {
 	// context taps. -1 selects the embedding output. Empty (the default) disables
 	// capture. It is never read from the MCF.
 	HiddenTapLayers []int
+
+	// SharedEmbeddings and SharedOutput, when set, are used as the token
+	// embedding and LM head instead of loading them from the container. A
+	// DSpark draft uses them to share its paired target's tensors; the draft
+	// container carries neither. Both must be [vocab, hidden].
+	SharedEmbeddings *Mat
+	SharedOutput     *Mat
 }

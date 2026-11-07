@@ -239,8 +239,9 @@ func (m *Instance) batchLayerIneligible(i, ffnWidth int) string {
 		return why + "post-attention norm"
 	case len(layer.PostFfnNorm) > 0:
 		return why + "post-ffn norm"
-	case len(layer.AttnQNorm) > 0 || len(layer.AttnKNorm) > 0:
-		return why + "per-head q/k norm"
+	case len(layer.AttnQNorm) > 0 && len(layer.AttnQNorm) != headDim,
+		len(layer.AttnKNorm) > 0 && len(layer.AttnKNorm) != headDim:
+		return why + "per-head q/k norm is not [headDim]"
 	case len(layer.WqBias) > 0 || len(layer.WkBias) > 0 || len(layer.WvBias) > 0:
 		return why + "qkv bias"
 	case layer.HeadDim != headDim || layer.HeadKV <= 0:
@@ -307,6 +308,11 @@ type batchPrefillChunk struct {
 	// writes row tapBase+r; a prompt longer than the tap buffer's capacity
 	// therefore leaves HiddenTaps.Rows short of the prompt length.
 	tapBase int
+
+	// nonCausal makes every row attend to all n rows of the chunk instead of
+	// only the rows at or before its own position. The chunk must not wrap the
+	// cache ring, since all rows are stored before any row attends.
+	nonCausal bool
 }
 
 // forEachBatchLogits runs a whole prompt through the batched path, splitting it
@@ -406,14 +412,25 @@ func newBatchPrefillChunk(m *Instance, tokens []int, startPos int) *batchPrefill
 // dst and src are contiguous [n,width] chunk buffers whose widths the gate sized
 // to w.R and w.C, so GemmParWT's dimension check cannot fire.
 func (p *batchPrefillChunk) gemmRows(dst, src []float32, w *Mat) {
-	n := p.n
-	if useSmallBatchBF16(w, n) {
+	projectRows(dst, w, src, p.n)
+}
+
+// projectRows computes dst[n, w.R] = src[n, w.C] * wᵀ for contiguous row
+// blocks, picking the small-batch BF16 kernel, the packed GEMM, or one matvec
+// per row for weights the GEMM does not take.
+func projectRows(dst []float32, w *Mat, src []float32, n int) {
+	switch {
+	case useSmallBatchBF16(w, n):
 		MatMatBF16(dst, w, src, n)
-		return
+	case n > 1 && supportedGemmWeight(w):
+		rows := Mat{R: n, C: w.R, Stride: w.R, DType: mcf.DTypeF32, Data: dst[:n*w.R]}
+		block := Mat{R: n, C: w.C, Stride: w.C, DType: mcf.DTypeF32, Data: src[:n*w.C]}
+		GemmParWT(SelectGemmConfig(n, w.C, w.R), &rows, &block, w, 1, 0, 0)
+	default:
+		for r := range n {
+			MatVec(dst[r*w.R:(r+1)*w.R], w, src[r*w.C:(r+1)*w.C])
+		}
 	}
-	rows := Mat{R: n, C: w.R, Stride: w.R, DType: mcf.DTypeF32, Data: dst[:n*w.R]}
-	block := Mat{R: n, C: w.C, Stride: w.C, DType: mcf.DTypeF32, Data: src[:n*w.C]}
-	GemmParWT(SelectGemmConfig(n, w.C, w.R), &rows, &block, w, 1, 0, 0)
 }
 
 // logitEmit selects which rows of a batched forward get logits.
@@ -527,4 +544,50 @@ func (p *batchPrefillChunk) finishLogits(logits []float32) {
 			logits[i] = fastTanh(logits[i]/softcap) * softcap
 		}
 	}
+}
+
+// ForwardBlockNonCausal runs tokens as one block at positions Pos..Pos+n-1
+// where every row attends to the cached context and to all n block rows. It
+// calls keep with each row's logits and final residual (before the output
+// norm); both are model-owned and reused, so keep must copy what it retains.
+// The block's K/V rows are written to the cache but Pos is left unchanged, so
+// the next store at those positions replaces them.
+//
+// It serves draft models that predict a whole block at once. The block needs
+// 2 to MaxBatch tokens and must not wrap the cache ring.
+func (m *Instance) ForwardBlockNonCausal(tokens []int, keep func(row int, logits, hidden []float32)) error {
+	n := len(tokens)
+	if n < 2 || n > m.MaxBatch {
+		return fmt.Errorf("non-causal block: %d tokens outside [2,%d]", n, m.MaxBatch)
+	}
+	for i := range m.Layers {
+		if cl := m.Layers[i].AttnCache.CacheLen; m.Pos+n > cl {
+			return fmt.Errorf("non-causal block: layer %d cache of %d cannot hold positions up to %d", i, cl, m.Pos+n)
+		}
+	}
+	if why := m.batchIneligibleReason(tokens); why != "" {
+		return fmt.Errorf("non-causal block: %s", why)
+	}
+	if useSmallBatchBF16(m.Output, n) {
+		if need := n * m.Output.R; len(m.Scratch.BatchLogits) < need {
+			m.Scratch.BatchLogits = make([]float32, need)
+		}
+	}
+	start := m.Pos
+	for i := range m.Layers {
+		cache := &m.Layers[i].AttnCache
+		for r := range n {
+			cache.EnsurePos(start + r)
+		}
+	}
+	chunk := newBatchPrefillChunk(m, tokens, start)
+	chunk.nonCausal = true
+	hidden := chunk.hidden
+	row := 0
+	chunk.forEachRow(emitAllRows, func(logits []float32) {
+		keep(row, logits, chunk.x[row*hidden:(row+1)*hidden])
+		row++
+	})
+	m.Pos = start
+	return nil
 }

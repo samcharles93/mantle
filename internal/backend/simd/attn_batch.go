@@ -46,6 +46,15 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 	p.gemmRows(p.k, p.norm, layer.Wk)
 	p.gemmRows(p.v, p.norm, layer.Wv)
 
+	for r := range n {
+		if len(layer.AttnQNorm) > 0 {
+			applyHeadRMSNorm(p.ops, p.q[r*qDim:(r+1)*qDim], layer.AttnQNorm, m.RMSEpsilon, headDim, nHead)
+		}
+		if len(layer.AttnKNorm) > 0 {
+			applyHeadRMSNorm(p.ops, p.k[r*kvStride:(r+1)*kvStride], layer.AttnKNorm, m.RMSEpsilon, headDim, kvHeads)
+		}
+	}
+
 	if apply, invFreq, attnScale := batchLayerRoPE(m, layer); apply {
 		for r := range n {
 			pos := p.startPos + r
@@ -74,6 +83,9 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 	}
 	attendRow := func(r int) {
 		pos := p.startPos + r
+		if p.nonCausal {
+			pos = p.startPos + n - 1
+		}
 		cache.EnsurePos(pos % cacheLen)
 		ctx := AttnContext{
 			Q:         p.q[r*qDim : (r+1)*qDim],
@@ -105,7 +117,7 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 	// not wrap the ring: once startPos+n exceeds cacheLen, a later store
 	// overwrites a slot an earlier query still reads. When it wraps, interleave
 	// store and attend per row exactly as the sequential decode path does.
-	if p.startPos+n > cacheLen {
+	if p.startPos+n > cacheLen && !p.nonCausal {
 		for r := range n {
 			storeRow(r)
 			attendRow(r)

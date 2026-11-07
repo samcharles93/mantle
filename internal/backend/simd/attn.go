@@ -286,26 +286,10 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	}
 
 	if len(layer.AttnQNorm) > 0 {
-		batched := false
-		if bp, ok := ops.(batchedNormOps); ok {
-			batched = bp.RMSNormBatched(q, q, layer.AttnQNorm, m.RMSEpsilon, headDim, nHead)
-		}
-		if !batched {
-			for h := range nHead {
-				ops.RMSNorm(q[h*headDim:(h+1)*headDim], q[h*headDim:(h+1)*headDim], layer.AttnQNorm, m.RMSEpsilon)
-			}
-		}
+		applyHeadRMSNorm(ops, q, layer.AttnQNorm, m.RMSEpsilon, headDim, nHead)
 	}
 	if kvLayer == layer && len(layer.AttnKNorm) > 0 {
-		batched := false
-		if bp, ok := ops.(batchedNormOps); ok {
-			batched = bp.RMSNormBatched(k, k, layer.AttnKNorm, m.RMSEpsilon, headDim, kvHeads)
-		}
-		if !batched {
-			for h := range kvHeads {
-				ops.RMSNorm(k[h*headDim:(h+1)*headDim], k[h*headDim:(h+1)*headDim], layer.AttnKNorm, m.RMSEpsilon)
-			}
-		}
+		applyHeadRMSNorm(ops, k, layer.AttnKNorm, m.RMSEpsilon, headDim, kvHeads)
 	}
 	if kvLayer == layer && layer.ApplyVNorm {
 		for h := range kvHeads {
@@ -547,4 +531,16 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	}
 	ops.MatVec(m.Scratch.AttnProj, layer.Wo, attnOut[:nHead*headDim])
 	return m.Scratch.AttnProj
+}
+
+// applyHeadRMSNorm normalises each headDim-wide head of x in place with the
+// shared per-head weight, as Qwen3-style q_norm and k_norm do.
+func applyHeadRMSNorm(ops Ops, x, weight []float32, eps float32, headDim, heads int) {
+	if bp, ok := ops.(batchedNormOps); ok && bp.RMSNormBatched(x, x, weight, eps, headDim, heads) {
+		return
+	}
+	for h := range heads {
+		seg := x[h*headDim : (h+1)*headDim]
+		ops.RMSNorm(seg, seg, weight, eps)
+	}
 }

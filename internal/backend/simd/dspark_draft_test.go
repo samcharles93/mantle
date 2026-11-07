@@ -1,120 +1,47 @@
 package simd
 
 import (
-	"math"
-	"math/rand"
 	"os"
 	"testing"
 
 	"github.com/samcharles93/mantle/internal/mcfstore"
+	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
-const dsparkTestConfig = `{
-  "architectures": ["Qwen3DSparkModel"],
-  "hidden_size": 2048, "intermediate_size": 6144, "num_hidden_layers": 5,
-  "num_attention_heads": 16, "num_key_value_heads": 2, "head_dim": 128,
-  "vocab_size": 130560, "draft_vocab_size": 130560, "rms_norm_eps": 1e-6,
-  "block_size": 7, "mask_token_id": 75982, "target_layer_ids": [1, 10, 20, 30, 39],
-  "num_target_layers": 42, "markov_rank": 256, "markov_head_type": "vanilla",
-  "projector_type": "dspark", "enable_confidence_head": true, "hidden_act": "silu",
-  "rope_parameters": {"rope_theta": 5000000, "rope_type": "default"}
-}`
+// TestForwardBlockNonCausal checks the non-causal block mode on a synthetic
+// model. The last row attends to the same keys causally and non-causally, so
+// its logits must match ForwardTokens; earlier rows see later rows only in
+// the non-causal mode, so they must differ. Pos must not advance.
+func TestForwardBlockNonCausal(t *testing.T) {
+	tokens := []int{1, 4, 2, 7}
+	causal := newBatchParityInstance(t, batchParityContext, mcf.DTypeBF16)
+	block := newBatchParityInstance(t, batchParityContext, mcf.DTypeBF16)
 
-func TestParseDSparkConfig(t *testing.T) {
-	c, err := ParseDSparkConfig([]byte(dsparkTestConfig))
+	want, err := causal.ForwardTokens(tokens)
 	if err != nil {
-		t.Fatalf("ParseDSparkConfig: %v", err)
+		t.Fatalf("ForwardTokens: %v", err)
 	}
-	if c.BlockSize != 7 || c.MaskTokenID != 75982 || c.MarkovRank != 256 || !c.HasConfidence ||
-		c.RopeParameters.RopeTheta != 5e6 || len(c.TargetLayerIDs) != 5 {
-		t.Fatalf("unexpected config: %+v", c)
-	}
-
-	bad := map[string]string{
-		"not dspark":     `{"architectures":["LlamaForCausalLM"]}`,
-		"rnn markov":     replaceJSON(dsparkTestConfig, `"vanilla"`, `"rnn"`),
-		"reduced vocab":  replaceJSON(dsparkTestConfig, `"draft_vocab_size": 130560`, `"draft_vocab_size": 32000`),
-		"unsorted taps":  replaceJSON(dsparkTestConfig, `[1, 10, 20, 30, 39]`, `[1, 20, 10, 30, 39]`),
-		"oversize block": replaceJSON(dsparkTestConfig, `"block_size": 7`, `"block_size": 64`),
-		"bonus anchor":   replaceJSON(dsparkTestConfig, `"hidden_act": "silu"`, `"hidden_act": "silu", "sample_from_anchor": false`),
-	}
-	for name, raw := range bad {
-		if _, err := ParseDSparkConfig([]byte(raw)); err == nil {
-			t.Errorf("%s: expected an error", name)
+	got := make([][]float32, len(tokens))
+	err = block.ForwardBlockNonCausal(tokens, func(row int, logits, hidden []float32) {
+		got[row] = append([]float32(nil), logits...)
+		if len(hidden) != block.Config.Config.EmbeddingLength {
+			t.Fatalf("hidden row width %d", len(hidden))
 		}
+	})
+	if err != nil {
+		t.Fatalf("ForwardBlockNonCausal: %v", err)
 	}
-}
-
-func replaceJSON(s, old, new string) string {
-	for i := 0; i+len(old) <= len(s); i++ {
-		if s[i:i+len(old)] == old {
-			return s[:i] + new + s[i+len(old):]
-		}
+	if block.Pos != 0 {
+		t.Fatalf("Pos advanced to %d", block.Pos)
 	}
-	panic("replaceJSON: " + old + " not found")
-}
-
-// TestDSparkBlockAttentionMatchesReference checks the draft layer's
-// non-causal attention over injected context plus block rows against a
-// direct float64 evaluation of the same softmax.
-func TestDSparkBlockAttentionMatchesReference(t *testing.T) {
-	const heads, kvHeads, hd, ctx, n = 4, 2, 16, 5, 3
-	rng := rand.New(rand.NewSource(3))
-	fill := func(k int) []float32 {
-		v := make([]float32, k)
-		for i := range v {
-			v[i] = rng.Float32() - 0.5
-		}
-		return v
+	last := len(tokens) - 1
+	compareLogitRows(t, "last row", got[last:], want[last:], batchParityTol)
+	if floatsEqual(got[0], want[0], batchParityTol) {
+		t.Fatal("row 0 matches the causal result; non-causal attention had no effect")
 	}
-	q := fill(n * heads * hd)
-	cacheK, cacheV := fill(ctx*kvHeads*hd), fill(ctx*kvHeads*hd)
-	k, v := fill(n*kvHeads*hd), fill(n*kvHeads*hd)
-
-	got := make([]float32, n*heads*hd)
-	dsparkAttend(got, q, k, v, cacheK, cacheV, make([]float32, ctx+n), n, ctx, heads, kvHeads, hd)
-
-	kvDim := kvHeads * hd
-	for i := range n {
-		for h := range heads {
-			kh := h / (heads / kvHeads)
-			qv := q[i*heads*hd+h*hd : i*heads*hd+(h+1)*hd]
-			keys := make([][]float32, 0, ctx+n)
-			vals := make([][]float32, 0, ctx+n)
-			for p := range ctx {
-				keys = append(keys, cacheK[p*kvDim+kh*hd:p*kvDim+(kh+1)*hd])
-				vals = append(vals, cacheV[p*kvDim+kh*hd:p*kvDim+(kh+1)*hd])
-			}
-			for j := range n {
-				keys = append(keys, k[j*kvDim+kh*hd:j*kvDim+(kh+1)*hd])
-				vals = append(vals, v[j*kvDim+kh*hd:j*kvDim+(kh+1)*hd])
-			}
-			w := make([]float64, len(keys))
-			var sum, mx float64 = 0, math.Inf(-1)
-			for p, key := range keys {
-				var s float64
-				for d := range hd {
-					s += float64(qv[d]) * float64(key[d])
-				}
-				w[p] = s / math.Sqrt(hd)
-				mx = math.Max(mx, w[p])
-			}
-			for p := range w {
-				w[p] = math.Exp(w[p] - mx)
-				sum += w[p]
-			}
-			for d := range hd {
-				var want float64
-				for p, val := range vals {
-					want += w[p] / sum * float64(val[d])
-				}
-				g := got[i*heads*hd+h*hd+d]
-				if math.Abs(float64(g)-want) > 1e-3 {
-					t.Fatalf("row %d head %d dim %d: got %g want %g", i, h, d, g, want)
-				}
-			}
-		}
+	if err := block.ForwardBlockNonCausal(tokens[:1], func(int, []float32, []float32) {}); err == nil {
+		t.Fatal("a one-token block must be rejected")
 	}
 }
 
@@ -141,7 +68,7 @@ func TestDSparkDraftAcceptance(t *testing.T) {
 	t.Cleanup(func() { _ = df.Close() })
 
 	draftCfg := df.SectionData(mcf.SectionHFConfigJSON)
-	cfg, err := ParseDSparkConfig(draftCfg)
+	cfg, err := model.ParseDSparkConfig(draftCfg)
 	if err != nil {
 		t.Fatalf("draft config: %v", err)
 	}
@@ -150,7 +77,7 @@ func TestDSparkDraftAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load target: %v", err)
 	}
-	draft, err := LoadDSparkDraftMCF(df, draftCfg, target, maxContext)
+	draft, err := LoadDSparkDraftMCF(df, draftCfg, target.asCore(), maxContext, LoadModelOptions{})
 	if err != nil {
 		t.Fatalf("load draft: %v", err)
 	}
@@ -168,11 +95,11 @@ func TestDSparkDraftAcceptance(t *testing.T) {
 		if target.HiddenTaps.Rows != end-start {
 			t.Fatalf("captured %d tap rows for %d prompt tokens", target.HiddenTaps.Rows, end-start)
 		}
-		if err := draft.Inject(start); err != nil {
+		if err := draft.Inject(start, end-start); err != nil {
 			t.Fatalf("inject: %v", err)
 		}
 	}
-	anchor := argmaxF32(logits)
+	anchor := argmaxHost(logits)
 
 	const rounds = 8
 	accepted := 0
@@ -191,10 +118,10 @@ func TestDSparkDraftAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatalf("target step: %v", err)
 			}
-			if err := draft.Inject(pos); err != nil {
+			if err := draft.Inject(pos, 1); err != nil {
 				t.Fatalf("inject step: %v", err)
 			}
-			want[i] = argmaxF32(l)
+			want[i] = argmaxHost(l)
 			tok = want[i]
 		}
 		n := 0
