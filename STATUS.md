@@ -14,7 +14,7 @@ Checked against `/work/models/mcf/MiniCPM5-2B.mcf` on CPU and CUDA (RTX 3050, 23
 
 ## Open work
 
-1. DSpark: target hidden-state tap capture is done (`--capture-tap-layers`). Still needed: projector, draft block prediction, batched target verification, accept/reject sampling and rollbackable KV state.
+1. DSpark (CPU first): the draft model loads (`LoadDSparkDraftMCF`), K/V is injected from the target's hidden taps, and a draft block runs with the Markov and confidence heads. On the real pair, drafts match the target's greedy output for 5.1 of 7 tokens per block (`TestDSparkDraftAcceptance`, with `MANTLE_DSPARK_TARGET` and `MANTLE_DSPARK_DRAFT` set). Still needed: the speculative loop (batched verification, accept/reject, KV rollback, sampling at T>0), CLI wiring, then CUDA. The draft MCF was repacked with its `config.json`. Model shape comes from it; speculation on/off, draft length and confidence threshold will be CLI flags.
 2. Performance against the reference of about 200 tok/s on a 3060 (Q8_0 in llama.cpp).
 3. `mantle trace` is CPU-only, so CPU and CUDA logits can't be compared directly.
 4. Dependency bumps for existing modules (urfave/cli, echo, golang.org/x/*).
