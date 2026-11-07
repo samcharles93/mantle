@@ -288,7 +288,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			RMSEpsilon:             rmsEps,
 			RopeFreqBase:           ropeBase,
 			RopeFreqBaseLocal:      ropeLocalBase,
-			RopeScaling:            toSIMDRopeScaling(ropeScaling),
+			RopeScaling:            ropeScaling,
 			ContextLength:          cfg.MaxPosition,
 			VocabSize:              cfg.VocabSize,
 			ShortConvLCache:        cfg.ConvLCache,
@@ -1632,7 +1632,7 @@ func updateInstanceRoPE(m *Instance) {
 		}
 		attnScale := 1.0
 		if rs := m.Config.Config.RopeScaling; rs != nil {
-			attnScale = model.ApplyRopeScaling(ropeInvFreq, base, m.Config.Config.ContextLength, toModelRopeScaling(rs))
+			attnScale = model.ApplyRopeScaling(ropeInvFreq, base, m.Config.Config.ContextLength, rs)
 		}
 		return ropeInvFreq, float32(attnScale)
 	}
@@ -1667,46 +1667,6 @@ func invalidateOpsRoPECaches(m *Instance) {
 	}
 	if inv, ok := m.Ops().(ropeCacheInvalidator); ok {
 		inv.InvalidateRoPECaches()
-	}
-}
-
-func toSIMDRopeScaling(rs *model.RopeScaling) *RopeScaling {
-	if rs == nil {
-		return nil
-	}
-	return &RopeScaling{
-		Type:            rs.Type,
-		Factor:          rs.Factor,
-		OrigMaxCtx:      rs.OrigMaxCtx,
-		LowFactor:       rs.LowFactor,
-		HighFactor:      rs.HighFactor,
-		AttentionFactor: rs.AttentionFactor,
-		BetaFast:        rs.BetaFast,
-		BetaSlow:        rs.BetaSlow,
-		MScale:          rs.MScale,
-		MScaleAllDim:    rs.MScaleAllDim,
-		Truncate:        rs.Truncate,
-		HasTruncate:     rs.HasTruncate,
-	}
-}
-
-func toModelRopeScaling(rs *RopeScaling) *model.RopeScaling {
-	if rs == nil {
-		return nil
-	}
-	return &model.RopeScaling{
-		Type:            rs.Type,
-		Factor:          rs.Factor,
-		OrigMaxCtx:      rs.OrigMaxCtx,
-		LowFactor:       rs.LowFactor,
-		HighFactor:      rs.HighFactor,
-		AttentionFactor: rs.AttentionFactor,
-		BetaFast:        rs.BetaFast,
-		BetaSlow:        rs.BetaSlow,
-		MScale:          rs.MScale,
-		MScaleAllDim:    rs.MScaleAllDim,
-		Truncate:        rs.Truncate,
-		HasTruncate:     rs.HasTruncate,
 	}
 }
 
