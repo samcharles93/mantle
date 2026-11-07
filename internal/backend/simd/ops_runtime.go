@@ -29,14 +29,6 @@ func (o *DefaultOps) MatVecWithQuant(dst []float32, w *instance.Mat, x []float32
 	MatVecWithQuant(dst, w, x, qx)
 }
 
-func (o *DefaultOps) FlashAttention(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool {
-	return o.IncrementalAttention(attnOut, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap)
-}
-
-func (o *DefaultOps) FlashAttentionMultiHead(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool {
-	return o.IncrementalAttention(attnOut, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap)
-}
-
 func (o *DefaultOps) IncrementalAttention(attnOut []float32, layer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool {
 	if layer == nil || kvStride <= 0 || nHead <= 0 || headDim <= 0 || kvHeads <= 0 {
 		return false

@@ -62,9 +62,3 @@ func Float16ToFloat32(h uint16) float32 {
 
 	return math.Float32frombits(outBits)
 }
-
-func Float32ToFloat16Slice(src []float32, dst []uint16) {
-	for i, v := range src {
-		dst[i] = Float32ToFloat16(v)
-	}
-}

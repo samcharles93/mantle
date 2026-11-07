@@ -369,14 +369,6 @@ func (o *attentionFastPathOps) IncrementalAttention([]float32, *Layer, []float32
 	return false
 }
 
-func (o *attentionFastPathOps) FlashAttention([]float32, *Layer, []float32, []float32, []float32, int, int, int, int, int, int, float32, float32) bool {
-	return false
-}
-
-func (o *attentionFastPathOps) FlashAttentionMultiHead([]float32, *Layer, []float32, []float32, []float32, int, int, int, int, int, int, float32, float32) bool {
-	return false
-}
-
 func newAttentionFastPathFixture(ops Ops) (*Instance, *Layer) {
 	wo := instance.NewMatFromData(2, 2, []float32{
 		1, 0,

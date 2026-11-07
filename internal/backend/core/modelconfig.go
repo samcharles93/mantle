@@ -65,7 +65,6 @@ type Config struct {
 	AttentionBias       bool
 	CacheTypeK          string
 	CacheTypeV          string
-	FlashAttention      bool
 	HiddenAct           string
 }
 

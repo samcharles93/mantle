@@ -16,15 +16,6 @@ const (
 	maxTileK = 64
 )
 
-// MaxTileM returns the maximum TileM value.
-func MaxTileM() int { return maxTileM }
-
-// MaxTileN returns the maximum TileN value.
-func MaxTileN() int { return maxTileN }
-
-// MaxTileK returns the maximum TileK value.
-func MaxTileK() int { return maxTileK }
-
 // TilingConfig holds runtime-configurable tiling parameters.
 type TilingConfig struct {
 	TileM int
@@ -96,36 +87,6 @@ func SelectGemmConfig(m, k, n int) GemmConfig {
 		cfg.TileK = 32
 	case k >= 96:
 		cfg.TileK = 24
-	}
-
-	cfg.TileM = clampTile(cfg.TileM, maxTileM)
-	cfg.TileN = clampTile(cfg.TileN, maxTileN)
-	cfg.TileK = clampTile(cfg.TileK, maxTileK)
-
-	return cfg
-}
-
-// SelectGemmConfigWithTiling selects a GEMM configuration using custom tiling parameters.
-func SelectGemmConfigWithTiling(m, k, n int, tiling TilingConfig) GemmConfig {
-	cfg := GemmConfig{
-		TileM:      tiling.TileM,
-		TileN:      tiling.TileN,
-		TileK:      tiling.TileK,
-		UseSIMD:    true,
-		UsePackedB: true,
-	}
-
-	// Shape-aware dynamic adjustment
-	if k >= 192 && tiling.TileK < 32 {
-		cfg.TileK = 32
-	} else if k >= 96 && k < 192 && tiling.TileK < 24 {
-		cfg.TileK = 24
-	}
-
-	// Small matrix optimization
-	if m < 64 && n < 64 {
-		cfg.TileM = min(cfg.TileM, 16)
-		cfg.TileN = min(cfg.TileN, 16)
 	}
 
 	cfg.TileM = clampTile(cfg.TileM, maxTileM)

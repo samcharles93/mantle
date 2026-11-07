@@ -310,7 +310,6 @@ func TestBatchPrefillGateRejects(t *testing.T) {
 		{name: "gemma4 per-layer input", mutate: func(m *Instance) {
 			m.Gemma4PerLayer = &core.Gemma4PerLayerInputModel{}
 		}},
-		{name: "flash attention", mutate: func(m *Instance) { m.Config.Config.FlashAttention = true }},
 		{name: "mamba", mutate: func(m *Instance) { m.Layers[0].Mamba = &core.MambaLayer{} }},
 		{name: "deltanet", mutate: func(m *Instance) { m.Layers[0].DeltaNet = &core.DeltaNetLayer{} }},
 		{name: "recurrent", mutate: func(m *Instance) { m.Layers[0].IsRecurrent = true }},

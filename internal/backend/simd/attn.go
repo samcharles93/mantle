@@ -29,14 +29,6 @@ type attentionFullPipelineFastPath interface {
 	QKVAttentionProjection(projOut []float32, layer, kvLayer *Layer, x []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32, invFreq []float64, ropeAttnScale float32, applyRope bool, mirrorHostKV bool) bool
 }
 
-type flashAttentionFastPath interface {
-	FlashAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool
-}
-
-type flashAttentionMultiHeadFastPath interface {
-	FlashAttentionMultiHead(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool
-}
-
 type deviceMatVecFastPath interface {
 	DeviceMatVec(dst []float32, w *instance.Mat, x []float32) bool
 }
@@ -328,61 +320,6 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	if m.Config != nil {
 		softcap = m.Config.Config.AttnLogitSoftcap
 	}
-
-	flashAttentionEnabled := m.Config != nil && m.Config.Config.FlashAttention && kvLayer == layer
-
-	// FlashAttention fast path (multi-head version) - only if enabled in config
-	if flashAttentionEnabled {
-		// For incremental processing with KV caching, we need to adapt FlashAttention
-		// FlashAttention is most effective when processing full sequences, but we can still
-		// leverage parts of it for improved performance
-
-		// First, check if we have a full sequence FlashAttention implementation available
-		if fp, ok := ops.(flashAttentionMultiHeadFastPath); ok && fp.FlashAttentionMultiHead(m.Scratch.AttnProj, layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap) {
-			return m.Scratch.AttnProj
-		}
-
-		// FlashAttention fast path (single-head version)
-		if fp, ok := ops.(flashAttentionFastPath); ok && fp.FlashAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap) {
-			// If FlashAttention handles the computation, skip the traditional path
-			var gate []float32
-			if layer.FusedQGate {
-				qDim := nHead * headDim
-				gate = m.Scratch.AttnGate[qDim : 2*qDim]
-			} else {
-				gate = m.Scratch.AttnGate[:nHead*headDim]
-				if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
-					// x may still be device-backed from fast-path norm/projections.
-					// Ensure host visibility before CPU gate matvec fallback.
-					syncDeviceSlice(ops, x)
-					if qx == nil && CanUseQuantVec(layer.AttnGate) {
-						qx = PrepareQuantVec(x)
-					}
-					ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
-				}
-			}
-
-			// Vectorized Sigmoid with multiplication
-			n := len(gate)
-			i := 0
-			if cpu.HasAVX2 {
-				for ; i+8 <= n; i += 8 {
-					vout := archsimd.LoadFloat32x8(attnOut[i:])
-					vgate := archsimd.LoadFloat32x8(gate[i:])
-					vout = vout.Mul(fastSigmoidVec(vgate))
-					vout.Store(attnOut[i:])
-				}
-			}
-			for ; i < n; i++ {
-				attnOut[i] *= Sigmoid(gate[i])
-			}
-			ops.MatVec(m.Scratch.AttnProj, layer.Wo, attnOut[:nHead*headDim])
-			return m.Scratch.AttnProj
-		}
-	}
-
-	// Alternative: Enhanced attention with optimized kernels for current processing pattern
-	// This is where we can add custom optimized implementations for the incremental attention
 
 	// Check for incremental attention fast path
 	if kvLayer == layer {

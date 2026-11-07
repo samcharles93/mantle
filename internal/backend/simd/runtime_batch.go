@@ -134,11 +134,6 @@ func (m *Instance) batchIneligibleReason(tokens []int) string {
 		return "config is missing head count or head dim"
 	case m.Gemma4PerLayer != nil:
 		return "gemma4 per-layer input is not reproduced"
-	case cfg.FlashAttention:
-		// The CPU flash-attention branch in Attention returns the raw attention
-		// output without the Wo projection, so the sequential path's own result
-		// depends on this switch. Leave those models on the sequential path.
-		return "flash attention config selects a different sequential path"
 	case m.MaxBatch <= 0:
 		return "batch scratch is not allocated"
 	case m.Pos < 0 || m.Pos+n > m.MaxContext:

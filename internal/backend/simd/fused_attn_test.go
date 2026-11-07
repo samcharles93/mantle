@@ -80,14 +80,6 @@ func (o *noFastPathOps) IncrementalAttention(attnOut []float32, layer *Layer, q,
 	return false
 }
 
-func (o *noFastPathOps) FlashAttention(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool {
-	return false
-}
-
-func (o *noFastPathOps) FlashAttentionMultiHead(attnOut []float32, layer *Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, softcap float32) bool {
-	return false
-}
-
 func (o *noFastPathOps) QKVAttentionProjection(projOut []float32, layer, kvLayer *Layer, x []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32, invFreq []float64, ropeAttnScale float32, applyRope, mirrorHostKV bool) bool {
 	return false
 }
