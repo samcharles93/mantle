@@ -19,7 +19,7 @@
   - [ ] create basic documentation
 
 - [ ] Devops
-  - [ ] add CI/CD testing
+  - [X] add CI testing (.github/workflows/ci.yml: fmt, build, vet, go test, golangci-lint, cuda-tag vet)
   - [ ] add github actions for releases
   - [ ] add pre-commit checks
 
@@ -34,7 +34,7 @@
   - [ ] ensure MCF docs and spec is updated for quantisation
 
 - [ ] Architecture Support
-  - [ ] Gemma3 support (currently broken)
+  - [X] Gemma3 text support: verified against HF transformers (testdata/gemma3_reference.json, short + past-512 sliding-window prompts; TestGemma3ReferenceLogits with MANTLE_GEMMA3_MCF). Multimodal (vision) variant still open.
   - [ ] Granite support
   - [ ] Improve ease of use for adding new architectures
 
