@@ -27,11 +27,11 @@ func (qc *QuantCache) validFor(m *Mat) bool {
 	if blocksPerRow != qc.BlocksPerRow {
 		return false
 	}
-	totalBlocks, ok := mulInt(m.R, blocksPerRow)
+	totalBlocks, ok := MulInt(m.R, blocksPerRow)
 	if !ok {
 		return false
 	}
-	qLen, ok := mulInt(totalBlocks, 32)
+	qLen, ok := MulInt(totalBlocks, 32)
 	if !ok {
 		return false
 	}
@@ -179,7 +179,7 @@ func NewAttnPool(workers, _ int) *AttnPool {
 	return &AttnPool{Size: workers}
 }
 
-func mulInt(a, b int) (int, bool) {
+func MulInt(a, b int) (int, bool) {
 	if a == 0 || b == 0 {
 		return 0, true
 	}

@@ -466,14 +466,14 @@ func matVecRangeBF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 		j := 0
 		offj := off
 		for ; j+7 < w.C; j += 8 {
-			u0 := u16le(raw, offj+0)
-			u1 := u16le(raw, offj+2)
-			u2 := u16le(raw, offj+4)
-			u3 := u16le(raw, offj+6)
-			u4 := u16le(raw, offj+8)
-			u5 := u16le(raw, offj+10)
-			u6 := u16le(raw, offj+12)
-			u7 := u16le(raw, offj+14)
+			u0 := instance.U16LE(raw, offj+0)
+			u1 := instance.U16LE(raw, offj+2)
+			u2 := instance.U16LE(raw, offj+4)
+			u3 := instance.U16LE(raw, offj+6)
+			u4 := instance.U16LE(raw, offj+8)
+			u5 := instance.U16LE(raw, offj+10)
+			u6 := instance.U16LE(raw, offj+12)
+			u7 := instance.U16LE(raw, offj+14)
 			sum += bf16ToF32Table(u0)*x[j+0] +
 				bf16ToF32Table(u1)*x[j+1] +
 				bf16ToF32Table(u2)*x[j+2] +
@@ -485,7 +485,7 @@ func matVecRangeBF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 			offj += 16
 		}
 		for ; j < w.C; j++ {
-			u := u16le(raw, offj)
+			u := instance.U16LE(raw, offj)
 			sum += bf16ToF32Table(u) * x[j]
 			offj += 2
 		}
@@ -978,7 +978,7 @@ func matVecRangeBF16AVX512(dst []float32, w *Mat, x []float32, rs, re int) {
 		j := 0
 		offj := off
 		for ; j < c; j++ {
-			u := u16le(raw, offj)
+			u := instance.U16LE(raw, offj)
 			sum += bf16ToF32Table(u) * x[j]
 			offj += 2
 		}
@@ -1026,14 +1026,14 @@ func matVecRangeF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 		j := 0
 		offj := off
 		for ; j+7 < w.C; j += 8 {
-			u0 := u16le(raw, offj+0)
-			u1 := u16le(raw, offj+2)
-			u2 := u16le(raw, offj+4)
-			u3 := u16le(raw, offj+6)
-			u4 := u16le(raw, offj+8)
-			u5 := u16le(raw, offj+10)
-			u6 := u16le(raw, offj+12)
-			u7 := u16le(raw, offj+14)
+			u0 := instance.U16LE(raw, offj+0)
+			u1 := instance.U16LE(raw, offj+2)
+			u2 := instance.U16LE(raw, offj+4)
+			u3 := instance.U16LE(raw, offj+6)
+			u4 := instance.U16LE(raw, offj+8)
+			u5 := instance.U16LE(raw, offj+10)
+			u6 := instance.U16LE(raw, offj+12)
+			u7 := instance.U16LE(raw, offj+14)
 			sum += fp16ToF32Table(u0)*x[j+0] +
 				fp16ToF32Table(u1)*x[j+1] +
 				fp16ToF32Table(u2)*x[j+2] +
@@ -1045,7 +1045,7 @@ func matVecRangeF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 			offj += 16
 		}
 		for ; j < w.C; j++ {
-			u := u16le(raw, offj)
+			u := instance.U16LE(raw, offj)
 			sum += fp16ToF32Table(u) * x[j]
 			offj += 2
 		}

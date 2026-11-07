@@ -1,5 +1,7 @@
 package simd
 
+import instance "github.com/samcharles93/mantle/internal/backend/core"
+
 type AttnContext struct {
 	Q, CacheK, CacheV    []float32
 	CacheK16, CacheV16   []uint16
@@ -77,7 +79,7 @@ func RunAttnHeads(ctx *AttnContext, scoresBuf []float32, rs, re int) {
 						cachePos = t % cacheLen
 					}
 					voff := cachePos*ctx.KvStride + kvHead*ctx.HeadDim + d
-					sum += scores[t-ctx.Start] * Float16ToFloat32(ctx.CacheV16[voff])
+					sum += scores[t-ctx.Start] * instance.Float16ToFloat32(ctx.CacheV16[voff])
 				}
 			} else {
 				for t := ctx.Start; t <= ctx.Pos; t++ {

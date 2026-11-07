@@ -86,9 +86,9 @@ func DeltaNet(m *Instance, layer *Layer, x []float32) []float32 {
 
 		deltaNetL2NormInPlace(qHead, eps)
 		deltaNetL2NormInPlace(kHead, eps)
-		g := -fastExp(dl.ALog[hv]) * Softplus(m.Scratch.DeltaA[hv]+dl.DTBias[hv])
+		g := -core.FastExp(dl.ALog[hv]) * Softplus(m.Scratch.DeltaA[hv]+dl.DTBias[hv])
 		beta := Sigmoid(m.Scratch.DeltaB[hv])
-		decay := fastExp(g)
+		decay := core.FastExp(g)
 
 		for i := range state {
 			state[i] *= decay

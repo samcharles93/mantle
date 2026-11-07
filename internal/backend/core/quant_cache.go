@@ -6,21 +6,21 @@ import (
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
-type quantLayout struct {
-	family            byte
-	bits              int
-	blocksPerRow      int
-	superBlocksPerRow int
-	blockDataBytes    int
+type QuantLayout struct {
+	Family            byte
+	Bits              int
+	BlocksPerRow      int
+	SuperBlocksPerRow int
+	BlockDataBytes    int
 
-	scaleOff   int
-	scaleCount int
+	ScaleOff   int
+	ScaleCount int
 
-	subScaleOff   int
-	subScaleCount int
+	SubScaleOff   int
+	SubScaleCount int
 
-	dataOff   int
-	dataBytes int
+	DataOff   int
+	DataBytes int
 }
 
 var q4SignTable = [16]int8{
@@ -40,16 +40,16 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 		return nil, errors.New("quant cache: dtype is not quantized")
 	}
 
-	layout, err := quantLayoutForMat(m.R, m.C, m.DType, len(m.Raw))
+	layout, err := QuantLayoutForMat(m.R, m.C, m.DType, len(m.Raw))
 	if err != nil {
 		return nil, err
 	}
 
-	totalBlocks, ok := mulInt(m.R, layout.blocksPerRow)
+	totalBlocks, ok := MulInt(m.R, layout.BlocksPerRow)
 	if !ok {
 		return nil, errors.New("quant cache: payload too large")
 	}
-	qLen, ok := mulInt(totalBlocks, 32)
+	qLen, ok := MulInt(totalBlocks, 32)
 	if !ok {
 		return nil, errors.New("quant cache: payload too large")
 	}
@@ -57,55 +57,55 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 	q := make([]int8, qLen)
 	scales := make([]float32, totalBlocks)
 
-	if layout.family == 'q' {
-		scalesRaw := m.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
-		data := m.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
+	if layout.Family == 'q' {
+		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
+		data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
 
 		for blockIdx := range totalBlocks {
-			scale := scaleAtRawLE(scalesRaw, blockIdx)
+			scale := ScaleAtRawLE(scalesRaw, blockIdx)
 			scales[blockIdx] = scale
 			if scale == 0 {
 				continue
 			}
-			dataOff := blockIdx * layout.blockDataBytes
+			dataOff := blockIdx * layout.BlockDataBytes
 			off := blockIdx * 32
-			decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.blockDataBytes], layout.bits)
+			decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
 		}
-		return &QuantCache{Q: q, Scales: scales, BlocksPerRow: layout.blocksPerRow}, nil
+		return &QuantCache{Q: q, Scales: scales, BlocksPerRow: layout.BlocksPerRow}, nil
 	}
 
-	superRaw := m.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
-	subRaw := m.Raw[layout.subScaleOff : layout.subScaleOff+layout.subScaleCount]
-	data := m.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
+	superRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
+	subRaw := m.Raw[layout.SubScaleOff : layout.SubScaleOff+layout.SubScaleCount]
+	data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
 
 	for r := 0; r < m.R; r++ {
-		blockBase := r * layout.blocksPerRow
-		superBase := r * layout.superBlocksPerRow
-		for b := 0; b < layout.blocksPerRow; b++ {
+		blockBase := r * layout.BlocksPerRow
+		superBase := r * layout.SuperBlocksPerRow
+		for b := 0; b < layout.BlocksPerRow; b++ {
 			blockIdx := blockBase + b
 			superIdx := superBase + (b / 8)
-			superScale := scaleAtRawLE(superRaw, superIdx)
+			superScale := ScaleAtRawLE(superRaw, superIdx)
 			u6 := subRaw[blockIdx] & 0x3F
 			if superScale == 0 || u6 == 0 {
 				continue
 			}
 			scale := superScale * (float32(u6) / 32.0)
 			scales[blockIdx] = scale
-			dataOff := blockIdx * layout.blockDataBytes
+			dataOff := blockIdx * layout.BlockDataBytes
 			off := blockIdx * 32
-			decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.blockDataBytes], layout.bits)
+			decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
 		}
 	}
 
-	return &QuantCache{Q: q, Scales: scales, BlocksPerRow: layout.blocksPerRow}, nil
+	return &QuantCache{Q: q, Scales: scales, BlocksPerRow: layout.BlocksPerRow}, nil
 }
 
-func quantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (quantLayout, error) {
+func QuantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (QuantLayout, error) {
 	if rows <= 0 || cols <= 0 {
-		return quantLayout{}, errors.New("invalid quant mat shape")
+		return QuantLayout{}, errors.New("invalid quant mat shape")
 	}
 	if !mcf.DTypeRequiresAligned64(dt) {
-		return quantLayout{}, errors.New("dtype is not quantized")
+		return QuantLayout{}, errors.New("dtype is not quantized")
 	}
 
 	bits := 0
@@ -130,90 +130,90 @@ func quantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (quantLay
 		bits = 2
 		family = 'k'
 	default:
-		return quantLayout{}, errors.New("unsupported quant dtype")
+		return QuantLayout{}, errors.New("unsupported quant dtype")
 	}
 
 	wantU64, err := mcf.QuantPayloadSize([]uint64{uint64(rows), uint64(cols)}, dt)
 	if err != nil {
-		return quantLayout{}, err
+		return QuantLayout{}, err
 	}
 	if wantU64 > uint64(int(^uint(0)>>1)) {
-		return quantLayout{}, errors.New("quant payload too large")
+		return QuantLayout{}, errors.New("quant payload too large")
 	}
 	if int(wantU64) != rawLen {
-		return quantLayout{}, errors.New("quant payload size mismatch")
+		return QuantLayout{}, errors.New("quant payload size mismatch")
 	}
 
 	blocksPerRow := (cols + 31) / 32
-	totalBlocks, ok := mulInt(rows, blocksPerRow)
+	totalBlocks, ok := MulInt(rows, blocksPerRow)
 	if !ok {
-		return quantLayout{}, errors.New("quant payload too large")
+		return QuantLayout{}, errors.New("quant payload too large")
 	}
 	blockDataBytes := (32 * bits) / 8
-	dataBytes, ok := mulInt(totalBlocks, blockDataBytes)
+	dataBytes, ok := MulInt(totalBlocks, blockDataBytes)
 	if !ok {
-		return quantLayout{}, errors.New("quant payload too large")
+		return QuantLayout{}, errors.New("quant payload too large")
 	}
 
-	scaleBytes, ok := mulInt(totalBlocks, 2)
+	scaleBytes, ok := MulInt(totalBlocks, 2)
 	if !ok {
-		return quantLayout{}, errors.New("quant payload too large")
+		return QuantLayout{}, errors.New("quant payload too large")
 	}
 
-	layout := quantLayout{
-		family:         family,
-		bits:           bits,
-		blocksPerRow:   blocksPerRow,
-		blockDataBytes: blockDataBytes,
-		scaleOff:       0,
+	layout := QuantLayout{
+		Family:         family,
+		Bits:           bits,
+		BlocksPerRow:   blocksPerRow,
+		BlockDataBytes: blockDataBytes,
+		ScaleOff:       0,
 	}
 
 	if family == 'q' {
-		layout.scaleCount = totalBlocks
-		off, ok := align64Int(scaleBytes)
+		layout.ScaleCount = totalBlocks
+		off, ok := Align64Int(scaleBytes)
 		if !ok {
-			return quantLayout{}, errors.New("quant payload too large")
+			return QuantLayout{}, errors.New("quant payload too large")
 		}
-		layout.dataOff = off
-		layout.dataBytes = dataBytes
+		layout.DataOff = off
+		layout.DataBytes = dataBytes
 		return layout, nil
 	}
 
 	superBlocksPerRow := (blocksPerRow + 7) / 8
-	superCount, ok := mulInt(rows, superBlocksPerRow)
+	superCount, ok := MulInt(rows, superBlocksPerRow)
 	if !ok {
-		return quantLayout{}, errors.New("quant payload too large")
+		return QuantLayout{}, errors.New("quant payload too large")
 	}
-	superBytes, ok := mulInt(superCount, 2)
+	superBytes, ok := MulInt(superCount, 2)
 	if !ok {
-		return quantLayout{}, errors.New("quant payload too large")
+		return QuantLayout{}, errors.New("quant payload too large")
 	}
 
-	layout.scaleCount = superCount
-	layout.superBlocksPerRow = superBlocksPerRow
+	layout.ScaleCount = superCount
+	layout.SuperBlocksPerRow = superBlocksPerRow
 
 	subBytes := totalBlocks
-	off, ok := align64Int(superBytes)
+	off, ok := Align64Int(superBytes)
 	if !ok {
-		return quantLayout{}, errors.New("quant payload too large")
+		return QuantLayout{}, errors.New("quant payload too large")
 	}
-	layout.subScaleOff = off
-	layout.subScaleCount = totalBlocks
+	layout.SubScaleOff = off
+	layout.SubScaleCount = totalBlocks
 
-	off, ok = addInt(off, subBytes)
+	off, ok = AddInt(off, subBytes)
 	if !ok {
-		return quantLayout{}, errors.New("quant payload too large")
+		return QuantLayout{}, errors.New("quant payload too large")
 	}
-	off, ok = align64Int(off)
+	off, ok = Align64Int(off)
 	if !ok {
-		return quantLayout{}, errors.New("quant payload too large")
+		return QuantLayout{}, errors.New("quant payload too large")
 	}
-	layout.dataOff = off
-	layout.dataBytes = dataBytes
+	layout.DataOff = off
+	layout.DataBytes = dataBytes
 	return layout, nil
 }
 
-func scaleAtRawLE(raw []byte, idx int) float32 {
+func ScaleAtRawLE(raw []byte, idx int) float32 {
 	off := idx * 2
 	if off < 0 || off+1 >= len(raw) {
 		return 0
@@ -266,24 +266,24 @@ func decodeBlockBits(dst *[32]int8, src []byte, bits int) {
 			}
 			bitPos++
 		}
-		dst[i] = signExtend(v, bits)
+		dst[i] = SignExtend(v, bits)
 	}
 }
 
-func signExtend(v uint8, bits int) int8 {
+func SignExtend(v uint8, bits int) int8 {
 	shift := 8 - bits
 	return int8(int8(v<<uint(shift)) >> uint(shift))
 }
 
-func addInt(a, b int) (int, bool) {
+func AddInt(a, b int) (int, bool) {
 	if a > int(^uint(0)>>1)-b {
 		return 0, false
 	}
 	return a + b, true
 }
 
-func align64Int(n int) (int, bool) {
-	if n > int(^uint(0)>>1)-63 {
+func Align64Int(n int) (int, bool) {
+	if n < 0 || n > int(^uint(0)>>1)-63 {
 		return 0, false
 	}
 	return (n + 63) &^ 63, true

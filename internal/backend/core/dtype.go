@@ -42,7 +42,7 @@ func dtypeElemSize(dt mcf.TensorDType) (int, bool) {
 	}
 }
 
-func u16le(b []byte, off int) uint16 {
+func U16LE(b []byte, off int) uint16 {
 	_ = b[off+1]
 	return uint16(b[off]) | uint16(b[off+1])<<8
 }

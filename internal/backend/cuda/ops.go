@@ -4881,11 +4881,11 @@ func (o *Ops) uploadQuantAsF16Device(w *model.Mat) (native.DeviceBuffer, error) 
 	if w == nil || w.Raw == nil || !mcf.DTypeRequiresAligned64(w.DType) {
 		return native.DeviceBuffer{}, fmt.Errorf("gpu dequant requires quantized raw matrix")
 	}
-	totalElems, ok := mulInt(w.R, w.C)
+	totalElems, ok := core.MulInt(w.R, w.C)
 	if !ok {
 		return native.DeviceBuffer{}, fmt.Errorf("quant matrix too large")
 	}
-	outBytes, ok := mulInt(totalElems, 2)
+	outBytes, ok := core.MulInt(totalElems, 2)
 	if !ok {
 		return native.DeviceBuffer{}, fmt.Errorf("quant matrix too large")
 	}
@@ -5189,15 +5189,15 @@ func parseQ4PayloadView(w *model.Mat) (q4PayloadView, error) {
 	if err != nil {
 		return q4PayloadView{}, err
 	}
-	scaleBytes, ok := mulInt(totalBlocks, 2)
+	scaleBytes, ok := core.MulInt(totalBlocks, 2)
 	if !ok {
 		return q4PayloadView{}, fmt.Errorf("q4 scale region too large")
 	}
-	dataOff, ok := align64Int(scaleBytes)
+	dataOff, ok := core.Align64Int(scaleBytes)
 	if !ok {
 		return q4PayloadView{}, fmt.Errorf("q4 payload layout overflow")
 	}
-	dataBytes, ok := mulInt(totalBlocks, 16)
+	dataBytes, ok := core.MulInt(totalBlocks, 16)
 	if !ok {
 		return q4PayloadView{}, fmt.Errorf("q4 data region too large")
 	}
@@ -5217,28 +5217,28 @@ func parseK4PayloadView(w *model.Mat) (k4PayloadView, error) {
 		return k4PayloadView{}, err
 	}
 	superBlocksPerRow := (blocksPerRow + 7) / 8
-	superCount, ok := mulInt(w.R, superBlocksPerRow)
+	superCount, ok := core.MulInt(w.R, superBlocksPerRow)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 super scale region too large")
 	}
-	superBytes, ok := mulInt(superCount, 2)
+	superBytes, ok := core.MulInt(superCount, 2)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 super scale region too large")
 	}
-	subOff, ok := align64Int(superBytes)
+	subOff, ok := core.Align64Int(superBytes)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 payload layout overflow")
 	}
 	subBytes := totalBlocks
-	dataOff, ok := addInt(subOff, subBytes)
+	dataOff, ok := core.AddInt(subOff, subBytes)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 payload layout overflow")
 	}
-	dataOff, ok = align64Int(dataOff)
+	dataOff, ok = core.Align64Int(dataOff)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 payload layout overflow")
 	}
-	dataBytes, ok := mulInt(totalBlocks, 16)
+	dataBytes, ok := core.MulInt(totalBlocks, 16)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 data region too large")
 	}
@@ -5429,35 +5429,11 @@ func quantBlocks(rows, cols int) (int, int, error) {
 		return 0, 0, fmt.Errorf("invalid quant matrix shape")
 	}
 	blocksPerRow := (cols + 31) / 32
-	totalBlocks, ok := mulInt(rows, blocksPerRow)
+	totalBlocks, ok := core.MulInt(rows, blocksPerRow)
 	if !ok {
 		return 0, 0, fmt.Errorf("quant matrix too large")
 	}
 	return blocksPerRow, totalBlocks, nil
-}
-
-func mulInt(a, b int) (int, bool) {
-	if a == 0 || b == 0 {
-		return 0, true
-	}
-	if a > int(^uint(0)>>1)/b {
-		return 0, false
-	}
-	return a * b, true
-}
-
-func addInt(a, b int) (int, bool) {
-	if a > int(^uint(0)>>1)-b {
-		return 0, false
-	}
-	return a + b, true
-}
-
-func align64Int(n int) (int, bool) {
-	if n < 0 || n > int(^uint(0)>>1)-63 {
-		return 0, false
-	}
-	return (n + 63) &^ 63, true
 }
 
 func weightUploadSpec(w *model.Mat) (native.BlasDataType, int64, unsafe.Pointer, error) {
@@ -5725,7 +5701,7 @@ func (o *Ops) ensureAttnCache(layer *model.Layer, kvStride, cacheLen int) (devic
 		return deviceAttnCache{}, fmt.Errorf("kv stride must be a multiple of quant block size (%d)", mcf.QuantBlockSize)
 	}
 
-	totalElems, ok := mulInt(kvStride, cacheLen)
+	totalElems, ok := core.MulInt(kvStride, cacheLen)
 	if !ok {
 		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
 	}
@@ -5733,7 +5709,7 @@ func (o *Ops) ensureAttnCache(layer *model.Layer, kvStride, cacheLen int) (devic
 	useQ8K := layer.AttnCache.KQ8 != nil
 	useQ8V := layer.AttnCache.VQ8 != nil
 
-	totalF16Bytes, ok := mulInt(totalElems, 2)
+	totalF16Bytes, ok := core.MulInt(totalElems, 2)
 	if !ok {
 		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
 	}
@@ -5741,7 +5717,7 @@ func (o *Ops) ensureAttnCache(layer *model.Layer, kvStride, cacheLen int) (devic
 	totalQ8Bytes := totalElems
 
 	// Allocate enough scales for every block across entire cache len
-	scaleBytes, ok := mulInt(cacheLen*blocksPerStride, int(unsafe.Sizeof(float32(0))))
+	scaleBytes, ok := core.MulInt(cacheLen*blocksPerStride, int(unsafe.Sizeof(float32(0))))
 	if !ok {
 		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
 	}

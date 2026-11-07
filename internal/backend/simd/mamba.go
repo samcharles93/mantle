@@ -155,9 +155,9 @@ func mambaScan(out []float32, ml *MambaLayer, x []float32, dt []float32, b []flo
 	groupSize := ml.GroupSize
 	for h := 0; h < ml.HeadCount; h++ {
 		group := h / groupSize
-		a := -fastExp(ml.ALog[h])
+		a := -core.FastExp(ml.ALog[h])
 		dtH := dt[h]
-		dA := fastExp(a * dtH)
+		dA := core.FastExp(a * dtH)
 		bGroup := b[group*dState : (group+1)*dState]
 		cGroup := c[group*dState : (group+1)*dState]
 		for p := range headDim {

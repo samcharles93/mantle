@@ -1,6 +1,7 @@
 package simd
 
 import (
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"math"
 )
 
@@ -40,7 +41,7 @@ func DotF16(a []float32, b []uint16) float32 {
 func dotScalarF16(a []float32, b []uint16) float32 {
 	var sum float32
 	for i, v := range a {
-		sum += v * Float16ToFloat32(b[i])
+		sum += v * instance.Float16ToFloat32(b[i])
 	}
 	return sum
 }
@@ -85,68 +86,7 @@ func Softmax(x []float32) {
 		return
 	}
 	recordHostSoftmax(len(x))
-	maxv := x[0]
-	for i := 1; i < len(x); i++ {
-		if x[i] > maxv {
-			maxv = x[i]
-		}
-	}
-	var sum float32
-	for i := range x {
-		v := fastExp(x[i] - maxv)
-		x[i] = v
-		sum += v
-	}
-	if sum == 0 {
-		return
-	}
-	inv := 1.0 / sum
-	for i := range x {
-		x[i] *= inv
-	}
-}
-
-// fastExp computes an approximation of exp(x) using polynomial approximation.
-// Accurate for x in [-10, 10] with relative error < 0.1%.
-// For neural network inference, this is sufficient.
-func fastExp(x float32) float32 {
-	// Clamp to safe range to avoid overflow
-	if x > 88.0 {
-		return 3.4028235e38 // Close to float32 max
-	}
-	if x < -88.0 {
-		return 0.0
-	}
-
-	// Range reduction: exp(x) = 2^k * exp(r)
-	// where x = k*ln(2) + r, and -ln(2)/2 <= r < ln(2)/2
-	const ln2 = 0.693147180559945309417
-	const ln2Inv = 1.44269504088896340736
-
-	// k = round(x / ln(2))
-	k := int32(x*ln2Inv + 0.5)
-	if x < 0 {
-		k = int32(x*ln2Inv - 0.5)
-	}
-
-	// r = x - k*ln(2)
-	r := x - float32(k)*ln2
-
-	// Compute exp(r) using 5th order polynomial (minimax approximation)
-	// exp(r) ≈ 1 + r + r²/2 + r³/6 + r⁴/24 + r⁵/120
-	r2 := r * r
-	r3 := r2 * r
-	r4 := r2 * r2
-
-	poly := 1.0 + r + r2*0.5 + r3*0.16666667 + r4*0.041666667 + (r4*r)*0.008333333
-
-	// Compute 2^k using bit manipulation
-	// float32 bits: sign(1) | exponent(8) | mantissa(23)
-	// For 2^k: exponent = k + 127 (bias)
-	exp := uint32(k+127) << 23
-	scale := math.Float32frombits(exp)
-
-	return poly * scale
+	instance.Softmax(x)
 }
 
 // fastSigmoid computes an approximation of sigmoid using fastExp.
@@ -158,7 +98,7 @@ func fastSigmoid(x float32) float32 {
 	if x < -10.0 {
 		return 0.0
 	}
-	return 1.0 / (1.0 + fastExp(-x))
+	return 1.0 / (1.0 + instance.FastExp(-x))
 }
 
 // fastTanh computes an approximation of tanh(x) using fastExp.
@@ -170,7 +110,7 @@ func fastTanh(x float32) float32 {
 		return -1.0
 	}
 	// tanh(x) = (exp(2x) - 1) / (exp(2x) + 1)
-	e2x := fastExp(2.0 * x)
+	e2x := instance.FastExp(2.0 * x)
 	return (e2x - 1.0) / (e2x + 1.0)
 }
 
@@ -208,9 +148,9 @@ func Softplus(x float32) float32 {
 		return x
 	}
 	if x < -20 {
-		return fastExp(x)
+		return instance.FastExp(x)
 	}
-	return float32(math.Log1p(float64(fastExp(x))))
+	return float32(math.Log1p(float64(instance.FastExp(x))))
 }
 
 // RMSNormGated applies SiLU gating to src using gate and then RMS-normalizes.

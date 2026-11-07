@@ -123,7 +123,7 @@ func Softmax(x []float32) {
 	}
 	var sum float32
 	for i := range x {
-		v := fastExp(x[i] - maxv)
+		v := FastExp(x[i] - maxv)
 		x[i] = v
 		sum += v
 	}
@@ -136,7 +136,7 @@ func Softmax(x []float32) {
 	}
 }
 
-func fastExp(x float32) float32 {
+func FastExp(x float32) float32 {
 	if x > 88.0 {
 		return 3.4028235e38
 	}

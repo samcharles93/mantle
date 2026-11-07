@@ -301,7 +301,7 @@ func (o *Ops) SyncAttentionCacheToHost(layer *instance.Layer, pos int) {
 	cacheRef := &layer.AttnCache
 	cacheRef.EnsurePos(rows - 1)
 
-	totalElems, ok := mulInt(rows, cache.kvStride)
+	totalElems, ok := instance.MulInt(rows, cache.kvStride)
 	if !ok {
 		panic(fmt.Errorf("cuda: sync attention cache overflow (rows=%d stride=%d)", rows, cache.kvStride))
 	}
@@ -314,7 +314,7 @@ func (o *Ops) SyncAttentionCacheToHost(layer *instance.Layer, pos int) {
 		if len(dst) < rows {
 			panic(fmt.Errorf("cuda: host %s scales too small: have %d need %d", label, len(dst), rows))
 		}
-		scaleCount, ok := mulInt(rows, blocksPerStride)
+		scaleCount, ok := instance.MulInt(rows, blocksPerStride)
 		if !ok {
 			panic(fmt.Errorf("cuda: %s scale sync overflow (rows=%d blocks=%d)", label, rows, blocksPerStride))
 		}

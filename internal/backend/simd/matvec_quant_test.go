@@ -1,6 +1,7 @@
 package simd
 
 import (
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"testing"
 
 	"github.com/samcharles93/mantle/pkg/mcf"
@@ -20,7 +21,7 @@ func TestRowToQuant(t *testing.T) {
 	row := make([]float32, cols)
 	w.RowTo(row, 1)
 
-	scaleUsed := Float16ToFloat32(Float32ToFloat16(scale))
+	scaleUsed := instance.Float16ToFloat32(instance.Float32ToFloat16(scale))
 	for i := range cols {
 		want := float32(qvals[cols+i]) * scaleUsed
 		if diff := row[i] - want; diff < -1e-6 || diff > 1e-6 {
@@ -215,7 +216,7 @@ func buildQPayload(rows, cols, bits int, scale float32, qvals []int8) []byte {
 	blocksPerRow := (cols + 31) / 32
 	totalBlocks := rows * blocksPerRow
 	scales := make([]byte, totalBlocks*2)
-	f16 := Float32ToFloat16(scale)
+	f16 := instance.Float32ToFloat16(scale)
 	for i := range totalBlocks {
 		scales[i*2] = byte(f16)
 		scales[i*2+1] = byte(f16 >> 8)
@@ -251,7 +252,7 @@ func buildKPayload(rows, cols, bits int, scale float32, qvals []int8) []byte {
 	totalSuper := rows * superBlocksPerRow
 
 	superScales := make([]byte, totalSuper*2)
-	f16 := Float32ToFloat16(scale)
+	f16 := instance.Float32ToFloat16(scale)
 	for i := range totalSuper {
 		superScales[i*2] = byte(f16)
 		superScales[i*2+1] = byte(f16 >> 8)

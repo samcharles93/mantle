@@ -7,7 +7,7 @@ func errRowOutOfRange(row int) error {
 }
 
 func rowToQuant(dst []float32, m *Mat, row int) error {
-	layout, err := quantLayoutForMat(m.R, m.C, m.DType, len(m.Raw))
+	layout, err := QuantLayoutForMat(m.R, m.C, m.DType, len(m.Raw))
 	if err != nil {
 		return err
 	}
@@ -15,13 +15,13 @@ func rowToQuant(dst []float32, m *Mat, row int) error {
 		return errRowOutOfRange(row)
 	}
 
-	if layout.family == 'q' {
-		scalesRaw := m.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
-		data := m.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
+	if layout.Family == 'q' {
+		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
+		data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
 		var qbuf [32]int8
 
-		blockBase := row * layout.blocksPerRow
-		for b := 0; b < layout.blocksPerRow; b++ {
+		blockBase := row * layout.BlocksPerRow
+		for b := 0; b < layout.BlocksPerRow; b++ {
 			col := b * 32
 			n := m.C - col
 			if n <= 0 {
@@ -31,16 +31,16 @@ func rowToQuant(dst []float32, m *Mat, row int) error {
 				n = 32
 			}
 			blockIdx := blockBase + b
-			scale := scaleAtRawLE(scalesRaw, blockIdx)
-			dataOff := blockIdx * layout.blockDataBytes
-			block := data[dataOff : dataOff+layout.blockDataBytes]
+			scale := ScaleAtRawLE(scalesRaw, blockIdx)
+			dataOff := blockIdx * layout.BlockDataBytes
+			block := data[dataOff : dataOff+layout.BlockDataBytes]
 			if scale == 0 {
 				for i := 0; i < n; i++ {
 					dst[col+i] = 0
 				}
 				continue
 			}
-			decodeBlock(&qbuf, block, layout.bits)
+			decodeBlock(&qbuf, block, layout.Bits)
 			for i := 0; i < n; i++ {
 				dst[col+i] = float32(qbuf[i]) * scale
 			}
@@ -48,14 +48,14 @@ func rowToQuant(dst []float32, m *Mat, row int) error {
 		return nil
 	}
 
-	superRaw := m.Raw[layout.scaleOff : layout.scaleOff+layout.scaleCount*2]
-	subRaw := m.Raw[layout.subScaleOff : layout.subScaleOff+layout.subScaleCount]
-	data := m.Raw[layout.dataOff : layout.dataOff+layout.dataBytes]
+	superRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
+	subRaw := m.Raw[layout.SubScaleOff : layout.SubScaleOff+layout.SubScaleCount]
+	data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
 	var qbuf [32]int8
 
-	blockBase := row * layout.blocksPerRow
-	superBase := row * layout.superBlocksPerRow
-	for b := 0; b < layout.blocksPerRow; b++ {
+	blockBase := row * layout.BlocksPerRow
+	superBase := row * layout.SuperBlocksPerRow
+	for b := 0; b < layout.BlocksPerRow; b++ {
 		col := b * 32
 		n := m.C - col
 		if n <= 0 {
@@ -66,7 +66,7 @@ func rowToQuant(dst []float32, m *Mat, row int) error {
 		}
 		blockIdx := blockBase + b
 		superIdx := superBase + (b / 8)
-		superScale := scaleAtRawLE(superRaw, superIdx)
+		superScale := ScaleAtRawLE(superRaw, superIdx)
 		u6 := subRaw[blockIdx] & 0x3F
 		if superScale == 0 || u6 == 0 {
 			for i := 0; i < n; i++ {
@@ -76,9 +76,9 @@ func rowToQuant(dst []float32, m *Mat, row int) error {
 		}
 		scale := superScale * (float32(u6) / 32.0)
 
-		dataOff := blockIdx * layout.blockDataBytes
-		block := data[dataOff : dataOff+layout.blockDataBytes]
-		decodeBlock(&qbuf, block, layout.bits)
+		dataOff := blockIdx * layout.BlockDataBytes
+		block := data[dataOff : dataOff+layout.BlockDataBytes]
+		decodeBlock(&qbuf, block, layout.Bits)
 		for i := 0; i < n; i++ {
 			dst[col+i] = float32(qbuf[i]) * scale
 		}

@@ -1,6 +1,7 @@
 package simd
 
 import (
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"testing"
 
 	"github.com/samcharles93/mantle/internal/hostcaps"
@@ -39,13 +40,13 @@ func TestDefaultOpsStoreKVF16(t *testing.T) {
 	ops.StoreKV(0, 1, stride, nil, nil, kDst, vDst, nil, nil, nil, nil, k, v)
 
 	for i, want := range k {
-		got := Float16ToFloat32(kDst[stride+i])
+		got := instance.Float16ToFloat32(kDst[stride+i])
 		if got != want {
 			t.Fatalf("k[%d]: got %v want %v", i, got, want)
 		}
 	}
 	for i, want := range v {
-		got := Float16ToFloat32(vDst[stride+i])
+		got := instance.Float16ToFloat32(vDst[stride+i])
 		if got != want {
 			t.Fatalf("v[%d]: got %v want %v", i, got, want)
 		}
