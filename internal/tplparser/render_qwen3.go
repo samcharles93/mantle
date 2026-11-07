@@ -105,6 +105,7 @@ func renderQwen3(opts RenderOptions) (string, bool, error) {
 
 	if opts.AddGenerationPrompt {
 		b.WriteString("<|im_start|>assistant\n")
+		writeDisabledThinking(&b, opts)
 	}
 	return b.String(), true, nil
 }

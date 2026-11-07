@@ -26,6 +26,9 @@ type RenderOptions struct {
 	EOSToken            string
 	AddBOS              bool
 	AddGenerationPrompt bool
-	Messages            []Message
-	Tools               []any
+	// DisableThinking asks templates that declare an enable_thinking switch to
+	// render it as false. Templates without the switch are unaffected.
+	DisableThinking bool
+	Messages        []Message
+	Tools           []any
 }

@@ -95,3 +95,13 @@ func renderByTemplateSignature(opts RenderOptions) (string, bool, error) {
 		return "", false, nil
 	}
 }
+
+// writeDisabledThinking emits the empty think block that Qwen3-style ChatML
+// templates produce for enable_thinking=false. It only fires when the caller
+// asked for it and the template declares the switch.
+func writeDisabledThinking(b *strings.Builder, opts RenderOptions) {
+	if !opts.DisableThinking || !strings.Contains(opts.Template, "enable_thinking") {
+		return
+	}
+	b.WriteString("<think>\n\n</think>\n\n")
+}

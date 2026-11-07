@@ -180,3 +180,59 @@ func TestRenderHonoursLeadingBOSToken(t *testing.T) {
 		t.Fatalf("template without a leading bos_token must not gain one: %q", noBOS)
 	}
 }
+
+func TestRenderDisableThinking(t *testing.T) {
+	t.Parallel()
+
+	const withSwitch = "{{- bos_token }}{%- if tools %}<tools></tools>{%- endif %}" +
+		"{%- if enable_thinking is false %}<think>\n\n</think>\n\n{%- endif %}"
+	const withoutSwitch = "{{- bos_token }}{%- if tools %}<tools></tools>{%- endif %}"
+
+	tests := []struct {
+		name     string
+		template string
+		disable  bool
+		want     string
+	}{
+		{
+			name:     "switch declared and disabled",
+			template: withSwitch,
+			disable:  true,
+			want:     "<s><|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+		},
+		{
+			name:     "switch declared but not disabled",
+			template: withSwitch,
+			disable:  false,
+			want:     "<s><|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n",
+		},
+		{
+			name:     "switch absent",
+			template: withoutSwitch,
+			disable:  true,
+			want:     "<s><|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, ok, err := Render(RenderOptions{
+				Template:            tc.template,
+				Arch:                "llama",
+				BOSToken:            "<s>",
+				AddGenerationPrompt: true,
+				DisableThinking:     tc.disable,
+				Messages:            []Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("render error: %v", err)
+			}
+			if !ok {
+				t.Fatalf("expected renderer match")
+			}
+			if out != tc.want {
+				t.Fatalf("got %q, want %q", out, tc.want)
+			}
+		})
+	}
+}

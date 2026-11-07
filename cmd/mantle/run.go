@@ -814,6 +814,7 @@ func runCmd() *cli.Command {
 					Messages:            msgs,
 					Tools:               tools,
 					AddGenerationPrompt: true,
+					DisableThinking:     reasoningBgt == 0,
 					NoTemplate:          noTemplate,
 				})
 				if err != nil {

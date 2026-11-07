@@ -380,7 +380,7 @@ func renderPrompt(prompt, system string, tok tokenizer.Tokenizer, cfg tokenizer.
 		if t, ok := tok.(interface{ TokenString(int) string }); ok {
 			bosToken = t.TokenString(cfg.BOSTokenID)
 		}
-		if s, ok, err := tokenizer.RenderPromptTemplate(template, bosToken, cfg.TokenString(cfg.EOSTokenID), cfg.AddBOS, msgs, nil, true, arch); err == nil && ok {
+		if s, ok, err := tokenizer.RenderPromptTemplate(template, bosToken, cfg.TokenString(cfg.EOSTokenID), cfg.AddBOS, msgs, nil, true, false, arch); err == nil && ok {
 			return s
 		}
 	}

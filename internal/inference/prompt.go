@@ -14,6 +14,7 @@ type PromptRenderInput struct {
 	Messages            []tokenizer.Message
 	Tools               []any
 	AddGenerationPrompt bool
+	DisableThinking     bool
 	NoTemplate          bool
 }
 
@@ -36,6 +37,7 @@ func RenderPrompt(input PromptRenderInput) (string, error) {
 		input.Messages,
 		input.Tools,
 		input.AddGenerationPrompt,
+		input.DisableThinking,
 		input.Arch,
 	)
 	if err == nil && ok {

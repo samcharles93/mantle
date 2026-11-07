@@ -236,6 +236,7 @@ func (e *EngineImpl) renderPrompt(req *Request) (string, error) {
 		Messages:            req.Messages,
 		Tools:               req.Tools,
 		AddGenerationPrompt: true,
+		DisableThinking:     req.ReasoningBudget == 0,
 		NoTemplate:          req.NoTemplate,
 	})
 }
