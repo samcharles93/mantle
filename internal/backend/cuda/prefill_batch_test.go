@@ -580,3 +580,45 @@ func BenchmarkSequentialPrefill(b *testing.B) {
 		}
 	}
 }
+
+// TestBatchedPrefillGateQuantWeightsDequantMode pins the weight gate: quantized
+// payloads are only eligible when the runtime dequantizes weights to dense
+// device copies (dequant mode), where the batched GEMM runs them as F16.
+// In auto/quant mode they stay on the per-token quant-kernel path.
+func TestBatchedPrefillGateQuantWeightsDequantMode(t *testing.T) {
+	quantMat := &core.Mat{R: 8, C: 64, Stride: 64, DType: mcf.DTypeQ8, Raw: make([]byte, 8*64+8*64/32*2)}
+	denseMat := &core.Mat{R: 8, C: 64, Stride: 64, DType: mcf.DTypeBF16, Raw: make([]byte, 8*64*2)}
+
+	newOps := func() *Ops {
+		return &Ops{
+			weights:       map[*core.Mat]deviceMat{},
+			qweights:      map[*core.Mat]deviceQuantMat{},
+			offloadedMats: map[*core.Mat]struct{}{},
+		}
+	}
+
+	t.Setenv("MANTLE_CUDA_WEIGHT_MODE", "dequant")
+	o := newOps()
+	if !batchedWeightDense(o, quantMat) {
+		t.Fatal("dequant mode must accept quantized weights (deviceMat dequantizes to F16)")
+	}
+	if !batchedWeightDense(o, denseMat) {
+		t.Fatal("dense bf16 weights must stay eligible in dequant mode")
+	}
+
+	t.Setenv("MANTLE_CUDA_WEIGHT_MODE", "auto")
+	o = newOps()
+	if batchedWeightDense(o, quantMat) {
+		t.Fatal("auto mode must keep quantized weights on the sequential quant-kernel path")
+	}
+	if !batchedWeightDense(o, denseMat) {
+		t.Fatal("dense bf16 weights must stay eligible in auto mode")
+	}
+
+	t.Setenv("MANTLE_CUDA_WEIGHT_MODE", "dequant")
+	o = newOps()
+	o.qweights[quantMat] = deviceQuantMat{}
+	if batchedWeightDense(o, quantMat) {
+		t.Fatal("a weight with pre-loaded quant data must never take the dense GEMM path")
+	}
+}

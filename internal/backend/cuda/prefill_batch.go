@@ -254,7 +254,9 @@ func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 
 // batchedWeightDense reports whether a weight will be executed by the dense
 // GEMM path in the batched implementation. Quantized, offloaded and
-// non-F32/BF16 dense weights fall back to the sequential path.
+// non-F32/BF16 dense weights fall back to the sequential path — except in
+// dequant weight mode, where quantized weights get a dense F16 device copy via
+// Ops.deviceMat and the batched GEMM runs them as F16.
 func batchedWeightDense(o *Ops, w *instance.Mat) bool {
 	if w == nil || w.R == 0 || w.C == 0 {
 		return false
@@ -271,6 +273,11 @@ func batchedWeightDense(o *Ops, w *instance.Mat) bool {
 	}
 	if mode != cudaWeightModeDequant && shouldPreferQuantWeights(w, mode) {
 		return false
+	}
+	if mcf.DTypeRequiresAligned64(w.DType) {
+		// Quantized payload: only usable when the runtime dequantizes weights
+		// to a dense device copy (dequant mode), never via the quant kernels.
+		return mode == cudaWeightModeDequant && len(w.Raw) > 0
 	}
 	_, ok := denseWeightUploadType(w)
 	return ok
@@ -1056,6 +1063,13 @@ func (p *batchedPrefillPlan) gemm(devW deviceMat, xF32 native.DeviceBuffer, k in
 		}
 		x = p.buf.conv
 		xt = native.BlasBF16
+	case native.BlasF16:
+		// Dequantized quant weights: F16 weight x F16 input, F32 compute.
+		if err := native.ConvertF32ToF16(xF32, p.buf.conv, p.n*k, o.stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: convert input to f16 (n=%d): %w", p.n*k, err)
+		}
+		x = p.buf.conv
+		xt = native.BlasF16
 	default:
 		return fmt.Errorf("cuda batched prefill: unsupported weight dtype %d", devW.dtype)
 	}
@@ -1080,6 +1094,12 @@ func (p *batchedPrefillPlan) gemmLast(devW deviceMat, xF32 native.DeviceBuffer, 
 		}
 		x = p.buf.conv
 		xt = native.BlasBF16
+	case native.BlasF16:
+		if err := native.ConvertF32ToF16(xF32, p.buf.conv, k, o.stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: convert output input to f16 (n=%d): %w", k, err)
+		}
+		x = p.buf.conv
+		xt = native.BlasF16
 	default:
 		return fmt.Errorf("cuda batched prefill: unsupported output weight dtype %d", devW.dtype)
 	}
