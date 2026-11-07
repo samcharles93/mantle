@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -49,6 +50,14 @@ func quantizeCmd() *cli.Command {
 				Name:  "max-clip",
 				Usage: "Optional override for MaxClip (applies to all tensors)",
 			},
+			&cli.StringFlag{
+				Name:  "assignments",
+				Usage: `Path to a per-tensor quantization assignment JSON (RCO/SLQ search output): {"default": "k4", "tensors": {"model.layers.0.*": "k2"}}. Exact names win over globs; longest glob wins.`,
+			},
+			&cli.Uint64Flag{
+				Name:  "budget-bytes",
+				Usage: "Exact total budget in bytes for quantized tensor payloads; quantize fails if the result exceeds it (RCO/SLQ guarantee).",
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			log := logger.FromContext(ctx)
@@ -81,14 +90,30 @@ func quantizeCmd() *cli.Command {
 				return errors.New("quantize: input and output paths must differ")
 			}
 
+			var assignments *quantAssignments
+			if cmd.IsSet("assignments") {
+				a, err := loadQuantAssignments(cmd.String("assignments"))
+				if err != nil {
+					return fmt.Errorf("quantize: %w", err)
+				}
+				assignments = a
+			}
+			var budget *uint64
+			if cmd.IsSet("budget-bytes") {
+				b := cmd.Uint64("budget-bytes")
+				budget = &b
+			}
+
 			opts := quantizeOptions{
-				Input:    inPath,
-				Output:   outPath,
-				Method:   method,
-				MinClip:  minClip,
-				MaxClip:  maxClip,
-				Progress: 50,
-				Logger:   log,
+				Input:       inPath,
+				Output:      outPath,
+				Method:      method,
+				Assignments: assignments,
+				BudgetBytes: budget,
+				MinClip:     minClip,
+				MaxClip:     maxClip,
+				Progress:    50,
+				Logger:      log,
 			}
 			return runQuantize(opts)
 		},
@@ -96,13 +121,94 @@ func quantizeCmd() *cli.Command {
 }
 
 type quantizeOptions struct {
-	Input    string
-	Output   string
-	Method   quantMethod
-	MinClip  *float32
-	MaxClip  *float32
-	Progress int
-	Logger   logger.Logger
+	Input       string
+	Output      string
+	Method      quantMethod
+	Assignments *quantAssignments
+	BudgetBytes *uint64
+	MinClip     *float32
+	MaxClip     *float32
+	Progress    int
+	Logger      logger.Logger
+}
+
+// quantAssignments is a per-tensor quantization method assignment, as produced by
+// an RCO/SLQ budget search. Exact tensor names win over globs; among globs the
+// longest pattern wins. Unmatched tensors fall back to Default.
+type quantAssignments struct {
+	Default string            `json:"default"`
+	Tensors map[string]string `json:"tensors"`
+	Budget  uint64            `json:"budget_bytes"`
+
+	defaultMethod quantMethod
+	globs         []quantGlob
+}
+
+type quantGlob struct {
+	prefix  string
+	pattern string
+	method  quantMethod
+}
+
+// loadQuantAssignments reads and validates an assignment file.
+func loadQuantAssignments(path string) (*quantAssignments, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read assignments: %w", err)
+	}
+	var a quantAssignments
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, fmt.Errorf("parse assignments %s: %w", path, err)
+	}
+	defName := a.Default
+	if defName == "" {
+		defName = "k4"
+	}
+	def, err := parseQuantMethod(defName)
+	if err != nil {
+		return nil, fmt.Errorf("assignments default: %w", err)
+	}
+	a.defaultMethod = def
+	// Deterministic glob order: longest prefix first, then pattern.
+	a.globs = make([]quantGlob, 0, len(a.Tensors))
+	for pattern, name := range a.Tensors {
+		m, err := parseQuantMethod(name)
+		if err != nil {
+			return nil, fmt.Errorf("assignments %q: %w", pattern, err)
+		}
+		if !strings.Contains(pattern, "*") {
+			a.globs = append(a.globs, quantGlob{prefix: pattern, pattern: pattern, method: m})
+			continue
+		}
+		prefix := strings.TrimSuffix(pattern, "*")
+		a.globs = append(a.globs, quantGlob{prefix: prefix, pattern: pattern, method: m})
+	}
+	sort.Slice(a.globs, func(i, j int) bool {
+		if len(a.globs[i].prefix) != len(a.globs[j].prefix) {
+			return len(a.globs[i].prefix) > len(a.globs[j].prefix)
+		}
+		return a.globs[i].pattern < a.globs[j].pattern
+	})
+	return &a, nil
+}
+
+// methodFor resolves the quantization method for a tensor name.
+func (a *quantAssignments) methodFor(name string) quantMethod {
+	if a == nil {
+		return quantMethod{}
+	}
+	for _, g := range a.globs {
+		if strings.Contains(g.pattern, "*") {
+			if strings.HasPrefix(name, g.prefix) {
+				return g.method
+			}
+			continue
+		}
+		if name == g.pattern {
+			return g.method
+		}
+	}
+	return a.defaultMethod
 }
 
 type quantMethod struct {
@@ -249,6 +355,7 @@ func runQuantize(opts quantizeOptions) error {
 
 	recs := make([]mcf.TensorIndexRecord, 0, len(names))
 	qrecs := make([]mcf.QuantRecord, 0, len(names))
+	var quantBytes uint64
 
 	for i, name := range names {
 		if opts.Progress > 0 && i%opts.Progress == 0 {
@@ -271,19 +378,38 @@ func runQuantize(opts quantizeOptions) error {
 		var payload []byte
 		var outDType mcf.TensorDType
 		var minClip, maxClip float32
+		method := opts.Method
+		if opts.Assignments != nil {
+			method = opts.Assignments.methodFor(name)
+		}
 
 		if shouldQuant {
+			if mcf.DTypeRequiresAligned64(method.DType) {
+				if err := w.AddFlags(mcf.FlagTensorDataAligned64); err != nil {
+					return err
+				}
+			}
 			data, _, err := store.ReadTensorF32(name)
 			if err != nil {
 				return fmt.Errorf("quantize: tensor %s: %w", name, err)
 			}
 			rows := info.Shape[0]
 			cols := info.Shape[1]
-			payload, minClip, maxClip, err = quantizeTensor(data, rows, cols, opts.Method, opts.MinClip, opts.MaxClip)
+			payload, minClip, maxClip, err = quantizeTensor(data, rows, cols, method, opts.MinClip, opts.MaxClip)
 			if err != nil {
 				return fmt.Errorf("quantize: tensor %s: %w", name, err)
 			}
-			outDType = opts.Method.DType
+			outDType = method.DType
+			quantBytes += uint64(len(payload))
+			if opts.BudgetBytes != nil {
+				budget := *opts.BudgetBytes
+				if opts.Assignments != nil && opts.Assignments.Budget != 0 {
+					budget = opts.Assignments.Budget
+				}
+				if quantBytes > budget {
+					return fmt.Errorf("quantize: quantized payloads total %d bytes after %s, exceeding budget %d bytes", quantBytes, name, budget)
+				}
+			}
 		} else {
 			raw, _, err := store.ReadTensorRaw(name)
 			if err != nil {
@@ -316,14 +442,25 @@ func runQuantize(opts quantizeOptions) error {
 		if shouldQuant {
 			qrecs = append(qrecs, mcf.QuantRecord{
 				TensorIndex: idx,
-				Method:      uint8(opts.Method.DType),
+				Method:      uint8(outDType),
 				Domain:      uint8(mcf.DomainWeights),
-				BlockSize:   uint16(opts.Method.BlockSize),
-				SuperSize:   uint16(opts.Method.SuperSize),
+				BlockSize:   uint16(method.BlockSize),
+				SuperSize:   uint16(method.SuperSize),
 				MinClip:     minClip,
 				MaxClip:     maxClip,
 			})
 		}
+	}
+
+	if opts.BudgetBytes != nil {
+		budget := *opts.BudgetBytes
+		if opts.Assignments != nil && opts.Assignments.Budget != 0 {
+			budget = opts.Assignments.Budget
+		}
+		if quantBytes > budget {
+			return fmt.Errorf("quantize: quantized payloads total %d bytes, exceeding budget %d bytes", quantBytes, budget)
+		}
+		opts.Logger.Info("quantized payload budget", "used", quantBytes, "budget", budget)
 	}
 
 	if err := td.Close(); err != nil {
