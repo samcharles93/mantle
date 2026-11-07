@@ -213,7 +213,7 @@ func TestBatchPrefillPlanMatchesOracle(t *testing.T) {
 	}
 	chunk := newBatchPrefillChunk(batched, tokens, batched.Pos)
 	var got [][]float32
-	chunk.forEachRow(func(logits []float32) {
+	chunk.forEachRow(emitAllRows, func(logits []float32) {
 		got = append(got, append([]float32(nil), logits...))
 	})
 	if batched.Pos != len(tokens) {
@@ -391,7 +391,7 @@ func TestBatchPrefillKillSwitch(t *testing.T) {
 	if !batched.batchEligible(tokens) {
 		t.Fatal("the gate itself must be independent of the kill switch")
 	}
-	if err := batched.forEachBatchLogits(tokens, func([]float32) {}); !errors.Is(err, errBatchIneligible) {
+	if err := batched.forEachBatchLogits(tokens, emitAllRows, func([]float32) {}); !errors.Is(err, errBatchIneligible) {
 		t.Fatalf("kill switch must refuse to batch: %v", err)
 	}
 

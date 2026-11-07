@@ -16,6 +16,10 @@ type matVecTask struct {
 	rs, re int
 	done   chan struct{}
 	qx     *QuantVec
+	// n > 0 selects MatMatBF16: x and dst hold n activation rows and xp is
+	// x packed by packActivationGroups.
+	n  int
+	xp []float32
 }
 
 type matVecWorker struct {
@@ -117,7 +121,11 @@ func newMatVecPool() *matVecPool {
 		p.workers[i] = worker
 		go func(w *matVecWorker) {
 			for task := range w.tasks {
-				matVecRangeWithWorker(task.dst, task.w, task.x, task.rs, task.re, task.qx, w)
+				if task.n > 0 {
+					matMatRangeBF16(task.dst, task.w, task.x, task.xp, task.n, task.rs, task.re)
+				} else {
+					matVecRangeWithWorker(task.dst, task.w, task.x, task.rs, task.re, task.qx, w)
+				}
 				task.done <- struct{}{}
 			}
 		}(worker)

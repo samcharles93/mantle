@@ -20,7 +20,7 @@ func (m *Instance) PrefillTokens(tokens []int) ([]float32, error) {
 	// the gate refuses falls through to the per-token loop below, which stays the
 	// correctness oracle.
 	var last []float32
-	err := m.forEachBatchLogits(tokens, func(logits []float32) { last = logits })
+	err := m.forEachBatchLogits(tokens, emitLastRow, func(logits []float32) { last = logits })
 	if err == nil {
 		return last, nil
 	}

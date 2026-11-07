@@ -286,6 +286,9 @@ type ScratchBuffers struct {
 	BatchFfnUp   []float32 // [MaxBatch, ffn]
 	BatchFfnGate []float32 // [MaxBatch, ffn]
 	BatchFfnAct  []float32 // [MaxBatch, ffn]
+	// BatchLogits holds [n, vocab] logits when a small batch needs every row's
+	// logits. It is grown on demand, before a forward mutates any state.
+	BatchLogits []float32
 }
 
 // Ops returns the ops interface for this instance.

@@ -21,7 +21,7 @@ func (m *Instance) ForwardTokens(tokens []int) ([][]float32, error) {
 	}
 
 	outputs := make([][]float32, 0, len(tokens))
-	err := m.forEachBatchLogits(tokens, func(logits []float32) {
+	err := m.forEachBatchLogits(tokens, emitAllRows, func(logits []float32) {
 		outputs = append(outputs, append([]float32(nil), logits...))
 	})
 	if err == nil {

@@ -321,7 +321,7 @@ type batchPrefillChunk struct {
 // buffer is capacity-checked against the largest chunk BEFORE the first chunk
 // issues its first StoreKV. A chunk cannot refuse after that point, so no
 // partially prefilled state can ever be handed back.
-func (m *Instance) forEachBatchLogits(tokens []int, keep func(logits []float32)) error {
+func (m *Instance) forEachBatchLogits(tokens []int, emit logitEmit, keep func(logits []float32)) error {
 	if !cpuBatchedPrefillEnabled() {
 		return errBatchIneligible
 	}
@@ -331,6 +331,11 @@ func (m *Instance) forEachBatchLogits(tokens []int, keep func(logits []float32))
 
 	startPos := m.Pos
 	n := len(tokens)
+	if emit == emitAllRows && useSmallBatchBF16(m.Output, min(n, m.MaxBatch)) {
+		if need := min(n, m.MaxBatch) * m.Output.R; len(m.Scratch.BatchLogits) < need {
+			m.Scratch.BatchLogits = make([]float32, need)
+		}
+	}
 
 	// Taps describe the forward just performed, so the row counter restarts
 	// here; HiddenTaps.Rows ends up holding this prompt's captured row count.
@@ -352,7 +357,11 @@ func (m *Instance) forEachBatchLogits(tokens []int, keep func(logits []float32))
 		// single-chunk path uses.
 		chunk := newBatchPrefillChunk(m, tokens[start:end], m.Pos)
 		chunk.tapBase = start
-		chunk.forEachRow(keep)
+		chunkEmit := emit
+		if emit == emitLastRow && end < n {
+			chunkEmit = emitNoRows
+		}
+		chunk.forEachRow(chunkEmit, keep)
 	}
 	return nil
 }
@@ -398,17 +407,30 @@ func newBatchPrefillChunk(m *Instance, tokens []int, startPos int) *batchPrefill
 // to w.R and w.C, so GemmParWT's dimension check cannot fire.
 func (p *batchPrefillChunk) gemmRows(dst, src []float32, w *Mat) {
 	n := p.n
+	if useSmallBatchBF16(w, n) {
+		MatMatBF16(dst, w, src, n)
+		return
+	}
 	rows := Mat{R: n, C: w.R, Stride: w.R, DType: mcf.DTypeF32, Data: dst[:n*w.R]}
 	block := Mat{R: n, C: w.C, Stride: w.C, DType: mcf.DTypeF32, Data: src[:n*w.C]}
 	GemmParWT(SelectGemmConfig(n, w.C, w.R), &rows, &block, w, 1, 0, 0)
 }
 
-// forEachRow executes the chunk and calls keep once per position with that
-// position's logits. keep receives the model-owned logits buffer, which is
+// logitEmit selects which rows of a batched forward get logits.
+type logitEmit uint8
+
+const (
+	emitAllRows logitEmit = iota // every position, e.g. speculative verification
+	emitLastRow                  // the final position only, e.g. prompt prefill
+	emitNoRows                   // none: an intermediate prefill chunk
+)
+
+// forEachRow executes the chunk and calls keep for the positions emit selects
+// with that position's logits. keep receives the model-owned logits buffer, which is
 // reused for every row, so it must copy anything it retains. forEachRow
 // allocates nothing on the model and cannot fail: everything it needs was
 // validated and allocated by batchIneligibleReason and newBatchPrefillChunk.
-func (p *batchPrefillChunk) forEachRow(keep func(logits []float32)) {
+func (p *batchPrefillChunk) forEachRow(emit logitEmit, keep func(logits []float32)) {
 	m := p.m
 	n := p.n
 	hidden := p.hidden
@@ -453,21 +475,56 @@ func (p *batchPrefillChunk) forEachRow(keep func(logits []float32)) {
 		p.m.captureTapBatch(i, p.tapBase, n, p.x)
 	}
 
+	switch emit {
+	case emitNoRows:
+		m.Pos += n
+		return
+	case emitLastRow:
+		logits := m.Scratch.Logits
+		FusedRMSNormMatVec(p.ops, logits, m.Output, p.x[(n-1)*hidden:n*hidden], m.OutputNorm, m.RMSEpsilon, m.Scratch.Tmp)
+		p.finishLogits(logits)
+		keep(logits)
+		m.Pos += n
+		return
+	}
+
+	vocab := m.Output.R
+	if useSmallBatchBF16(m.Output, n) && len(m.Scratch.BatchLogits) >= n*vocab {
+		for r := range n {
+			p.ops.RMSNorm(p.norm[r*hidden:(r+1)*hidden], p.x[r*hidden:(r+1)*hidden], m.OutputNorm, m.RMSEpsilon)
+		}
+		block := m.Scratch.BatchLogits[:n*vocab]
+		MatMatBF16(block, m.Output, p.norm[:n*hidden], n)
+		for r := range n {
+			row := block[r*vocab : (r+1)*vocab]
+			p.finishLogits(row)
+			keep(row)
+		}
+		m.Pos += n
+		return
+	}
+
 	logits := m.Scratch.Logits
 	for r := range n {
 		FusedRMSNormMatVec(p.ops, logits, m.Output, p.x[r*hidden:(r+1)*hidden], m.OutputNorm, m.RMSEpsilon, m.Scratch.Tmp)
-		if scale := cfg.LMHeadMultiplier; scale != 0 && scale != 1 {
-			s := float32(scale)
-			for i := range logits {
-				logits[i] *= s
-			}
-		}
-		if softcap := cfg.FinalLogitSoftcap; softcap > 0 {
-			for i := range logits {
-				logits[i] = fastTanh(logits[i]/softcap) * softcap
-			}
-		}
+		p.finishLogits(logits)
 		keep(logits)
 	}
 	m.Pos += n
+}
+
+// finishLogits applies the configured LM-head multiplier and final softcap.
+func (p *batchPrefillChunk) finishLogits(logits []float32) {
+	cfg := &p.m.Config.Config
+	if scale := cfg.LMHeadMultiplier; scale != 0 && scale != 1 {
+		s := float32(scale)
+		for i := range logits {
+			logits[i] *= s
+		}
+	}
+	if softcap := cfg.FinalLogitSoftcap; softcap > 0 {
+		for i := range logits {
+			logits[i] = fastTanh(logits[i]/softcap) * softcap
+		}
+	}
 }
