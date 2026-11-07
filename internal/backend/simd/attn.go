@@ -325,39 +325,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	if kvLayer == layer {
 		if fp, ok := ops.(incrementalAttentionFastPath); ok && fp.IncrementalAttention(attnOut[:nHead*headDim], layer, q, k, v, pos, start, nHead, headDim, kvHeads, kvStride, scale, softcap) {
 			// If incremental attention handles the computation, skip the traditional path
-			if layer.AttnGate != nil || layer.FusedQGate {
-				var gate []float32
-				if layer.FusedQGate {
-					qDim := nHead * headDim
-					gate = m.Scratch.AttnGate[qDim : 2*qDim]
-				} else {
-					gate = m.Scratch.AttnGate[:nHead*headDim]
-					if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
-						// x may still be device-backed from fast-path norm/projections.
-						// Ensure host visibility before CPU gate matvec fallback.
-						syncDeviceSlice(ops, x)
-						if qx == nil && CanUseQuantVec(layer.AttnGate) {
-							qx = PrepareQuantVec(x)
-						}
-						ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
-					}
-				}
-
-				// Vectorized Sigmoid with multiplication
-				n := len(gate)
-				i := 0
-				if cpu.HasAVX2 {
-					for ; i+8 <= n; i += 8 {
-						vout := archsimd.LoadFloat32x8(attnOut[i:])
-						vgate := archsimd.LoadFloat32x8(gate[i:])
-						vout = vout.Mul(fastSigmoidVec(vgate))
-						vout.Store(attnOut[i:])
-					}
-				}
-				for ; i < n; i++ {
-					attnOut[i] *= Sigmoid(gate[i])
-				}
-			}
+			qx = applyAttnOutputGate(m, ops, layer, x, qx, attnOut, nHead, headDim)
 			ops.MatVec(m.Scratch.AttnProj, layer.Wo, attnOut[:nHead*headDim])
 			return m.Scratch.AttnProj
 		}
@@ -433,39 +401,7 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 		RunAttnHeads(&ctx, m.Scratch.Scores, 0, nHead)
 	}
 
-	if layer.AttnGate != nil || layer.FusedQGate {
-		var gate []float32
-		if layer.FusedQGate {
-			qDim := nHead * headDim
-			gate = m.Scratch.AttnGate[qDim : 2*qDim]
-		} else {
-			gate = m.Scratch.AttnGate[:nHead*headDim]
-			if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
-				// x may still be device-backed from fast-path norm/projections.
-				// Ensure host visibility before CPU gate matvec fallback.
-				syncDeviceSlice(ops, x)
-				if qx == nil && CanUseQuantVec(layer.AttnGate) {
-					qx = PrepareQuantVec(x)
-				}
-				ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
-			}
-		}
-
-		// Vectorized Sigmoid with multiplication
-		n := len(gate)
-		i := 0
-		if cpu.HasAVX2 {
-			for ; i+8 <= n; i += 8 {
-				vout := archsimd.LoadFloat32x8(attnOut[i:])
-				vgate := archsimd.LoadFloat32x8(gate[i:])
-				vout = vout.Mul(fastSigmoidVec(vgate))
-				vout.Store(attnOut[i:])
-			}
-		}
-		for ; i < n; i++ {
-			attnOut[i] *= Sigmoid(gate[i])
-		}
-	}
+	qx = applyAttnOutputGate(m, ops, layer, x, qx, attnOut, nHead, headDim)
 	ops.MatVec(m.Scratch.AttnProj, layer.Wo, attnOut[:nHead*headDim])
 	return m.Scratch.AttnProj
 }
@@ -480,4 +416,55 @@ func applyHeadRMSNorm(ops Ops, x, weight []float32, eps float32, headDim, heads 
 		seg := x[h*headDim : (h+1)*headDim]
 		ops.RMSNorm(seg, seg, weight, eps)
 	}
+}
+
+// applyAttnOutputGate multiplies the attention output by the sigmoid of the
+// layer's output gate, before Wo. The gate is either per element (AttnGate
+// rows equal qDim, or the fused Q+gate half) or per head (AttnGate rows equal
+// the head count, as in LFM3), where one gate value scales a whole head. It
+// returns qx, which may now hold x prepared for quantised matvecs. Layers
+// with no gate are left untouched.
+func applyAttnOutputGate(m *Instance, ops Ops, layer *Layer, x []float32, qx *QuantVec, attnOut []float32, nHead, headDim int) *QuantVec {
+	if layer.AttnGate == nil && !layer.FusedQGate {
+		return qx
+	}
+	qDim := nHead * headDim
+	var gate []float32
+	if layer.FusedQGate {
+		gate = m.Scratch.AttnGate[qDim : 2*qDim]
+	} else {
+		gate = m.Scratch.AttnGate[:layer.AttnGate.R]
+		if dm, ok := ops.(deviceMatVecFastPath); !ok || !dm.DeviceMatVec(gate, layer.AttnGate, x) {
+			// x may still be device-backed from fast-path norm/projections.
+			// Ensure host visibility before CPU gate matvec fallback.
+			syncDeviceSlice(ops, x)
+			if qx == nil && CanUseQuantVec(layer.AttnGate) {
+				qx = PrepareQuantVec(x)
+			}
+			ops.MatVecWithQuant(gate, layer.AttnGate, x, qx)
+		}
+	}
+	if len(gate) == nHead && nHead != qDim {
+		for h := range nHead {
+			s := Sigmoid(gate[h])
+			for i := range attnOut[h*headDim : (h+1)*headDim] {
+				attnOut[h*headDim+i] *= s
+			}
+		}
+		return qx
+	}
+	n := len(gate)
+	i := 0
+	if cpu.HasAVX2 {
+		for ; i+8 <= n; i += 8 {
+			vout := archsimd.LoadFloat32x8(attnOut[i:])
+			vgate := archsimd.LoadFloat32x8(gate[i:])
+			vout = vout.Mul(fastSigmoidVec(vgate))
+			vout.Store(attnOut[i:])
+		}
+	}
+	for ; i < n; i++ {
+		attnOut[i] *= Sigmoid(gate[i])
+	}
+	return qx
 }

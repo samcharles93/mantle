@@ -520,3 +520,28 @@ func applyYarnScaling(invFreq []float64, base float64, factor float64, origCtx f
 		invFreq[i] = invInterp*ramp + invExtrap*(1-ramp)
 	}
 }
+
+// LayerZeroTailRoPEForConfig returns the inverse frequencies for a layer type
+// under zero-tail partial rotation (see ArchSpec.ZeroTailPartialRoPE): the
+// table spans head_dim/2 entries, the first partial_rotary_factor share of
+// them follow the full head_dim progression and the rest are zero. A factor
+// of 1 gives the ordinary full-rotation table.
+func LayerZeroTailRoPEForConfig(cfg *HFConfig, layerType string, headDim int) ([]float64, float32, error) {
+	if cfg == nil {
+		return nil, 1, fmt.Errorf("nil config")
+	}
+	if headDim <= 0 || headDim%2 != 0 {
+		return nil, 1, fmt.Errorf("invalid head_dim %d", headDim)
+	}
+	rp := ropeParamsForLayerType(cfg, layerType)
+	base := cfg.RopeTheta
+	if rp != nil && rp.RopeTheta > 0 {
+		base = rp.RopeTheta
+	}
+	if rp != nil {
+		if t := strings.ToLower(strings.TrimSpace(rp.RopeType)); t != "" && t != "default" {
+			return nil, 1, fmt.Errorf("zero-tail rope does not support rope_type %q", t)
+		}
+	}
+	return makeProportionalInvFreq(base, headDim, partialRotaryFactor(cfg, rp)), 1, nil
+}

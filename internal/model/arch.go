@@ -294,6 +294,11 @@ type ArchSpec struct {
 	HasQKNorm     bool
 	UseLayerTypes bool
 	RopeLocalOnly bool
+	// ZeroTailPartialRoPE reads a partial_rotary_factor below 1 as LFM3 does:
+	// the leading frequencies follow the full head_dim progression and the
+	// rest are zero, so those dimensions pass through unrotated. Without it a
+	// partial factor spaces its frequencies over the rotated slice instead.
+	ZeroTailPartialRoPE bool
 
 	Names ArchNames
 }
@@ -705,6 +710,8 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 		return nil, fmt.Errorf("DSpark draft models require a speculative runtime")
 	case hasArch("falcon_h1"):
 		return falconH1Spec(), nil
+	case hasArch("lfm3"):
+		return lfm3Spec(), nil
 	case hasArch("lfm"):
 		return lfm2Spec(), nil
 	case hasArch("qwen3_5"):

@@ -577,10 +577,10 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 					return nil, err
 				}
 			}
-			if layer.AttnGate != nil && (layer.AttnGate.R != qDim || layer.AttnGate.C != hidden) {
+			if layer.AttnGate != nil && ((layer.AttnGate.R != qDim && layer.AttnGate.R != headCount) || layer.AttnGate.C != hidden) {
 				return nil, fmt.Errorf(
-					"layer %d: attn gate shape [%d %d] incompatible with hidden=%d qdim=%d",
-					i, layer.AttnGate.R, layer.AttnGate.C, hidden, qDim,
+					"layer %d: attn gate shape [%d %d] incompatible with hidden=%d qdim=%d heads=%d",
+					i, layer.AttnGate.R, layer.AttnGate.C, hidden, qDim, headCount,
 				)
 			}
 			if isMoELayer {

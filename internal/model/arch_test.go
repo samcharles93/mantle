@@ -240,3 +240,65 @@ func TestRoundFloat32ToBF16(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectArchLFM3(t *testing.T) {
+	cfg := &HFConfig{ModelType: "lfm3", Architectures: []string{"Lfm3ForCausalLM"}}
+	spec, err := DetectArch(cfg)
+	if err != nil {
+		t.Fatalf("DetectArch: %v", err)
+	}
+	if spec.Name != "lfm3" || !spec.ZeroTailPartialRoPE {
+		t.Fatalf("got spec %q zeroTail=%v, want lfm3 with zero-tail rope", spec.Name, spec.ZeroTailPartialRoPE)
+	}
+	n := spec.Names
+	got := []string{n.QNormCandidates(2)[0], n.KNormCandidates(2)[0], n.Wo(2), n.AttnGate(2),
+		n.PostAttnNormCandidates(2)[0], n.PostFfnNormCandidates(2)[0], n.OutputNorm}
+	want := []string{
+		"model.layers.2.self_attn.q_norm.weight", "model.layers.2.self_attn.k_norm.weight",
+		"model.layers.2.self_attn.o_proj.weight", "model.layers.2.self_attn.gate_proj.weight",
+		"model.layers.2.post_operator_norm.weight", "model.layers.2.post_ffn_norm.weight",
+		"model.embedding_norm.weight",
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("name %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+	if lfm2, _ := DetectArch(&HFConfig{ModelType: "lfm2"}); lfm2 == nil || lfm2.Name != "lfm2" {
+		t.Fatal("lfm2 must still detect as lfm2")
+	}
+}
+
+func TestLayerZeroTailRoPEForConfig(t *testing.T) {
+	cfg, err := LoadHFConfigBytes([]byte(`{
+		"model_type": "lfm3", "hidden_size": 2048, "num_attention_heads": 16, "head_dim": 128,
+		"rope_parameters": {
+			"full_attention": {"partial_rotary_factor": 0.5, "rope_theta": 1000000.0, "rope_type": "default"},
+			"sliding_attention": {"rope_theta": 10000, "rope_type": "default"}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("LoadHFConfigBytes: %v", err)
+	}
+	full, scale, err := LayerZeroTailRoPEForConfig(cfg, "full_attention", 128)
+	if err != nil || scale != 1 {
+		t.Fatalf("full: err=%v scale=%v", err, scale)
+	}
+	sliding, _, err := LayerZeroTailRoPEForConfig(cfg, "sliding_attention", 128)
+	if err != nil {
+		t.Fatalf("sliding: %v", err)
+	}
+	if len(full) != 64 || len(sliding) != 64 {
+		t.Fatalf("table lengths %d and %d, want 64", len(full), len(sliding))
+	}
+	for i := range 64 {
+		wantFull := 0.0
+		if i < 32 {
+			wantFull = 1 / math.Pow(1e6, float64(2*i)/128)
+		}
+		wantSliding := 1 / math.Pow(1e4, float64(2*i)/128)
+		if math.Abs(full[i]-wantFull) > 1e-12 || math.Abs(sliding[i]-wantSliding) > 1e-12 {
+			t.Fatalf("entry %d: full %g (want %g), sliding %g (want %g)", i, full[i], wantFull, sliding[i], wantSliding)
+		}
+	}
+}

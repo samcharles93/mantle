@@ -494,6 +494,34 @@ func lfm2Spec() *ArchSpec {
 	}
 }
 
+// LiquidAI LFM3: LFM2's short-conv and attention hybrid with sandwich norms,
+// q/k norms, a per-head sigmoid output gate and zero-tail partial RoPE.
+func lfm3Spec() *ArchSpec {
+	spec := lfm2Spec()
+	spec.Name = "lfm3"
+	spec.ZeroTailPartialRoPE = true
+	n := &spec.Names
+	n.QNormCandidates = func(layer int) []string {
+		return []string{fmt.Sprintf("model.layers.%d.self_attn.q_norm.weight", layer)}
+	}
+	n.KNormCandidates = func(layer int) []string {
+		return []string{fmt.Sprintf("model.layers.%d.self_attn.k_norm.weight", layer)}
+	}
+	n.Wo = func(layer int) string {
+		return fmt.Sprintf("model.layers.%d.self_attn.o_proj.weight", layer)
+	}
+	n.AttnGate = func(layer int) string {
+		return fmt.Sprintf("model.layers.%d.self_attn.gate_proj.weight", layer)
+	}
+	n.PostAttnNormCandidates = func(layer int) []string {
+		return []string{fmt.Sprintf("model.layers.%d.post_operator_norm.weight", layer)}
+	}
+	n.PostFfnNormCandidates = func(layer int) []string {
+		return []string{fmt.Sprintf("model.layers.%d.post_ffn_norm.weight", layer)}
+	}
+	return spec
+}
+
 // IBM Granite
 func graniteSpec() *ArchSpec {
 	return &ArchSpec{

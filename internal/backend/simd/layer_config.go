@@ -57,6 +57,13 @@ func buildLayerLoadConfigs(cfg *model.HFConfig, spec *model.ArchSpec, blockCount
 		if err := applyGemmaAttentionConfig(&lc, cfg, spec, i); err != nil {
 			return nil, nil, err
 		}
+		if spec.ZeroTailPartialRoPE {
+			invFreq, attnScale, err := model.LayerZeroTailRoPEForConfig(cfg, lc.AttnType, lc.HeadDim)
+			if err != nil {
+				return nil, nil, fmt.Errorf("layer %d rope: %w", i, err)
+			}
+			lc.RopeInvFreq, lc.RopeAttnScale = invFreq, attnScale
+		}
 		out[i] = lc
 	}
 	if err := applyGemmaSharedKVConfig(out, layerTypes, cfg, spec); err != nil {
