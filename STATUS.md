@@ -29,6 +29,14 @@ Quant-cache matvec was reworked (fused per-block int32 dots + scalar scale combi
 
 granite-4.0-350M (granitemoehybrid) runs and matches HF transformers logits to 1e-5 on the last-position top-10 plus greedy continuation (TestGraniteReferenceLogits, MANTLE_GRANITE_MCF). The arch adds a fused gate+up MLP split (shared_mlp.input_linear, per-layer) and the attention_multiplier / logits_scaling / residual_multiplier / embedding_multiplier scalars.
 
+## Quantization design (GSQ/RCO/SLQ)
+
+pkg/mcf/quantization-design.md maps the IST-DASLab methods onto MCF: GSQ outputs are uniform-grid
+K-quant-compatible (consumable today, no format change); RCO/SLQ per-layer bitwidth assignments fit
+MCF's per-tensor DType (needs `quantize --assignments` + budget verification + QuantInfo provenance);
+SLQ non-uniform codebooks need a new `DTypeUQ*` family (0x0040 range) under a v1.1 minor bump, with
+CPU LUT kernels (pshufb/vpermb/gather) and CUDA dequant-first. Proposal only — no spec change yet.
+
 ## Open work
 
 1. DSpark (CPU first): the draft model loads (`LoadDSparkDraftMCF`), K/V is injected from the target's hidden taps, and a draft block runs with the Markov and confidence heads. The draft decoder is a regular `Instance` (standard Qwen3 layers, loaded with the target's embeddings and LM head through `LoadModelOptions.SharedEmbeddings`/`SharedOutput`), and blocks use the batch path's non-causal mode (`ForwardBlockNonCausal`). On the real pair, drafts match the target's greedy output for 5.1 of 7 tokens per block (`TestDSparkDraftAcceptance`, with `MANTLE_DSPARK_TARGET` and `MANTLE_DSPARK_DRAFT` set). Still needed: the speculative loop (batched verification, accept/reject, KV rollback, sampling at T>0), CLI wiring, then CUDA. The draft MCF was repacked with its `config.json`. Model shape comes from it; speculation on/off, draft length and confidence threshold will be CLI flags.
