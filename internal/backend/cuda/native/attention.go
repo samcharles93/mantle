@@ -57,6 +57,7 @@ extern int mantleCudaAttentionInnerF16CacheF32Batch(
 	int cacheLen,
 	float scale,
 	float softcap,
+	int window,
 	cudaStream_t stream);
 extern int mantleCudaAttentionInnerMixedCacheF32Batch(
 	const float* q,
@@ -78,6 +79,7 @@ extern int mantleCudaAttentionInnerMixedCacheF32Batch(
 	int cacheLen,
 	float scale,
 	float softcap,
+	int window,
 	cudaStream_t stream);
 
 static int mantleCudaAttentionInnerF16CacheF32Wrapper(
@@ -156,8 +158,9 @@ static int mantleCudaAttentionInnerF16CacheF32BatchWrapper(
 	int cacheLen,
 	float scale,
 	float softcap,
+	int window,
 	cudaStream_t stream) {
-	return mantleCudaAttentionInnerF16CacheF32Batch(q, cacheK, cacheV, out, nTokens, startPos, kvStride, headDim, nHead, kvHeads, cacheLen, scale, softcap, stream);
+	return mantleCudaAttentionInnerF16CacheF32Batch(q, cacheK, cacheV, out, nTokens, startPos, kvStride, headDim, nHead, kvHeads, cacheLen, scale, softcap, window, stream);
 }
 
 static int mantleCudaAttentionInnerMixedCacheF32BatchWrapper(
@@ -180,6 +183,7 @@ static int mantleCudaAttentionInnerMixedCacheF32BatchWrapper(
 	int cacheLen,
 	float scale,
 	float softcap,
+	int window,
 	cudaStream_t stream) {
 	return mantleCudaAttentionInnerMixedCacheF32Batch(
 		q,
@@ -201,6 +205,7 @@ static int mantleCudaAttentionInnerMixedCacheF32BatchWrapper(
 		cacheLen,
 		scale,
 		softcap,
+		window,
 		stream);
 }
 */
@@ -311,10 +316,10 @@ func AttentionInnerMixedCacheF32(
 // AttentionInnerF16CacheF32Batch runs the F16-cache inner attention for
 // nTokens query rows in one kernel launch. q and out are laid out as
 // [nTokens, nHead, headDim] with row i at offset i*nHead*headDim, and row i
-// attends at pos = startPos + i with a zero window start (the caller rejects
-// sliding windows, so start is always 0). The result is numerically identical
-// to calling AttentionInnerF16CacheF32 once per row.
-func AttentionInnerF16CacheF32Batch(q, cacheK, cacheV, out DeviceBuffer, nTokens, startPos, kvStride, headDim, nHead, kvHeads, cacheLen int, scale, softcap float32, stream Stream) error {
+// attends at pos = startPos + i. window > 0 clamps each row's window start to
+// max(pos-window+1, 0); window == 0 attends from 0. The result is numerically
+// identical to calling AttentionInnerF16CacheF32 once per row.
+func AttentionInnerF16CacheF32Batch(q, cacheK, cacheV, out DeviceBuffer, nTokens, startPos, kvStride, headDim, nHead, kvHeads, cacheLen, window int, scale, softcap float32, stream Stream) error {
 	if q.ptr == nil || cacheK.ptr == nil || cacheV.ptr == nil || out.ptr == nil {
 		return fmt.Errorf("attention inner buffer is nil")
 	}
@@ -338,6 +343,7 @@ func AttentionInnerF16CacheF32Batch(q, cacheK, cacheV, out DeviceBuffer, nTokens
 		C.int(cacheLen),
 		C.float(scale),
 		C.float(softcap),
+		C.int(window),
 		stream.ptr,
 	))
 }
@@ -357,7 +363,7 @@ func AttentionInnerMixedCacheF32Batch(
 	out DeviceBuffer,
 	useQ8K bool,
 	useQ8V bool,
-	nTokens, startPos, kvStride, headDim, nHead, kvHeads, cacheLen int,
+	nTokens, startPos, kvStride, headDim, nHead, kvHeads, cacheLen, window int,
 	scale, softcap float32,
 	stream Stream,
 ) error {
@@ -412,6 +418,7 @@ func AttentionInnerMixedCacheF32Batch(
 		C.int(cacheLen),
 		C.float(scale),
 		C.float(softcap),
+		C.int(window),
 		stream.ptr,
 	))
 }

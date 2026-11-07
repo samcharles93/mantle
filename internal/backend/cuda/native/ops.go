@@ -45,6 +45,39 @@ extern int mantleCudaShortConvDepthwise(
 	int embd,
 	int klen,
 	cudaStream_t stream);
+extern int mantleCudaShortConvDepthwiseBatch(
+	const float* proj,
+	const float* conv_w,
+	const float* state,
+	float* out,
+	float* bxAll,
+	int N,
+	int embd,
+	int klen,
+	cudaStream_t stream);
+extern int mantleCudaShortConvStateRotate(
+	const float* state,
+	const float* bxAll,
+	float* newState,
+	int N,
+	int embd,
+	int klen,
+	cudaStream_t stream);
+extern int mantleCudaScaleAddF32(
+	float* dst,
+	const float* src,
+	float scale,
+	int n,
+	cudaStream_t stream);
+extern int mantleCudaAttnGateScaleF32(
+	float* attn,
+	const float* gate,
+	int nRows,
+	int qDim,
+	int nHead,
+	int headDim,
+	int perHead,
+	cudaStream_t stream);
 extern int mantleCudaMambaDepthwiseConv(
 	const float* in,
 	const float* conv_w,
@@ -159,6 +192,51 @@ static int mantleCudaShortConvDepthwiseWrapper(
 	int klen,
 	cudaStream_t stream) {
 	return mantleCudaShortConvDepthwise(proj, conv_w, state, out, embd, klen, stream);
+}
+
+static int mantleCudaShortConvDepthwiseBatchWrapper(
+	const float* proj,
+	const float* conv_w,
+	const float* state,
+	float* out,
+	float* bxAll,
+	int N,
+	int embd,
+	int klen,
+	cudaStream_t stream) {
+	return mantleCudaShortConvDepthwiseBatch(proj, conv_w, state, out, bxAll, N, embd, klen, stream);
+}
+
+static int mantleCudaShortConvStateRotateWrapper(
+	const float* state,
+	const float* bxAll,
+	float* newState,
+	int N,
+	int embd,
+	int klen,
+	cudaStream_t stream) {
+	return mantleCudaShortConvStateRotate(state, bxAll, newState, N, embd, klen, stream);
+}
+
+static int mantleCudaScaleAddF32Wrapper(
+	float* dst,
+	const float* src,
+	float scale,
+	int n,
+	cudaStream_t stream) {
+	return mantleCudaScaleAddF32(dst, src, scale, n, stream);
+}
+
+static int mantleCudaAttnGateScaleF32Wrapper(
+	float* attn,
+	const float* gate,
+	int nRows,
+	int qDim,
+	int nHead,
+	int headDim,
+	int perHead,
+	cudaStream_t stream) {
+	return mantleCudaAttnGateScaleF32(attn, gate, nRows, qDim, nHead, headDim, perHead, stream);
 }
 
 static int mantleCudaMambaDepthwiseConvWrapper(
@@ -622,4 +700,106 @@ func ScaleRoundBF16InPlaceF32(buf DeviceBuffer, scale float32, n int, stream Str
 		return fmt.Errorf("native.ScaleRoundBF16InPlaceF32(n=%d): %w", n, err)
 	}
 	return nil
+}
+
+// ShortConvDepthwiseBatch runs the depthwise short-conv over a prefill chunk of
+// N rows: proj [N, 3*embd] (b|c|xg), convW [embd, klen], state [(klen-1), embd]
+// (read-only here), out [N, embd] (c * convOut). State rotation is separate.
+func ShortConvDepthwiseBatch(proj, convW, state, out, bxAll DeviceBuffer, n, embd, klen int, stream Stream) error {
+	if proj.ptr == nil || convW.ptr == nil || state.ptr == nil || out.ptr == nil {
+		return fmt.Errorf("native.ShortConvDepthwiseBatch: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.ShortConvDepthwiseBatch: %w", err)
+	}
+	embdC, err := checkedPositiveCInt("embd", embd)
+	if err != nil {
+		return fmt.Errorf("native.ShortConvDepthwiseBatch: %w", err)
+	}
+	klenC, err := checkedPositiveCInt("klen", klen)
+	if err != nil {
+		return fmt.Errorf("native.ShortConvDepthwiseBatch: %w", err)
+	}
+	return cudaErr(C.mantleCudaShortConvDepthwiseBatchWrapper(
+		(*C.float)(proj.ptr),
+		(*C.float)(convW.ptr),
+		(*C.float)(state.ptr),
+		(*C.float)(out.ptr),
+		(*C.float)(bxAll.ptr),
+		nC,
+		embdC,
+		klenC,
+		stream.ptr,
+	))
+}
+
+// ShortConvStateRotate writes the state rotated forward by N chunk rows into
+// newState (caller copies it back over state). bxAll is [N, embd] gated conv
+// inputs (b*xg per row).
+func ShortConvStateRotate(state, bxAll, newState DeviceBuffer, n, embd, klen int, stream Stream) error {
+	if state.ptr == nil || bxAll.ptr == nil || newState.ptr == nil {
+		return fmt.Errorf("native.ShortConvStateRotate: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.ShortConvStateRotate: %w", err)
+	}
+	embdC, err := checkedPositiveCInt("embd", embd)
+	if err != nil {
+		return fmt.Errorf("native.ShortConvStateRotate: %w", err)
+	}
+	klenC, err := checkedPositiveCInt("klen", klen)
+	if err != nil {
+		return fmt.Errorf("native.ShortConvStateRotate: %w", err)
+	}
+	return cudaErr(C.mantleCudaShortConvStateRotateWrapper(
+		(*C.float)(state.ptr),
+		(*C.float)(bxAll.ptr),
+		(*C.float)(newState.ptr),
+		nC,
+		embdC,
+		klenC,
+		stream.ptr,
+	))
+}
+
+// ScaleAddF32 computes dst[i] += src[i] * scale (residual multiplier).
+func ScaleAddF32(dst, src DeviceBuffer, scale float32, n int, stream Stream) error {
+	if dst.ptr == nil || src.ptr == nil {
+		return fmt.Errorf("native.ScaleAddF32: buffer is nil")
+	}
+	nC, err := checkedPositiveCInt("n", n)
+	if err != nil {
+		return fmt.Errorf("native.ScaleAddF32: %w", err)
+	}
+	return cudaErr(C.mantleCudaScaleAddF32Wrapper(
+		(*C.float)(dst.ptr),
+		(*C.float)(src.ptr),
+		C.float(scale),
+		nC,
+		stream.ptr,
+	))
+}
+
+// AttnGateScaleF32 scales the attention output rows by sigmoid(gate), per head
+// (perHead != 0, gate [nRows, nHead]) or per element (gate [nRows, qDim]).
+func AttnGateScaleF32(attn, gate DeviceBuffer, nRows, qDim, nHead, headDim int, perHead bool, stream Stream) error {
+	if attn.ptr == nil || gate.ptr == nil {
+		return fmt.Errorf("native.AttnGateScaleF32: buffer is nil")
+	}
+	ph := C.int(0)
+	if perHead {
+		ph = 1
+	}
+	return cudaErr(C.mantleCudaAttnGateScaleF32Wrapper(
+		(*C.float)(attn.ptr),
+		(*C.float)(gate.ptr),
+		C.int(nRows),
+		C.int(qDim),
+		C.int(nHead),
+		C.int(headDim),
+		ph,
+		stream.ptr,
+	))
 }

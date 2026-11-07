@@ -20,7 +20,7 @@ Quant-cache matvec was reworked (fused per-block int32 dots + scalar scale combi
 
 ## LFM3-1.7B (RTX 3050 4GB, CUDA)
 
-- bf16 MCF: 18/24 layers in VRAM, 6 PCIe-managed, decode 9.5 tok/s.
+- bf16 MCF: 18/24 layers in VRAM, 6 PCIe-managed, decode 9.5 tok/s. Batched CUDA prefill now covers hybrid LFM3 layers (short-conv + sliding window + attn gate + sandwich norms): 469-token prompt prefill 9.7 -> 502 tok/s. Quantized MCFs (q8/k4) still take the per-token quant-kernel path in auto mode (prefill ~30-40 tok/s); dequant mode unlocks the batched path when the dequantized weights fit VRAM.
 - q8 MCF (1.85 GB, all 24 layers resident): decode 36.9 tok/s, prefill 40.6 tok/s on a 469-token prompt. k4 (0.95 GB): decode 31.2, prefill 34.1.
 - llama.cpp reference on the same GPU (Q8_0 GGUF, ngl 99): pp512 4657 tok/s, tg128 75.3 tok/s. Mantle CUDA prefill is still per-token (the batch gate rejects device ops), hence the large prefill gap; decode gap is 2x.
 - CPU: bf16 prefill 31 tok/s (batched), decode 8.5; k4/q8 decode 11.7/11.6 after the fused quant-dot fix (were 4.1/6.9). Quant weights still take the per-token prefill path on CPU (prefill 11-13 tok/s), since the batch GEMM is f32/bf16-only.

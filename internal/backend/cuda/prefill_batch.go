@@ -130,14 +130,30 @@ func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
 	// are allocated as [N, max] row-major and indexed by the per-layer stride,
 	// which is only valid when every layer's stride equals the maximum.
 	headDim := m.HeadDim
-	wantKvStride := m.Layers[0].HeadKV * headDim
+	// The KV stride comes from the first attention layer; recurrent (conv)
+	// layers carry no KV cache and may sit at index 0.
+	wantKvStride := 0
 	wantInterm := 0
-	if m.Layers[0].FfnUp != nil {
-		wantInterm = m.Layers[0].FfnUp.R
+	for i := range m.Layers {
+		l := &m.Layers[i]
+		if !l.IsRecurrent && wantKvStride == 0 {
+			wantKvStride = l.HeadKV * headDim
+		}
+		if wantInterm == 0 && l.FfnUp != nil {
+			wantInterm = l.FfnUp.R
+		}
+	}
+	if wantKvStride == 0 {
+		wantKvStride = m.MaxKVStride
 	}
 	for i := range m.Layers {
 		l := &m.Layers[i]
-		if l.HeadKV*headDim != wantKvStride || l.FfnUp == nil || l.FfnUp.R != wantInterm {
+		// Recurrent (short-conv) layers carry no KV cache; only the FFN width
+		// must match the shared buffers.
+		if !l.IsRecurrent && l.HeadKV*headDim != wantKvStride {
+			return false
+		}
+		if l.FfnUp == nil || l.FfnUp.R != wantInterm {
 			return false
 		}
 		if !gr.batchedLayerEligible(l) {
@@ -155,7 +171,7 @@ func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 	qDim := m.HeadCount * headDim
 	kvStride := layer.HeadKV * headDim
 
-	if layer.Mamba != nil || layer.DeltaNet != nil || layer.IsRecurrent {
+	if layer.Mamba != nil || layer.DeltaNet != nil {
 		return false
 	}
 	if layer.MoE != nil || layer.Gemma4MoE != nil || layer.Gemma4PLE != nil {
@@ -170,22 +186,38 @@ func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 	if layer.SharedKVSource >= 0 {
 		return false
 	}
-	if layer.FusedQGate || layer.AttnGate != nil {
+	if layer.FusedQGate {
 		return false
 	}
 	if layer.ValueFromKey || layer.ApplyVNorm {
 		return false
 	}
-	if layer.AttnWindow > 0 {
-		return false
-	}
 	if layer.RoundActivationsBF16 {
 		return false
 	}
-	if len(layer.PostAttnNorm) > 0 || len(layer.PostFfnNorm) > 0 {
+	if layer.AttnType != "" && layer.AttnType != "full_attention" && layer.AttnType != "sliding_attention" && !layer.IsRecurrent {
 		return false
 	}
-	if layer.HeadDim != headDim || layer.HeadKV <= 0 {
+	if layer.IsRecurrent {
+		// Short-conv block: in_proj [3*hidden, hidden], out_proj
+		// [hidden, hidden], f32 kernel [hidden, klen], state (klen-1)*hidden.
+		k := layer.ShortConvKernel
+		switch {
+		case k == nil || k.Data == nil || k.R != hidden || k.C < 1:
+			return false
+		case layer.ShortConvInProj == nil || layer.ShortConvInProj.R != 3*hidden || layer.ShortConvInProj.C != hidden:
+			return false
+		case layer.ShortConvOutProj == nil || layer.ShortConvOutProj.R != hidden || layer.ShortConvOutProj.C != hidden:
+			return false
+		case len(layer.ShortConvState.Buf) != (k.C-1)*hidden:
+			return false
+		}
+		for _, w := range []*instance.Mat{layer.ShortConvInProj, layer.ShortConvOutProj} {
+			if !batchedWeightDense(o, w) {
+				return false
+			}
+		}
+	} else if layer.HeadDim != headDim || layer.HeadKV <= 0 {
 		return false
 	}
 	if layer.NoRoPE {
@@ -193,6 +225,27 @@ func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 	}
 	if len(layer.AttnNorm) != hidden || len(layer.FfnNorm) != hidden {
 		return false
+	}
+	// FFN shape checks apply to every layer, recurrent included.
+	if layer.FfnUp == nil || layer.FfnGate == nil || layer.FfnDown == nil {
+		return false
+	}
+	interm := layer.FfnUp.R
+	if interm <= 0 || layer.FfnGate.R != interm || layer.FfnDown.C != interm {
+		return false
+	}
+	if layer.FfnUp.C != hidden || layer.FfnGate.C != hidden || layer.FfnDown.R != hidden {
+		return false
+	}
+	if layer.IsRecurrent {
+		// Recurrent layers have no KV cache.
+		if len(layer.PostAttnNorm) > 0 && len(layer.PostAttnNorm) != hidden {
+			return false
+		}
+		if len(layer.PostFfnNorm) > 0 && len(layer.PostFfnNorm) != hidden {
+			return false
+		}
+		return true
 	}
 	if layer.AttnCache.KvStride != kvStride || layer.AttnCache.CacheLen <= 0 {
 		return false
@@ -215,16 +268,6 @@ func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 	if layer.Wo.R != hidden || layer.Wo.C != qDim {
 		return false
 	}
-	if layer.FfnUp == nil || layer.FfnGate == nil || layer.FfnDown == nil {
-		return false
-	}
-	interm := layer.FfnUp.R
-	if interm <= 0 || layer.FfnGate.R != interm || layer.FfnDown.C != interm {
-		return false
-	}
-	if layer.FfnUp.C != hidden || layer.FfnGate.C != hidden || layer.FfnDown.R != hidden {
-		return false
-	}
 	if n := len(layer.WqBias); n != 0 && n != qDim {
 		return false
 	}
@@ -240,12 +283,21 @@ func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 	if n := len(layer.AttnKNorm); n != 0 && n != headDim {
 		return false
 	}
+	if layer.AttnGate != nil && (layer.AttnGate.R != qDim && layer.AttnGate.R != m.HeadCount || layer.AttnGate.C != hidden) {
+		return false
+	}
+	if len(layer.PostAttnNorm) > 0 && len(layer.PostAttnNorm) != hidden {
+		return false
+	}
+	if len(layer.PostFfnNorm) > 0 && len(layer.PostFfnNorm) != hidden {
+		return false
+	}
 	apply, invFreq, _ := batchedLayerRoPE(m, layer)
 	if apply && (len(invFreq) == 0 || len(invFreq)*2 > headDim) {
 		return false
 	}
-	for _, w := range []*instance.Mat{layer.Wq, layer.Wk, layer.Wv, layer.Wo, layer.FfnUp, layer.FfnGate, layer.FfnDown} {
-		if !batchedWeightDense(o, w) {
+	for _, w := range []*instance.Mat{layer.Wq, layer.Wk, layer.Wv, layer.Wo, layer.FfnUp, layer.FfnGate, layer.FfnDown, layer.AttnGate} {
+		if w != nil && !batchedWeightDense(o, w) {
 			return false
 		}
 	}
@@ -342,10 +394,19 @@ type batchedBuffers struct {
 	last   native.DeviceBuffer // [hidden] final row
 	lastN  native.DeviceBuffer // [hidden] final row normed
 	logits native.DeviceBuffer // [vocab]
+
+	// Hybrid-layer scratch: short-conv in_proj output [N, 3*hidden], gated conv
+	// inputs [N, hidden], conv output [N, hidden], state-rotate staging
+	// [(maxKlen-1), hidden], and the attention gate projection [N, qDim].
+	scProj  native.DeviceBuffer
+	scBx    native.DeviceBuffer
+	scOut   native.DeviceBuffer
+	scState native.DeviceBuffer
+	gateBuf native.DeviceBuffer
 }
 
 func (b *batchedBuffers) all() []native.DeviceBuffer {
-	return []native.DeviceBuffer{b.x, b.normed, b.proj, b.q, b.attn, b.k, b.v, b.up, b.gate, b.act, b.down, b.conv, b.last, b.lastN, b.logits}
+	return []native.DeviceBuffer{b.x, b.normed, b.proj, b.q, b.attn, b.k, b.v, b.up, b.gate, b.act, b.down, b.conv, b.last, b.lastN, b.logits, b.scProj, b.scBx, b.scOut, b.scState, b.gateBuf}
 }
 
 type batchedLayerPlan struct {
@@ -384,6 +445,23 @@ type batchedLayerPlan struct {
 
 	scale   float32
 	useGelu bool
+
+	// Hybrid (short-conv + attention) layer support.
+	isRecurrent bool
+	convIn      deviceMat
+	convOut     deviceMat
+	convW       native.DeviceBuffer // f32 kernel [hidden, klen]
+	convState   native.DeviceBuffer // [(klen-1), hidden], device-resident
+	klen        int
+
+	attnGate    deviceMat // zero when the layer has no output gate
+	gatePerHead bool
+	gateRows    int
+
+	postAttnNormDev native.DeviceBuffer
+	postFfnNormDev  native.DeviceBuffer
+
+	window int // sliding attention window (0 = full)
 }
 
 type batchedPrefillPlan struct {
@@ -590,6 +668,32 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 	if err := allocInto(&p.buf.logits, p.vocab, "logits"); err != nil {
 		return fail(err)
 	}
+	// Hybrid-layer scratch. maxKlen is the widest short-conv kernel in the model.
+	maxKlen := 1
+	for i := range m.Layers {
+		if m.Layers[i].IsRecurrent && m.Layers[i].ShortConvKernel != nil && m.Layers[i].ShortConvKernel.C > maxKlen {
+			maxKlen = m.Layers[i].ShortConvKernel.C
+		}
+	}
+	if err := allocInto(&p.buf.scProj, p.n*3*hidden, "scProj"); err != nil {
+		return fail(err)
+	}
+	if err := allocInto(&p.buf.scBx, p.n*hidden, "scBx"); err != nil {
+		return fail(err)
+	}
+	if err := allocInto(&p.buf.scOut, p.n*hidden, "scOut"); err != nil {
+		return fail(err)
+	}
+	scStateElems := (maxKlen - 1) * hidden
+	if scStateElems < 0 {
+		scStateElems = 0
+	}
+	if err := allocInto(&p.buf.scState, scStateElems, "scState"); err != nil {
+		return fail(err)
+	}
+	if err := allocInto(&p.buf.gateBuf, p.n*qDim, "gateBuf"); err != nil {
+		return fail(err)
+	}
 	convElems := p.n * maxInt(hidden, p.maxInterm)
 	if convElems > 0 {
 		b, err := native.AllocDevice(int64(convElems) * 2)
@@ -640,17 +744,76 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 		lp.cacheLen = cacheLen
 
 		var err error
-		if lp.wq, err = o.deviceMat(l.Wq); err != nil {
-			return fail(fmt.Errorf("cuda batched prefill: layer %d Wq: %w", i, err))
-		}
-		if lp.wk, err = o.deviceMat(l.Wk); err != nil {
-			return fail(fmt.Errorf("cuda batched prefill: layer %d Wk: %w", i, err))
-		}
-		if lp.wv, err = o.deviceMat(l.Wv); err != nil {
-			return fail(fmt.Errorf("cuda batched prefill: layer %d Wv: %w", i, err))
-		}
-		if lp.wo, err = o.deviceMat(l.Wo); err != nil {
-			return fail(fmt.Errorf("cuda batched prefill: layer %d Wo: %w", i, err))
+		lp.isRecurrent = l.IsRecurrent
+		lp.window = l.AttnWindow
+		if lp.isRecurrent {
+			// Short-conv weights, kernel and the device-resident conv state.
+			if lp.convIn, err = o.deviceMat(l.ShortConvInProj); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d conv in_proj: %w", i, err))
+			}
+			if lp.convOut, err = o.deviceMat(l.ShortConvOutProj); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d conv out_proj: %w", i, err))
+			}
+			if lp.convW, err = o.ensureConvKernel(l.ShortConvKernel); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d conv kernel: %w", i, err))
+			}
+			lp.klen = l.ShortConvKernel.C
+			stateBytes := int64((lp.klen-1)*hidden) * 4
+			cs, err := o.ensureConvState(l, int(stateBytes))
+			if err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d conv state: %w", i, err))
+			}
+			if stateBytes > 0 && !o.convStateReady[l] {
+				// First use of this layer: seed the device state from the host
+				// buffer (zeroed on load/reset), exactly as the per-token path.
+				if err := native.MemcpyH2DAsync(cs.buf, unsafe.Pointer(&l.ShortConvState.Buf[0]), stateBytes, o.stream); err != nil {
+					return fail(fmt.Errorf("cuda batched prefill: layer %d conv state upload: %w", i, err))
+				}
+			}
+			o.convStateReady[l] = true
+			lp.convState = cs.buf
+		} else {
+			if lp.wq, err = o.deviceMat(l.Wq); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d Wq: %w", i, err))
+			}
+			if lp.wk, err = o.deviceMat(l.Wk); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d Wk: %w", i, err))
+			}
+			if lp.wv, err = o.deviceMat(l.Wv); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d Wv: %w", i, err))
+			}
+			if lp.wo, err = o.deviceMat(l.Wo); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d Wo: %w", i, err))
+			}
+
+			apply, invFreq, ropeScale := batchedLayerRoPE(m, l)
+			lp.applyRope = apply
+			lp.ropeScale = ropeScale
+			if apply {
+				if lp.ropeDev, lp.ropeHalf, err = o.ensureRoPEInvFreqDev(invFreq); err != nil {
+					return fail(fmt.Errorf("cuda batched prefill: layer %d RoPE: %w", i, err))
+				}
+			}
+
+			cache, err := o.ensureAttnCache(l, lp.kvStride, cacheLen)
+			if err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d attn cache: %w", i, err))
+			}
+			if cache.kvStride != lp.kvStride || cache.cacheLen != cacheLen {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d attn cache mismatch", i))
+			}
+			lp.cache = cache
+			lp.useQ8K = cache.useQ8K
+			lp.useQ8V = cache.useQ8V
+			lp.blocksPerRow = lp.kvStride / int(mcf.QuantBlockSize)
+			if lp.blocksPerRow < 1 {
+				lp.blocksPerRow = 1
+			}
+
+			lp.scale = l.AttnScale
+			if lp.scale == 0 {
+				lp.scale = float32(1.0 / math.Sqrt(float64(headDim)))
+			}
 		}
 		if lp.up, err = o.deviceMat(l.FfnUp); err != nil {
 			return fail(fmt.Errorf("cuda batched prefill: layer %d FfnUp: %w", i, err))
@@ -667,44 +830,32 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 		if lp.ffnNormDev, err = o.deviceNormWeight(l.FfnNorm); err != nil {
 			return fail(fmt.Errorf("cuda batched prefill: layer %d FfnNorm: %w", i, err))
 		}
-		if len(l.AttnQNorm) > 0 {
+		if len(l.AttnQNorm) > 0 && !lp.isRecurrent {
 			if lp.qNormDev, err = o.deviceNormWeight(l.AttnQNorm); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d AttnQNorm: %w", i, err))
 			}
 		}
-		if len(l.AttnKNorm) > 0 {
+		if len(l.AttnKNorm) > 0 && !lp.isRecurrent {
 			if lp.kNormDev, err = o.deviceNormWeight(l.AttnKNorm); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d AttnKNorm: %w", i, err))
 			}
 		}
-
-		apply, invFreq, ropeScale := batchedLayerRoPE(m, l)
-		lp.applyRope = apply
-		lp.ropeScale = ropeScale
-		if apply {
-			if lp.ropeDev, lp.ropeHalf, err = o.ensureRoPEInvFreqDev(invFreq); err != nil {
-				return fail(fmt.Errorf("cuda batched prefill: layer %d RoPE: %w", i, err))
+		if l.AttnGate != nil {
+			if lp.attnGate, err = o.deviceMat(l.AttnGate); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d AttnGate: %w", i, err))
+			}
+			lp.gateRows = l.AttnGate.R
+			lp.gatePerHead = l.AttnGate.R == m.HeadCount && m.HeadCount != qDim
+		}
+		if len(l.PostAttnNorm) > 0 {
+			if lp.postAttnNormDev, err = o.deviceNormWeight(l.PostAttnNorm); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d PostAttnNorm: %w", i, err))
 			}
 		}
-
-		cache, err := o.ensureAttnCache(l, lp.kvStride, cacheLen)
-		if err != nil {
-			return fail(fmt.Errorf("cuda batched prefill: layer %d attn cache: %w", i, err))
-		}
-		if cache.kvStride != lp.kvStride || cache.cacheLen != cacheLen {
-			return fail(fmt.Errorf("cuda batched prefill: layer %d attn cache mismatch", i))
-		}
-		lp.cache = cache
-		lp.useQ8K = cache.useQ8K
-		lp.useQ8V = cache.useQ8V
-		lp.blocksPerRow = lp.kvStride / int(mcf.QuantBlockSize)
-		if lp.blocksPerRow < 1 {
-			lp.blocksPerRow = 1
-		}
-
-		lp.scale = l.AttnScale
-		if lp.scale == 0 {
-			lp.scale = float32(1.0 / math.Sqrt(float64(headDim)))
+		if len(l.PostFfnNorm) > 0 {
+			if lp.postFfnNormDev, err = o.deviceNormWeight(l.PostFfnNorm); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d PostFfnNorm: %w", i, err))
+			}
 		}
 		lp.useGelu = strings.Contains(l.FFNActivation, "gelu")
 
@@ -785,6 +936,25 @@ func (p *batchedPrefillPlan) run() ([]float32, error) {
 		}
 	}
 
+	// Recurrent layers rotated their conv state on device during the batch.
+	// Copy it back to the host buffer so the per-token CPU fallback (used when
+	// the weights are not quantized) decodes from the same state; the device
+	// copy stays valid for the quant fast path via convStateReady.
+	for i := range p.layers {
+		lp := &p.layers[i]
+		if !lp.isRecurrent || lp.klen <= 1 {
+			continue
+		}
+		stateBytes := int64((lp.klen-1)*p.hidden) * int64(unsafe.Sizeof(float32(0)))
+		host := lp.layer.ShortConvState.Buf
+		if len(host)*int(unsafe.Sizeof(float32(0))) < int(stateBytes) {
+			return nil, fmt.Errorf("cuda batched prefill: layer %d conv state host buffer too small", i)
+		}
+		if err := native.MemcpyD2HAsync(unsafe.Pointer(&host[0]), lp.convState, stateBytes, o.stream); err != nil {
+			return nil, fmt.Errorf("cuda batched prefill: layer %d conv state writeback to host: %w", i, err)
+		}
+	}
+
 	// The whole tap set crosses to the host once, after the layer loop, so no
 	// tapped layer pays a host sync.
 	if p.tapRows > 0 {
@@ -823,6 +993,128 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 	if err := native.RMSNormBatchedF32(p.buf.normed, p.buf.x, lp.attnNormDev, p.eps, p.hidden, p.n, stream); err != nil {
 		return fmt.Errorf("cuda batched prefill: attn norm: %w", err)
 	}
+	if lp.isRecurrent {
+		if err := p.runShortConvBlock(lp); err != nil {
+			return err
+		}
+	} else {
+		if err := p.runAttentionBlock(lp); err != nil {
+			return err
+		}
+	}
+	// Sandwich (post-operator) norm, then the scaled residual add.
+	if lp.postAttnNormDev.Ptr() != nil {
+		if err := native.RMSNormBatchedF32(p.buf.proj, p.buf.proj, lp.postAttnNormDev, p.eps, p.hidden, p.n, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: post-attn norm: %w", err)
+		}
+	}
+	if err := p.residualAdd(p.buf.proj); err != nil {
+		return err
+	}
+
+	// FFN.
+	if err := native.RMSNormBatchedF32(p.buf.normed, p.buf.x, lp.ffnNormDev, p.eps, p.hidden, p.n, stream); err != nil {
+		return fmt.Errorf("cuda batched prefill: ffn norm: %w", err)
+	}
+	if err := p.gemm(lp.up, p.buf.normed, p.hidden, p.buf.up, lp.interm); err != nil {
+		return err
+	}
+	if err := p.gemm(lp.gate, p.buf.normed, p.hidden, p.buf.gate, lp.interm); err != nil {
+		return err
+	}
+	if lp.useGelu {
+		if err := native.GeluMulF32(p.buf.gate, p.buf.up, p.buf.act, p.n*lp.interm, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: gelu mul: %w", err)
+		}
+	} else {
+		if err := native.SiluMulF32(p.buf.gate, p.buf.up, p.buf.act, p.n*lp.interm, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: silu mul: %w", err)
+		}
+	}
+	if err := p.gemm(lp.down, p.buf.act, lp.interm, p.buf.down, p.hidden); err != nil {
+		return err
+	}
+	if lp.postFfnNormDev.Ptr() != nil {
+		if err := native.RMSNormBatchedF32(p.buf.down, p.buf.down, lp.postFfnNormDev, p.eps, p.hidden, p.n, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: post-ffn norm: %w", err)
+		}
+	}
+	if err := p.residualAdd(p.buf.down); err != nil {
+		return err
+	}
+
+	// p.buf.x is now this layer's post-FFN residual. Copy the captured rows on
+	// device; the host read happens once, after the whole layer loop.
+	if p.tapRows > 0 {
+		if slot := p.inst.HiddenTaps.SlotFor(lp.index); slot >= 0 {
+			if err := p.copyTapSlot(slot, p.buf.x); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// residualAdd adds src ([N, hidden]) to the residual p.buf.x, scaled by the
+// model's residual multiplier when set (Granite scales branch outputs).
+func (p *batchedPrefillPlan) residualAdd(src native.DeviceBuffer) error {
+	o := p.o
+	scale := p.inst.Config.Config.ResidualScale()
+	n := p.n * p.hidden
+	if scale == 1 {
+		if err := native.AddVectorsF32(p.buf.x, src, n, o.stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: residual: %w", err)
+		}
+		return nil
+	}
+	if err := native.ScaleAddF32(p.buf.x, src, scale, n, o.stream); err != nil {
+		return fmt.Errorf("cuda batched prefill: scaled residual: %w", err)
+	}
+	return nil
+}
+
+// runShortConvBlock runs a recurrent (short-conv) layer over all N rows:
+// in_proj GEMM -> batched causal conv (reading the chunk rows plus the carried
+// device state) -> state rotation -> out_proj GEMM, leaving the block output in
+// p.buf.proj. It mirrors simd's ShortConv for a whole chunk.
+func (p *batchedPrefillPlan) runShortConvBlock(lp *batchedLayerPlan) error {
+	o := p.o
+	stream := o.stream
+	hidden := p.hidden
+	// in_proj: [N, hidden] -> [N, 3*hidden] (b|c|xg per row).
+	if err := p.gemm(lp.convIn, p.buf.normed, hidden, p.buf.scProj, 3*hidden); err != nil {
+		return err
+	}
+	// Causal conv over the chunk; scBx receives the gated inputs for the
+	// state rotation, scOut the c*convOut rows (out_proj input).
+	if err := native.ShortConvDepthwiseBatch(p.buf.scProj, lp.convW, lp.convState, p.buf.scOut, p.buf.scBx, p.n, hidden, lp.klen, stream); err != nil {
+		return fmt.Errorf("cuda batched prefill: short-conv (layer %d): %w", lp.index, err)
+	}
+	// Rotate the device state forward by N rows (via staging to avoid races).
+	if lp.klen > 1 {
+		stateBytes := int64((lp.klen-1)*hidden) * 4
+		if err := native.ShortConvStateRotate(lp.convState, p.buf.scBx, p.buf.scState, p.n, hidden, lp.klen, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: conv state rotate (layer %d): %w", lp.index, err)
+		}
+		if err := native.MemcpyD2DAsync(lp.convState, p.buf.scState, stateBytes, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: conv state writeback (layer %d): %w", lp.index, err)
+		}
+	}
+	// out_proj: [N, hidden] -> [N, hidden] into proj.
+	if err := p.gemm(lp.convOut, p.buf.scOut, hidden, p.buf.proj, hidden); err != nil {
+		return err
+	}
+	return nil
+}
+
+// runAttentionBlock runs the attention block for all N rows, leaving the Wo
+// output in p.buf.proj. Sliding windows clamp each row's start to
+// max(pos-window+1, 0); the output gate (per-head or per-element) is applied
+// before Wo.
+func (p *batchedPrefillPlan) runAttentionBlock(lp *batchedLayerPlan) error {
+	o := p.o
+	stream := o.stream
+
 	// Q/K/V projections.
 	if err := p.gemm(lp.wq, p.buf.normed, p.hidden, p.buf.q, p.qDim); err != nil {
 		return err
@@ -906,12 +1198,16 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 
 		if wrapInBatch {
 			attnRow := devSub(p.buf.attn, i*qRowBytes)
+			start := 0
+			if lp.window > 0 && pos-lp.window+1 > 0 {
+				start = pos - lp.window + 1
+			}
 			if lp.useQ8K || lp.useQ8V {
 				if err := native.AttentionInnerMixedCacheF32(
 					qRow, lp.cache.kF16, lp.cache.vF16,
 					lp.cache.kQ8, lp.cache.vQ8, lp.cache.kQ8Scales, lp.cache.vQ8Scales,
 					attnRow, lp.useQ8K, lp.useQ8V,
-					pos, 0, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
+					pos, start, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
 					lp.cacheLen, lp.scale, p.softcap, stream,
 				); err != nil {
 					return fmt.Errorf("cuda batched prefill: attention (pos=%d): %w", pos, err)
@@ -919,7 +1215,7 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 			} else {
 				if err := native.AttentionInnerF16CacheF32(
 					qRow, lp.cache.kF16, lp.cache.vF16, attnRow,
-					pos, 0, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
+					pos, start, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
 					lp.cacheLen, lp.scale, p.softcap, stream,
 				); err != nil {
 					return fmt.Errorf("cuda batched prefill: attention (pos=%d): %w", pos, err)
@@ -937,7 +1233,7 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 				lp.cache.kQ8, lp.cache.vQ8, lp.cache.kQ8Scales, lp.cache.vQ8Scales,
 				p.buf.attn, lp.useQ8K, lp.useQ8V,
 				p.n, p.startPos, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
-				lp.cacheLen, lp.scale, p.softcap, stream,
+				lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
 			); err != nil {
 				return fmt.Errorf("cuda batched prefill: batched attention: %w", err)
 			}
@@ -945,55 +1241,27 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 			if err := native.AttentionInnerF16CacheF32Batch(
 				p.buf.q, lp.cache.kF16, lp.cache.vF16, p.buf.attn,
 				p.n, p.startPos, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
-				lp.cacheLen, lp.scale, p.softcap, stream,
+				lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
 			); err != nil {
 				return fmt.Errorf("cuda batched prefill: batched attention: %w", err)
 			}
 		}
 	}
 
-	// Attention output projection and residual.
+	// Attention output gate (LFM3-style): gate projection over the normed
+	// input per row, sigmoid-scaled onto the attention output before Wo.
+	if lp.attnGate.buf.Ptr() != nil {
+		if err := p.gemm(lp.attnGate, p.buf.normed, p.hidden, p.buf.gateBuf, lp.gateRows); err != nil {
+			return err
+		}
+		if err := native.AttnGateScaleF32(p.buf.attn, p.buf.gateBuf, p.n, p.qDim, p.nHead, p.headDim, lp.gatePerHead, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: attn gate (layer %d): %w", lp.index, err)
+		}
+	}
+
+	// Attention output projection (the residual add happens in runLayer).
 	if err := p.gemm(lp.wo, p.buf.attn, p.qDim, p.buf.proj, p.hidden); err != nil {
 		return err
-	}
-	if err := native.AddVectorsF32(p.buf.x, p.buf.proj, p.n*p.hidden, stream); err != nil {
-		return fmt.Errorf("cuda batched prefill: attention residual: %w", err)
-	}
-
-	// FFN.
-	if err := native.RMSNormBatchedF32(p.buf.normed, p.buf.x, lp.ffnNormDev, p.eps, p.hidden, p.n, stream); err != nil {
-		return fmt.Errorf("cuda batched prefill: ffn norm: %w", err)
-	}
-	if err := p.gemm(lp.up, p.buf.normed, p.hidden, p.buf.up, lp.interm); err != nil {
-		return err
-	}
-	if err := p.gemm(lp.gate, p.buf.normed, p.hidden, p.buf.gate, lp.interm); err != nil {
-		return err
-	}
-	if lp.useGelu {
-		if err := native.GeluMulF32(p.buf.gate, p.buf.up, p.buf.act, p.n*lp.interm, stream); err != nil {
-			return fmt.Errorf("cuda batched prefill: gelu mul: %w", err)
-		}
-	} else {
-		if err := native.SiluMulF32(p.buf.gate, p.buf.up, p.buf.act, p.n*lp.interm, stream); err != nil {
-			return fmt.Errorf("cuda batched prefill: silu mul: %w", err)
-		}
-	}
-	if err := p.gemm(lp.down, p.buf.act, lp.interm, p.buf.down, p.hidden); err != nil {
-		return err
-	}
-	if err := native.AddVectorsF32(p.buf.x, p.buf.down, p.n*p.hidden, stream); err != nil {
-		return fmt.Errorf("cuda batched prefill: ffn residual: %w", err)
-	}
-
-	// p.buf.x is now this layer's post-FFN residual. Copy the captured rows on
-	// device; the host read happens once, after the whole layer loop.
-	if p.tapRows > 0 {
-		if slot := p.inst.HiddenTaps.SlotFor(lp.index); slot >= 0 {
-			if err := p.copyTapSlot(slot, p.buf.x); err != nil {
-				return err
-			}
-		}
 	}
 
 	// Record the last position written to this layer's device KV cache,

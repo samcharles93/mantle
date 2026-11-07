@@ -803,7 +803,7 @@ extern "C"
       const float *__restrict__ q, const uint16_t *__restrict__ cache_k,
       const uint16_t *__restrict__ cache_v, float *__restrict__ out,
       int n_tokens, int start_pos, int kv_stride, int head_dim, int n_head,
-      int kv_heads, int cache_len, float scale, float softcap)
+      int kv_heads, int cache_len, float scale, float softcap, int window)
   {
     const int row = blockIdx.x;
     const int h = blockIdx.y;
@@ -812,6 +812,7 @@ extern "C"
       return;
 
     const int pos = start_pos + row;
+    const int start = window > 0 ? max(pos - window + 1, 0) : 0;
     const int kv_head = (h * kv_heads) / n_head;
     const float *qh = q + ((size_t)row * n_head + h) * head_dim;
     float *out_h = out + ((size_t)row * n_head + h) * head_dim;
@@ -837,7 +838,7 @@ extern "C"
 
     const bool use_ring = cache_len > 0 && cache_len < (pos + 1);
 
-    for (int t = 0; t <= pos; t++)
+    for (int t = start; t <= pos; t++)
     {
       const int cache_pos = use_ring ? (t % cache_len) : t;
       const int k_base = cache_pos * kv_stride + kv_head * head_dim;
@@ -1075,7 +1076,7 @@ extern "C"
       float *__restrict__ out,
       int use_q8_k, int use_q8_v, int n_tokens, int start_pos, int kv_stride,
       int head_dim, int n_head, int kv_heads, int cache_len, float scale,
-      float softcap)
+      float softcap, int window)
   {
     const int row = blockIdx.x;
     const int h = blockIdx.y;
@@ -1088,6 +1089,7 @@ extern "C"
       return;
 
     const int pos = start_pos + row;
+    const int start = window > 0 ? max(pos - window + 1, 0) : 0;
     const int kv_head = (h * kv_heads) / n_head;
     const float *qh = q + ((size_t)row * n_head + h) * head_dim;
     float *out_h = out + ((size_t)row * n_head + h) * head_dim;
@@ -1126,7 +1128,7 @@ extern "C"
 
     const bool use_ring = cache_len > 0 && cache_len < (pos + 1);
 
-    for (int t = 0; t <= pos; t++)
+    for (int t = start; t <= pos; t++)
     {
       const int cache_pos = use_ring ? (t % cache_len) : t;
       const int kv_base = cache_pos * kv_stride + kv_head * head_dim;
@@ -1513,7 +1515,7 @@ extern "C"
       const float *q, const uint16_t *cacheK, const uint16_t *cacheV,
       float *out, int nTokens, int startPos, int kvStride, int headDim,
       int nHead, int kvHeads, int cacheLen, float scale, float softcap,
-      cudaStream_t stream)
+      int window, cudaStream_t stream)
   {
     if (!q || !cacheK || !cacheV || !out || nTokens <= 0 || startPos < 0 ||
         kvStride <= 0 || headDim <= 0 || nHead <= 0 || kvHeads <= 0 ||
@@ -1527,7 +1529,7 @@ extern "C"
     dim3 grid(nTokens, nHead);
     attention_inner_f16_cache_f32_batch_kernel<<<grid, block, 0, stream>>>(
         q, cacheK, cacheV, out, nTokens, startPos, kvStride, headDim, nHead,
-        kvHeads, cacheLen, scale, softcap);
+        kvHeads, cacheLen, scale, softcap, window);
     return (int)cudaGetLastError();
   }
 
@@ -1537,7 +1539,7 @@ extern "C"
       const float *cacheVScales, float *out, int useQ8K, int useQ8V,
       int nTokens, int startPos, int kvStride, int headDim, int nHead,
       int kvHeads, int cacheLen, float scale, float softcap,
-      cudaStream_t stream)
+      int window, cudaStream_t stream)
   {
     if (!q || !out || nTokens <= 0 || startPos < 0 || kvStride <= 0 ||
         headDim <= 0 || nHead <= 0 || kvHeads <= 0 || cacheLen <= 0)
@@ -1569,7 +1571,7 @@ extern "C"
     attention_inner_mixed_cache_f32_batch_kernel<<<grid, block, 0, stream>>>(
         q, cacheKF16, cacheVF16, cacheKQ8, cacheVQ8, cacheKScales, cacheVScales,
         out, useQ8K, useQ8V, nTokens, startPos, kvStride, headDim, nHead,
-        kvHeads, cacheLen, scale, softcap);
+        kvHeads, cacheLen, scale, softcap, window);
     return (int)cudaGetLastError();
   }
 }

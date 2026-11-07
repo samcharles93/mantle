@@ -195,7 +195,7 @@ func runF16BatchCase(t *testing.T, stream Stream, nTokens, startPos int, softcap
 		t.Fatalf("H2D v: %v", err)
 	}
 
-	if err := AttentionInnerF16CacheF32Batch(qDev, kDev, vDev, outDev, nTokens, startPos, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, batchTestScale, softcap, stream); err != nil {
+	if err := AttentionInnerF16CacheF32Batch(qDev, kDev, vDev, outDev, nTokens, startPos, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, 0, batchTestScale, softcap, stream); err != nil {
 		t.Fatalf("AttentionInnerF16CacheF32Batch: %v", err)
 	}
 
@@ -348,7 +348,7 @@ func runMixedBatchCase(t *testing.T, stream Stream, nTokens, startPos int, useQ8
 	if err := AttentionInnerMixedCacheF32Batch(
 		qDev, kF16Dev, vF16Dev, kQ8Dev, vQ8Dev, kScaleDev, vScaleDev, outDev,
 		useQ8K, useQ8V, nTokens, startPos, batchTestKVStride, batchTestHeadDim,
-		batchTestNHead, batchTestKVHeads, batchTestCacheLen, batchTestScale, softcap, stream,
+		batchTestNHead, batchTestKVHeads, batchTestCacheLen, 0, batchTestScale, softcap, stream,
 	); err != nil {
 		t.Fatalf("AttentionInnerMixedCacheF32Batch: %v", err)
 	}
@@ -404,27 +404,27 @@ func TestAttentionInnerBatchValidation(t *testing.T) {
 	out := dev(t, 512)
 
 	valid := func() error {
-		return AttentionInnerF16CacheF32Batch(q, k, v, out, 1, 0, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, batchTestScale, 0, stream)
+		return AttentionInnerF16CacheF32Batch(q, k, v, out, 1, 0, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, 0, batchTestScale, 0, stream)
 	}
 	if err := valid(); err != nil {
 		t.Fatalf("valid call rejected: %v", err)
 	}
-	if err := AttentionInnerF16CacheF32Batch(DeviceBuffer{}, k, v, out, 1, 0, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, batchTestScale, 0, stream); err == nil {
+	if err := AttentionInnerF16CacheF32Batch(DeviceBuffer{}, k, v, out, 1, 0, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, 0, batchTestScale, 0, stream); err == nil {
 		t.Fatalf("nil q buffer accepted")
 	}
-	if err := AttentionInnerF16CacheF32Batch(q, k, v, out, 0, 0, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, batchTestScale, 0, stream); err == nil {
+	if err := AttentionInnerF16CacheF32Batch(q, k, v, out, 0, 0, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, 0, batchTestScale, 0, stream); err == nil {
 		t.Fatalf("nTokens=0 accepted")
 	}
-	if err := AttentionInnerF16CacheF32Batch(q, k, v, out, 1, -1, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, batchTestScale, 0, stream); err == nil {
+	if err := AttentionInnerF16CacheF32Batch(q, k, v, out, 1, -1, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, 0, batchTestScale, 0, stream); err == nil {
 		t.Fatalf("negative startPos accepted")
 	}
-	if err := AttentionInnerMixedCacheF32Batch(q, k, v, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, out, false, false, 1, 0, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, batchTestScale, 0, stream); err != nil {
+	if err := AttentionInnerMixedCacheF32Batch(q, k, v, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, out, false, false, 1, 0, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, 0, batchTestScale, 0, stream); err != nil {
 		t.Fatalf("valid mixed call rejected: %v", err)
 	}
-	if err := AttentionInnerMixedCacheF32Batch(DeviceBuffer{}, k, v, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, out, false, false, 1, 0, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, batchTestScale, 0, stream); err == nil {
+	if err := AttentionInnerMixedCacheF32Batch(DeviceBuffer{}, k, v, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, out, false, false, 1, 0, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, 0, batchTestScale, 0, stream); err == nil {
 		t.Fatalf("nil mixed q buffer accepted")
 	}
-	if err := AttentionInnerMixedCacheF32Batch(q, k, v, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, out, false, false, 1, -3, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, batchTestScale, 0, stream); err == nil {
+	if err := AttentionInnerMixedCacheF32Batch(q, k, v, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, DeviceBuffer{}, out, false, false, 1, -3, batchTestKVStride, batchTestHeadDim, batchTestNHead, batchTestKVHeads, batchTestCacheLen, 0, batchTestScale, 0, stream); err == nil {
 		t.Fatalf("negative mixed startPos accepted")
 	}
 }

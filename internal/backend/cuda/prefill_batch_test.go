@@ -3,6 +3,7 @@
 package cuda
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -45,6 +46,12 @@ type batchTestDims struct {
 
 	q8Cache bool
 	bf16    bool
+
+	// hybrid builds an LFM3-shaped model: layer 0 a short-conv layer, layer 1
+	// sliding-window attention with a per-head output gate and sandwich norms,
+	// the rest plain full attention.
+	hybrid bool
+	window int
 }
 
 func defaultBatchTestDims() batchTestDims {
@@ -130,7 +137,7 @@ func batchTestModel(d batchTestDims) *core.Instance {
 		Scratch: core.ScratchBuffers{
 			X:        make([]float32, d.hidden),
 			Tmp:      make([]float32, d.hidden),
-			Tmp2:     make([]float32, maxInt(d.hidden, d.ffnDim)),
+			Tmp2:     make([]float32, d.hidden),
 			Q:        make([]float32, qDim),
 			K:        make([]float32, kvStride),
 			V:        make([]float32, kvStride),
@@ -141,6 +148,10 @@ func batchTestModel(d batchTestDims) *core.Instance {
 			FfnGate:  make([]float32, d.ffnDim),
 			FfnAct:   make([]float32, d.ffnDim),
 			Logits:   make([]float32, d.vocab),
+			ScProj:   make([]float32, 3*d.hidden),
+			ScBx:     make([]float32, d.hidden),
+			ScConv:   make([]float32, d.hidden),
+			AttnGate: make([]float32, 2*qDim),
 		},
 	}
 	for i := range m.OutputNorm {
@@ -162,6 +173,39 @@ func batchTestModel(d batchTestDims) *core.Instance {
 			layer.AttnNorm[i] = 1.0
 			layer.FfnNorm[i] = 1.0
 		}
+		if d.hybrid && li%2 == 1 {
+			// Recurrent short-conv layer (LFM3 interleaves them).
+			layer.IsRecurrent = true
+			layer.HeadKV = 0
+			const klen = 4
+			kernel := core.NewMat(d.hidden, klen)
+			batchTestFill(kernel.Data, s+20)
+			layer.ShortConvKernel = &kernel
+			layer.ShortConvInProj = batchTestMat(3*d.hidden, d.hidden, s+21, d.bf16)
+			layer.ShortConvOutProj = batchTestMat(d.hidden, d.hidden, s+22, d.bf16)
+			layer.ShortConvState = core.ShortConvState{Buf: make([]float32, (klen-1)*d.hidden), KernelLen: klen}
+		} else if d.hybrid && li == 2 {
+			layer.AttnType = "sliding_attention"
+			layer.AttnWindow = d.window
+			// LFM3-style per-layer zero-tail RoPE: half the frequencies zero.
+			half := headDim / 2
+			zt := make([]float64, half)
+			for i := range zt {
+				if 2*i < headDim/2 {
+					zt[i] = math.Pow(10000, -2*float64(i)/float64(headDim))
+				}
+			}
+			layer.RopeInvFreq = zt
+			layer.RopeAttnScale = 1
+			gate := batchTestMat(d.nHead, d.hidden, s+23, d.bf16) // per-head gate
+			layer.AttnGate = gate
+			layer.PostAttnNorm = make([]float32, d.hidden)
+			layer.PostFfnNorm = make([]float32, d.hidden)
+			for i := range layer.PostAttnNorm {
+				layer.PostAttnNorm[i] = 1.0 + float32(i%3)*0.1
+				layer.PostFfnNorm[i] = 1.0 - float32(i%3)*0.05
+			}
+		}
 		// Exercise the optional per-head Q/K norm and QKV biases.
 		layer.AttnQNorm = make([]float32, headDim)
 		layer.AttnKNorm = make([]float32, headDim)
@@ -175,20 +219,22 @@ func batchTestModel(d batchTestDims) *core.Instance {
 		batchTestFill(layer.WqBias, s+7)
 		batchTestFill(layer.WkBias, s+8)
 		batchTestFill(layer.WvBias, s+9)
-		layer.Wq = batchTestMat(qDim, d.hidden, s, d.bf16)
-		layer.Wk = batchTestMat(kvStride, d.hidden, s+1, d.bf16)
-		layer.Wv = batchTestMat(kvStride, d.hidden, s+2, d.bf16)
-		layer.Wo = batchTestMat(d.hidden, qDim, s+3, d.bf16)
+		if !layer.IsRecurrent {
+			layer.Wq = batchTestMat(qDim, d.hidden, s, d.bf16)
+			layer.Wk = batchTestMat(kvStride, d.hidden, s+1, d.bf16)
+			layer.Wv = batchTestMat(kvStride, d.hidden, s+2, d.bf16)
+			layer.Wo = batchTestMat(d.hidden, qDim, s+3, d.bf16)
+			layer.AttnCache = core.AttnCache{
+				K:        make([]float32, 0),
+				V:        make([]float32, 0),
+				KvStride: kvStride,
+				CacheLen: d.cacheLen,
+			}
+		}
 		layer.FfnUp = batchTestMat(d.ffnDim, d.hidden, s+4, d.bf16)
 		layer.FfnGate = batchTestMat(d.ffnDim, d.hidden, s+5, d.bf16)
 		layer.FfnDown = batchTestMat(d.hidden, d.ffnDim, s+6, d.bf16)
-		layer.AttnCache = core.AttnCache{
-			K:        make([]float32, 0),
-			V:        make([]float32, 0),
-			KvStride: kvStride,
-			CacheLen: d.cacheLen,
-		}
-		if d.q8Cache {
+		if d.q8Cache && !layer.IsRecurrent {
 			layer.AttnCache.KQ8 = make([]int8, 0)
 			layer.AttnCache.KQ8S = make([]float32, 0)
 			layer.AttnCache.VQ8 = make([]int8, 0)
@@ -621,4 +667,92 @@ func TestBatchedPrefillGateQuantWeightsDequantMode(t *testing.T) {
 	if batchedWeightDense(o, quantMat) {
 		t.Fatal("a weight with pre-loaded quant data must never take the dense GEMM path")
 	}
+}
+
+// TestBatchedPrefillParityHybrid checks the batched path against the sequential
+// oracle on an LFM3-shaped model: a short-conv layer, a sliding-window layer
+// with a per-head output gate and sandwich norms, and plain attention layers.
+// The small cache forces the ring-wrap interleaved path on the windowed layer.
+func TestBatchedPrefillParityHybrid(t *testing.T) {
+	if !cudaAvailable(t) {
+		return
+	}
+	d := defaultBatchTestDims()
+	d.hybrid = true
+	d.window = 6
+	d.cacheLen = 8 // smaller than the prompt: ring wrap + window clamping
+	d.layers = 8
+	d.hidden = 256
+	d.ffnDim = 512
+	d.nHead = 8
+	d.headDim = 32
+	d.kvHeads = 4
+	d.maxCtx = 128
+	d.vocab = 512
+	for _, n := range []int{2, 6, 13, 40} {
+		t.Run(fmt.Sprintf("n%d", n), func(t *testing.T) {
+			tokens := make([]int, n)
+			for i := range tokens {
+				tokens[i] = (i*3 + 1) % d.vocab
+			}
+			gr, cleanup := newBatchTestRuntime(t, batchTestModel(d))
+			defer cleanup()
+			if !gr.batchedPrefillEligible(tokens) {
+				t.Fatal("hybrid model should be eligible for the batched prefill")
+			}
+			got, err := gr.PrefillTokens(tokens)
+			if err != nil {
+				t.Fatalf("batched PrefillTokens: %v", err)
+			}
+			got = append([]float32(nil), got...)
+			// The CPU simd path is the semantic oracle (the synthetic instance
+			// is not wired for the CUDA per-token conv fast path); force the
+			// per-token CPU path so no batch scratch is needed.
+			t.Setenv("MANTLE_CPU_BATCHED_PREFILL", "0")
+			oracle := batchTestModel(d)
+			(*simd.Instance)(oracle).BindDefaultOps()
+			want, err := (*simd.Instance)(oracle).PrefillTokens(tokens)
+			if err != nil {
+				t.Fatalf("oracle PrefillTokens: %v", err)
+			}
+			compareBatchLogits(t, fmt.Sprintf("hybrid/n%d", n), got, append([]float32(nil), want...), 2e-3, 2e-2)
+
+			// Decode continuity: run a few greedy tokens on the batched
+			// instance and on a fresh sequential oracle instance (both after
+			// prefill) and compare the argmax sequence — this exercises the
+			// conv-state rotation and KV handoff.
+			seqRT, seqCleanup := newBatchTestRuntime(t, batchTestModel(d))
+			defer seqCleanup()
+			if _, err := seqRT.cudaRuntime.PrefillTokens(tokens); err != nil {
+				t.Fatalf("sequential prefill: %v", err)
+			}
+			tokG := batchArgmax(got)
+			tokW := tokG
+			for i := 0; i < 4; i++ {
+				lg, err := gr.ForwardToken(tokG)
+				if err != nil {
+					t.Fatalf("batched ForwardToken: %v", err)
+				}
+				lw, err := seqRT.ForwardToken(tokW)
+				if err != nil {
+					t.Fatalf("sequential ForwardToken: %v", err)
+				}
+				ng, nw := batchArgmax(lg), batchArgmax(lw)
+				if ng != nw {
+					t.Fatalf("hybrid/n%d: greedy token %d differs: got %d want %d", n, i, ng, nw)
+				}
+				tokG, tokW = ng, nw
+			}
+		})
+	}
+}
+
+func batchArgmax(x []float32) int {
+	best := 0
+	for i := range x {
+		if x[i] > x[best] {
+			best = i
+		}
+	}
+	return best
 }
