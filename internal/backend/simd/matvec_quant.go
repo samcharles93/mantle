@@ -127,11 +127,28 @@ func matVecRangeQuantCached(dst []float32, w *Mat, x []float32, rs, re int, qx *
 	blocksPerRow := qc.BlocksPerRow
 	useInt8 := qx != nil && len(qx.Q) >= blocksPerRow*32 && len(qx.Q16) >= blocksPerRow*32 && len(qx.Scales) >= blocksPerRow
 
+	// dotBuf holds one int32 dot per 32-element block for the fused row
+	// kernel; rows with more blocks than this fall back to the per-block loop.
+	var dotBuf [256]int32
 	for r := rs; r < re; r++ {
 		blockBase := r * blocksPerRow
 		rowOff := blockBase * 32
 		qRow := qc.Q[rowOff : rowOff+blocksPerRow*32]
 		scales := qc.Scales[blockBase : blockBase+blocksPerRow]
+
+		if useInt8 && blocksPerRow <= len(dotBuf) && w.C%32 == 0 {
+			// One tight pass computes every block's int32 dot (no per-block
+			// call overhead); the scales combine afterwards in the same
+			// order as the per-block loop, so results are bit-identical.
+			dots := dotBuf[:blocksPerRow]
+			dotBlocksInt8Int16(qRow, qx.Q16[:blocksPerRow*32], dots, blocksPerRow)
+			var sum float32
+			for b := range blocksPerRow {
+				sum += float32(dots[b]) * (scales[b] * qx.Scales[b])
+			}
+			dst[r] = sum
+			continue
+		}
 
 		var sum float32
 		for b := range blocksPerRow {
@@ -162,6 +179,31 @@ func matVecRangeQuantCached(dst []float32, w *Mat, x []float32, rs, re int, qx *
 			}
 		}
 		dst[r] = sum
+	}
+}
+
+// dotBlocksInt8Int16 computes out[b] = dot(q[b*32:(b+1)*32], x[b*32:(b+1)*32])
+// for every block in one pass, with no per-block function call: each block is
+// two 16-element DotProductPairs reduced to one int32. q and x must hold
+// exactly blocks*32 elements and out exactly blocks elements.
+func dotBlocksInt8Int16(q []int8, x []int16, out []int32, blocks int) {
+	if !cpu.HasAVX2 {
+		for b := 0; b < blocks; b++ {
+			base := b * 32
+			out[b] = dotInt8Int16Scalar(q[base:base+32], x[base:base+32], 32)
+		}
+		return
+	}
+	for b := 0; b < blocks; b++ {
+		base := b * 32
+		vq0 := archsimd.LoadInt8x16(q[base:]).ExtendToInt16()
+		vq1 := archsimd.LoadInt8x16(q[base+16:]).ExtendToInt16()
+		ix0 := archsimd.LoadInt16x16(x[base:])
+		ix1 := archsimd.LoadInt16x16(x[base+16:])
+		d := vq0.DotProductPairs(ix0).Add(vq1.DotProductPairs(ix1))
+		var tmp [8]int32
+		d.StoreArray(&tmp)
+		out[b] = tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 	}
 }
 

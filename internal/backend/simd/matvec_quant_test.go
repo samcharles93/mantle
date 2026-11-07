@@ -332,3 +332,88 @@ func verifyPayloadSize(t *testing.T, payload []byte, rows, cols int, dt mcf.Tens
 		t.Fatalf("payload size mismatch: got %d want %d", len(payload), want)
 	}
 }
+
+// TestDotBlocksInt8Int16 pins the fused per-block dot kernel to the per-block
+// SIMD dot: identical int32 arithmetic, block by block, including the tail.
+func TestDotBlocksInt8Int16(t *testing.T) {
+	const blocks = 37 // not a multiple of anything, to exercise the loop
+	q := make([]int8, blocks*32)
+	x := make([]int16, blocks*32)
+	for i := range q {
+		q[i] = int8((i*7)%251 - 125)
+		x[i] = int16((i*13)%60001 - 30000)
+	}
+	out := make([]int32, blocks)
+	dotBlocksInt8Int16(q, x, out, blocks)
+	for b := 0; b < blocks; b++ {
+		want := dotInt8Int16SIMD(q[b*32:b*32+32], x[b*32:b*32+32], 32)
+		if out[b] != want {
+			t.Fatalf("block %d: dotBlocks = %d, per-block SIMD = %d", b, out[b], want)
+		}
+	}
+}
+
+// TestMatVecQuantCachedMatchesUncached checks the cached (pre-decoded) quant
+// matvec against the same matrix without a quant cache, which decodes blocks
+// on the fly: same dots, same scale-combine order, so results must be exact.
+func TestMatVecQuantCachedMatchesUncached(t *testing.T) {
+	const rows, cols = 64, 1024
+	qvals := makeQVals(rows * cols)
+	payload := buildK4Payload(rows, cols, 0.05, qvals)
+	cached := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: payload}
+	qc, err := instance.BuildQuantCache(&cached)
+	if err != nil {
+		t.Fatalf("BuildQuantCache: %v", err)
+	}
+	cached.Quant = qc
+	uncached := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: payload}
+
+	x := make([]float32, cols)
+	for i := range x {
+		x[i] = float32((i%13)-6) * 0.11
+	}
+	qx := PrepareQuantVec(x)
+	defer ReleaseQuantVec(qx)
+
+	got := make([]float32, rows)
+	want := make([]float32, rows)
+	MatVecWithQuant(got, &cached, x, qx)
+	MatVecWithQuant(want, &uncached, x, qx)
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("row %d: cached = %v, uncached = %v", i, got[i], want[i])
+		}
+	}
+}
+
+// BenchmarkMatVecK4Cached measures the pre-decoded quant cache path (the
+// hot decode path for k-quant MCF models) at a realistic projection shape.
+func BenchmarkMatVecK4Cached(b *testing.B) {
+	const rows, cols = 2048, 1024
+	qvals := makeQVals(rows * cols)
+	payload := buildK4Payload(rows, cols, 0.05, qvals)
+	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: payload}
+	qc, err := instance.BuildQuantCache(&w)
+	if err != nil {
+		b.Fatalf("BuildQuantCache: %v", err)
+	}
+	w.Quant = qc
+	x := make([]float32, cols)
+	for i := range x {
+		x[i] = float32((i%13)-6) * 0.11
+	}
+	dst := make([]float32, rows)
+	qx := PrepareQuantVec(x)
+	defer ReleaseQuantVec(qx)
+
+	b.Run("withQx", func(b *testing.B) {
+		for b.Loop() {
+			MatVecWithQuant(dst, &w, x, qx)
+		}
+	})
+	b.Run("noQx", func(b *testing.B) {
+		for b.Loop() {
+			MatVecWithQuant(dst, &w, x, nil)
+		}
+	})
+}
