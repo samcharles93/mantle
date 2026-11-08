@@ -94,6 +94,8 @@ type ModelConfig struct {
 	Arch      string
 	Config    Config
 	Tokenizer tokenizer.TokenizerConfig
+	// Vision is non-nil for multimodal (vision-language) models.
+	Vision *VisionConfig
 }
 
 // MambaConfig captures the runtime parameters required to execute a Mamba

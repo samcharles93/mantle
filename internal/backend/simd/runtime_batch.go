@@ -422,6 +422,10 @@ type batchPrefillChunk struct {
 	attnGate []float32 // [n,gateRows] attention gate rows
 	scState  []float32 // [(maxKernelLen-1), hidden] state staging copy
 
+	// rowEmbeds, when non-nil, is parallel to tokens and overrides the input
+	// embedding of positions whose entry is non-nil (multimodal image tokens).
+	rowEmbeds [][]float32
+
 	// tapBase is the tap row of this chunk's first position. Hidden-tap capture
 	// writes row tapBase+r; a prompt longer than the tap buffer's capacity
 	// therefore leaves HiddenTaps.Rows short of the prompt length.
@@ -446,6 +450,17 @@ type batchPrefillChunk struct {
 // issues its first StoreKV. A chunk cannot refuse after that point, so no
 // partially prefilled state can ever be handed back.
 func (m *Instance) forEachBatchLogits(tokens []int, emit logitEmit, keep func(logits []float32)) error {
+	return m.forEachBatchLogitsEmbeds(tokens, nil, emit, keep)
+}
+
+// forEachBatchLogitsEmbeds is forEachBatchLogits with optional per-position
+// input embedding overrides (embeds parallel to tokens, nil entries use the
+// token embedding). The override only changes how p.x rows are initialized;
+// every downstream gate and buffer rule is unchanged.
+func (m *Instance) forEachBatchLogitsEmbeds(tokens []int, embeds [][]float32, emit logitEmit, keep func(logits []float32)) error {
+	if embeds != nil && len(embeds) != len(tokens) {
+		return fmt.Errorf("%w: embeds length %d != tokens %d", errBatchIneligible, len(embeds), len(tokens))
+	}
 	if !cpuBatchedPrefillEnabled() {
 		return errBatchIneligible
 	}
@@ -484,6 +499,9 @@ func (m *Instance) forEachBatchLogits(tokens []int, emit logitEmit, keep func(lo
 		// store/attend interleaving is decided per chunk by the same rule the
 		// single-chunk path uses.
 		chunk := newBatchPrefillChunk(m, tokens[start:end], m.Pos)
+		if embeds != nil {
+			chunk.rowEmbeds = embeds[start:end]
+		}
 		chunk.tapBase = start
 		chunkEmit := emit
 		if emit == emitLastRow && end < n {
@@ -581,7 +599,11 @@ func (p *batchPrefillChunk) forEachRow(emit logitEmit, keep func(logits []float3
 	cfg := &m.Config.Config
 
 	for r, tok := range p.tokens {
-		m.Embeddings.RowTo(p.x[r*hidden:(r+1)*hidden], tok)
+		if p.rowEmbeds != nil && p.rowEmbeds[r] != nil {
+			copy(p.x[r*hidden:(r+1)*hidden], p.rowEmbeds[r])
+		} else {
+			m.Embeddings.RowTo(p.x[r*hidden:(r+1)*hidden], tok)
+		}
 	}
 	if scale := cfg.EmbeddingMultiplier; scale != 0 && scale != 1 {
 		s := float32(scale)

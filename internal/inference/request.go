@@ -5,6 +5,7 @@ import "github.com/samcharles93/mantle/internal/tokenizer"
 type RequestOptions struct {
 	Messages []tokenizer.Message
 	Tools    []any
+	Images   [][]byte
 
 	Steps *int
 	Seed  *int64
@@ -28,6 +29,7 @@ func ResolveRequest(opts RequestOptions, defaults GenDefaults) Request {
 	req := Request{
 		Messages:        opts.Messages,
 		Tools:           opts.Tools,
+		Images:          opts.Images,
 		Steps:           -1,
 		Seed:            -1,
 		Temperature:     0.8,

@@ -27,6 +27,13 @@ func newLayerStateDebugger() layerStateDebugger {
 }
 
 func initializeTokenInput(m *Instance, tok int) ([]float32, error) {
+	return initializeTokenInputEmbed(m, tok, nil)
+}
+
+// initializeTokenInputEmbed is initializeTokenInput with an optional input
+// embedding override (emb != nil replaces the token embedding row; used for
+// multimodal image tokens). The override must be exactly one hidden vector.
+func initializeTokenInputEmbed(m *Instance, tok int, emb []float32) ([]float32, error) {
 	if tok < 0 || tok >= m.Config.Config.VocabSize {
 		return nil, fmt.Errorf("token id out of range: %d", tok)
 	}
@@ -35,7 +42,14 @@ func initializeTokenInput(m *Instance, tok int) ([]float32, error) {
 	}
 
 	x := m.Scratch.X
-	m.Embeddings.RowTo(x, tok)
+	if emb != nil {
+		if len(emb) != len(x) {
+			return nil, fmt.Errorf("embedding override length %d, want %d", len(emb), len(x))
+		}
+		copy(x, emb)
+	} else {
+		m.Embeddings.RowTo(x, tok)
+	}
 	if scale := m.Config.Config.EmbeddingMultiplier; scale != 0 && scale != 1 {
 		s := float32(scale)
 		for i := range x {
@@ -51,7 +65,11 @@ func initializeTokenInput(m *Instance, tok int) ([]float32, error) {
 }
 
 func prepareTokenRuntimeState(m *Instance, tok int) (*tokenRuntimeState, func(), error) {
-	x, err := initializeTokenInput(m, tok)
+	return prepareTokenRuntimeStateEmbed(m, tok, nil)
+}
+
+func prepareTokenRuntimeStateEmbed(m *Instance, tok int, emb []float32) (*tokenRuntimeState, func(), error) {
+	x, err := initializeTokenInputEmbed(m, tok, emb)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -47,6 +47,9 @@ Readers must reject unsupported major versions and may ignore unknown minor vers
 - 0x0103: tokenizer_config.json
 - 0x0104: vocab.json
 - 0x0105: merges.txt
+- 0x0106: processor_config.json (optional; multimodal models only — image/video
+  preprocessing parameters. Absent for text-only models; readers MUST tolerate
+  its absence)
 
 ## Header Flags
 

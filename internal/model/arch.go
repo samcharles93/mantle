@@ -108,6 +108,39 @@ type HFConfig struct {
 	NumExpertsPerTok  int `json:"num_experts_per_tok"`
 	MoENumExperts     int `json:"moe_num_experts"`
 	MoENumExpertsUsed int `json:"moe_num_experts_used"`
+
+	// Multimodal (vision-language) fields, e.g. LFM3-VL. The text decoder's
+	// parameters live under text_config and are merged into the fields above.
+	VisionConfig          *VisionHFConfig `json:"vision_config"`
+	ImageTokenID          int             `json:"image_token_id"`
+	VideoTokenID          int             `json:"video_token_id"`
+	VisionStartTokenID    int             `json:"vision_start_token_id"`
+	VisionEndTokenID      int             `json:"vision_end_token_id"`
+	DownsampleFactor      int             `json:"downsample_factor"`
+	ProjectorHiddenSize   int             `json:"projector_hidden_size"`
+	ProjectorHiddenAct    string          `json:"projector_hidden_act"`
+	ProjectorLayerNormEps float64         `json:"projector_layer_norm_eps"`
+	ProjectorBias         bool            `json:"projector_bias"`
+}
+
+// VisionHFConfig is the vision encoder half of a multimodal config (e.g.
+// LFM3-VL's vision_config). LFM3-VL's tower reuses the LFM3 hybrid block
+// (gated depthwise conv or bidirectional attention) over image patches.
+type VisionHFConfig struct {
+	ModelType         string      `json:"model_type"`
+	HiddenSize        int         `json:"hidden_size"`
+	InChannels        int         `json:"in_channels"`
+	PatchSize         int         `json:"patch_size"`
+	ConvKernelSize    int         `json:"conv_kernel_size"`
+	IntermediateSize  int         `json:"intermediate_size"`
+	NumHiddenLayers   int         `json:"num_hidden_layers"`
+	NumAttentionHeads int         `json:"num_attention_heads"`
+	NumKeyValueHeads  int         `json:"num_key_value_heads"`
+	LayerTypes        []string    `json:"layer_types"`
+	NormEps           float64     `json:"norm_eps"`
+	SpatialMergeSize  int         `json:"spatial_merge_size"`
+	TemporalPatchSize int         `json:"temporal_patch_size"`
+	RopeParameters    *ropeParams `json:"rope_parameters"`
 }
 
 type SlidingWindowPatternConfig struct {
@@ -719,6 +752,9 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 		return nil, fmt.Errorf("DSpark draft models require a speculative runtime")
 	case hasArch("falcon_h1"):
 		return falconH1Spec(), nil
+	case hasArch("lfm3_vl"), hasArch("lfm3vl"):
+		// must precede the plain lfm3 case: "lfm3vl..." contains "lfm3"
+		return lfm3VlSpec(), nil
 	case hasArch("lfm3"):
 		return lfm3Spec(), nil
 	case hasArch("lfm"):

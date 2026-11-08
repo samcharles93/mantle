@@ -67,6 +67,7 @@ func packCmd() *cli.Command {
 			&cli.StringFlag{Name: "generation-config-json", Usage: "Override generation_config.json path"},
 			&cli.StringFlag{Name: "tokenizer-json", Usage: "Override tokenizer.json path"},
 			&cli.StringFlag{Name: "tokenizer-config-json", Usage: "Override tokenizer_config.json path"},
+			&cli.StringFlag{Name: "processor-config-json", Usage: "Override processor_config.json path (multimodal models)"},
 			&cli.StringFlag{Name: "vocab-json", Usage: "Override vocab.json path"},
 			&cli.StringFlag{Name: "merges-txt", Usage: "Override merges.txt path"},
 		},
@@ -106,6 +107,7 @@ func packCmd() *cli.Command {
 				GenerationConfigJSONPath: cmd.String("generation-config-json"),
 				TokenizerJSONPath:        cmd.String("tokenizer-json"),
 				TokenizerConfigJSONPath:  cmd.String("tokenizer-config-json"),
+				ProcessorConfigJSONPath:  cmd.String("processor-config-json"),
 				VocabJSONPath:            cmd.String("vocab-json"),
 				MergesTXTPath:            cmd.String("merges-txt"),
 			}

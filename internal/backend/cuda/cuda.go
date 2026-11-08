@@ -221,6 +221,61 @@ func (r *cudaRuntime) PrefillTokens(tokens []int) ([]float32, error) {
 	return nil, fmt.Errorf("unreachable prefill state")
 }
 
+// PrefillTokensEmbeds is PrefillTokens with per-position input embedding
+// overrides; it runs the sequential device path (the batched path lives on
+// GraphRuntime.PrefillTokensEmbeds).
+func (r *cudaRuntime) PrefillTokensEmbeds(tokens []int, embeds [][]float32) ([]float32, error) {
+	if r.model == nil {
+		return nil, fmt.Errorf("cuda runtime is closed")
+	}
+	if pe, ok := r.model.(interface {
+		PrefillTokensEmbeds(tokens []int, embeds [][]float32) ([]float32, error)
+	}); ok {
+		return pe.PrefillTokensEmbeds(tokens, embeds)
+	}
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("no tokens to prefill")
+	}
+	for i, id := range tokens {
+		var (
+			logits []float32
+			err    error
+		)
+		if embeds != nil && i < len(embeds) && embeds[i] != nil {
+			if fe, ok := r.model.(interface {
+				ForwardTokenEmbed(id int, emb []float32) ([]float32, error)
+			}); ok {
+				logits, err = fe.ForwardTokenEmbed(id, embeds[i])
+			} else {
+				return nil, fmt.Errorf("cuda runtime model does not support embedding overrides")
+			}
+		} else if i == len(tokens)-1 {
+			logits, err = r.ForwardToken(id)
+		} else {
+			_, err = r.ForwardTokenGreedy(id)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if i == len(tokens)-1 {
+			return logits, nil
+		}
+	}
+	return nil, fmt.Errorf("unreachable prefill state")
+}
+
+// VisionEncoder implements core.VisionEncoderProvider by delegating to the
+// wrapped model runtime when it carries a vision tower.
+func (r *cudaRuntime) VisionEncoder() core.VisionEncoder {
+	if r.model == nil {
+		return nil
+	}
+	if p, ok := r.model.(core.VisionEncoderProvider); ok {
+		return p.VisionEncoder()
+	}
+	return nil
+}
+
 func (r *cudaRuntime) Reset() {
 	if r.model == nil {
 		return

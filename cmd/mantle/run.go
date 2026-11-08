@@ -42,6 +42,7 @@ func runCmd() *cli.Command {
 		messagesJSON string
 		toolsJSON    string
 		hfConfigFile string
+		imagePaths   []string
 
 		// Streaming options
 		streamMode string
@@ -91,6 +92,12 @@ func runCmd() *cli.Command {
 			Category:    "Generation",
 			Usage:       "path to JSON tools definition (array or {\"tools\": [...]})",
 			Destination: &toolsJSON,
+		},
+		&cli.StringSliceFlag{
+			Name:        "image",
+			Category:    "Generation",
+			Usage:       "path to an image file (PNG/JPEG) to attach to the prompt; repeatable (vision models only)",
+			Destination: &imagePaths,
 		},
 		&cli.Int64Flag{
 			Name:        "steps",
@@ -660,6 +667,17 @@ func runCmd() *cli.Command {
 				msgs  []tokenizer.Message
 				tools []any
 			)
+			var images [][]byte
+			for _, p := range imagePaths {
+				b, err := os.ReadFile(p)
+				if err != nil {
+					return cli.Exit(fmt.Sprintf("error: read image %s: %v", p, err), 1)
+				}
+				images = append(images, b)
+			}
+			if len(images) > 0 {
+				log.Info("attached images", "count", len(images))
+			}
 			if toolsJSON != "" {
 				if !fileExists(toolsJSON) {
 					return cli.Exit(fmt.Sprintf("error: tools json not found: %s", toolsJSON), 1)
@@ -690,7 +708,7 @@ func runCmd() *cli.Command {
 					msgs = append(msgs, tokenizer.Message{Role: "system", Content: system})
 				}
 				if prompt != "" {
-					msgs = append(msgs, tokenizer.Message{Role: "user", Content: prompt})
+					msgs = append(msgs, tokenizer.Message{Role: "user", Content: userContentWithImages(prompt, images)})
 				} else {
 					interactive = true
 					log.Info("interactive mode enabled", "hint", "type /help for commands, /exit to quit")
@@ -835,6 +853,9 @@ func runCmd() *cli.Command {
 				opts := baseOpts
 				opts.Messages = msgs
 				opts.Tools = tools
+				if len(images) > 0 {
+					opts.Images = images
+				}
 				opts.EchoPrompt = &echoPromptVal
 				req := inference.ResolveRequest(opts, genDefaults)
 
@@ -936,4 +957,19 @@ func joinInts(ids []int) string {
 	}
 	b.WriteByte(']')
 	return b.String()
+}
+
+// userContentWithImages builds a multimodal user message content: one image
+// block per attached image followed by the text block, which the chat
+// template renders as <|vision_start|><|image|><|vision_end|> markers.
+func userContentWithImages(prompt string, images [][]byte) any {
+	if len(images) == 0 {
+		return prompt
+	}
+	blocks := make([]any, 0, len(images)+1)
+	for range images {
+		blocks = append(blocks, map[string]any{"type": "image"})
+	}
+	blocks = append(blocks, map[string]any{"type": "text", "text": prompt})
+	return blocks
 }

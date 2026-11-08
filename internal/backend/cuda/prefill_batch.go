@@ -72,6 +72,29 @@ func (gr *GraphRuntime) PrefillTokens(tokens []int) ([]float32, error) {
 	return plan.run()
 }
 
+// PrefillTokensEmbeds is PrefillTokens with optional per-position input
+// embedding overrides (multimodal image tokens). The batched device path
+// applies the overrides during its host embedding gather, so they ride the
+// same single H2D upload as the token embeddings.
+func (gr *GraphRuntime) PrefillTokensEmbeds(tokens []int, embeds [][]float32) ([]float32, error) {
+	if gr == nil || gr.cudaRuntime == nil {
+		return nil, fmt.Errorf("cuda runtime is closed")
+	}
+	if embeds == nil {
+		return gr.PrefillTokens(tokens)
+	}
+	if !batchedPrefillEnabled() || gr.inst == nil || gr.ops == nil ||
+		gr.cudaRuntime.model == nil || !gr.batchedPrefillEligible(tokens) {
+		return gr.cudaRuntime.PrefillTokensEmbeds(tokens, embeds)
+	}
+	plan, err := gr.newBatchedPrefillPlanEmbeds(tokens, embeds)
+	if err != nil || plan == nil {
+		return gr.cudaRuntime.PrefillTokensEmbeds(tokens, embeds)
+	}
+	defer plan.free()
+	return plan.run()
+}
+
 // batchedPrefillEligible is the conservative pre-flight gate. It returns false
 // unless every layer is a plain dense transformer block whose device kernels
 // the batched path can reproduce. It never mutates any state.
@@ -473,6 +496,12 @@ type batchedPrefillPlan struct {
 	o    *Ops
 	inst *instance.Instance
 
+	// embeds, when non-nil, is parallel to the plan's tokens and overrides the
+	// input embedding of positions with a non-nil entry (multimodal image
+	// tokens). Applied during the host embedding gather, so the single H2D
+	// upload covers the overrides too.
+	embeds [][]float32
+
 	n        int
 	startPos int
 	hidden   int
@@ -549,6 +578,13 @@ func allocF32Elems(elems int) (native.DeviceBuffer, error) {
 // before the compute phase. Nothing here writes to the KV cache, so returning
 // an error is always safe to fall back from.
 func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan, error) {
+	return gr.newBatchedPrefillPlanEmbeds(tokens, nil)
+}
+
+func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]float32) (*batchedPrefillPlan, error) {
+	if embeds != nil && len(embeds) != len(tokens) {
+		return nil, fmt.Errorf("cuda batched prefill: embeds length %d != tokens %d", len(embeds), len(tokens))
+	}
 	o := gr.ops
 	m := gr.inst
 
@@ -569,6 +605,7 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 		gr:       gr,
 		o:        o,
 		inst:     m,
+		embeds:   embeds,
 		n:        len(tokens),
 		startPos: m.Pos,
 		hidden:   hidden,
@@ -598,7 +635,14 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 	}
 	for i, tok := range tokens {
 		row := p.hostEmbed[i*hidden : (i+1)*hidden]
-		m.Embeddings.RowTo(row, tok)
+		if p.embeds != nil && p.embeds[i] != nil {
+			if len(p.embeds[i]) != hidden {
+				return fail(fmt.Errorf("cuda batched prefill: embedding override length %d, want %d", len(p.embeds[i]), hidden))
+			}
+			copy(row, p.embeds[i])
+		} else {
+			m.Embeddings.RowTo(row, tok)
+		}
 		if embScale != 0 {
 			for j := range row {
 				row[j] *= embScale

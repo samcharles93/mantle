@@ -1,10 +1,13 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -328,6 +331,9 @@ func chatMessagesToTokenizerMessages(msgs []ChatMessage) ([]tokenizer.Message, e
 func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message, defaults inference.GenDefaults) inference.Request {
 	var opts inference.RequestOptions
 	opts.Messages = msgs
+	if images, err := extractMessageImages(msgs); err == nil && len(images) > 0 {
+		opts.Images = images
+	}
 	opts.NoTemplate = new(bool)
 	*opts.NoTemplate = false
 	opts.EchoPrompt = new(bool)
@@ -369,4 +375,72 @@ func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message
 	}
 
 	return inference.ResolveRequest(opts, defaults)
+}
+
+// extractMessageImages collects the raw bytes of every image content block in
+// the messages, in order. Supported sources: data: URLs (base64), local file
+// paths, and http(s) URLs.
+func extractMessageImages(msgs []tokenizer.Message) ([][]byte, error) {
+	var out [][]byte
+	for _, m := range msgs {
+		blocks, ok := m.Content.([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range blocks {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			typ, _ := block["type"].(string)
+			if typ != "image" && typ != "input_image" && typ != "image_url" {
+				continue
+			}
+			raw, err := loadImageBlock(block)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, raw)
+		}
+	}
+	return out, nil
+}
+
+func loadImageBlock(block map[string]any) ([]byte, error) {
+	var ref string
+	if u, ok := block["image_url"].(string); ok {
+		ref = u
+	} else if m, ok := block["image_url"].(map[string]any); ok {
+		ref, _ = m["url"].(string)
+	} else if u, ok := block["image"].(string); ok {
+		ref = u
+	}
+	if ref == "" {
+		return nil, fmt.Errorf("image block has no image_url")
+	}
+	return loadImageRef(ref)
+}
+
+func loadImageRef(ref string) ([]byte, error) {
+	if strings.HasPrefix(ref, "data:") {
+		if i := strings.Index(ref, ","); i >= 0 {
+			if strings.Contains(ref[:i], ";base64") {
+				return base64.StdEncoding.DecodeString(ref[i+1:])
+			}
+			return []byte(ref[i+1:]), nil
+		}
+		return nil, fmt.Errorf("malformed data URL")
+	}
+	if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
+		resp, err := http.Get(ref)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("fetch image: %s", resp.Status)
+		}
+		return io.ReadAll(resp.Body)
+	}
+	return os.ReadFile(ref)
 }

@@ -130,6 +130,18 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		return nil, err
 	}
 
+	// Multimodal: expand image placeholder tokens and attach the projected
+	// vision embeddings for the prefill.
+	var embeds [][]float32
+	if len(req.Images) > 0 || visionConfigOf(e) != nil {
+		expanded, emb, err := prepareMultimodal(e, req, ids)
+		if err != nil {
+			return nil, err
+		}
+		ids = expanded
+		embeds = emb
+	}
+
 	cfg := logits.SamplerConfig{
 		Seed:          req.Seed,
 		Temperature:   float32(req.Temperature),
@@ -158,6 +170,9 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 	}
 
 	gen := e.generator
+	if embeds != nil {
+		gen.Embeds = embeds
+	}
 	processor := newStreamProcessor(req.ReasoningFormat, req.ReasoningBudget)
 	emitChunks := func(chunks []StreamChunk) {
 		if stream == nil {
@@ -206,8 +221,8 @@ func (e *EngineImpl) ResetContext() {
 func (e *EngineImpl) Capabilities() EngineCapabilities {
 	caps := EngineCapabilities{
 		Arch:           e.arch,
-		SupportsVision: false,
 		SupportsTools:  len(e.stopTokens) > 0,
+		SupportsVision: visionConfigOf(e) != nil,
 	}
 	if rt, ok := e.model.(interface{ ModelConfig() *core.ModelConfig }); ok {
 		if mc := rt.ModelConfig(); mc != nil {

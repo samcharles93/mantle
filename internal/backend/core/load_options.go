@@ -23,4 +23,8 @@ type LoadModelOptions struct {
 	// container carries neither. Both must be [vocab, hidden].
 	SharedEmbeddings *Mat
 	SharedOutput     *Mat
+
+	// ProcessorConfigJSON optionally carries the packed processor_config.json
+	// section bytes for multimodal models (image preprocessing parameters).
+	ProcessorConfigJSON []byte
 }

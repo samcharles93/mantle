@@ -61,6 +61,7 @@ type PackOptions struct {
 	GenerationConfigJSONPath string
 	TokenizerJSONPath        string
 	TokenizerConfigJSONPath  string
+	ProcessorConfigJSONPath  string
 	VocabJSONPath            string
 	MergesTXTPath            string
 }
@@ -133,6 +134,9 @@ func Pack(opts PackOptions) error {
 		if opts.MergesTXTPath == "" {
 			opts.MergesTXTPath = filepath.Join(opts.InputDir, "merges.txt")
 		}
+		if opts.ProcessorConfigJSONPath == "" {
+			opts.ProcessorConfigJSONPath = filepath.Join(opts.InputDir, "processor_config.json")
+		}
 
 		if err := writeOptionalFileSection(w, SectionHFConfigJSON, resourceSectionVersion, opts.ConfigJSONPath); err != nil {
 			return err
@@ -157,6 +161,9 @@ func Pack(opts PackOptions) error {
 			}
 		}
 		if err := writeOptionalFileSection(w, SectionMergesTXT, resourceSectionVersion, opts.MergesTXTPath); err != nil {
+			return err
+		}
+		if err := writeOptionalFileSection(w, SectionProcessorConfigJSON, resourceSectionVersion, opts.ProcessorConfigJSONPath); err != nil {
 			return err
 		}
 	}

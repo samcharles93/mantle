@@ -29,6 +29,12 @@ type prefillForwarder interface {
 	PrefillTokens(tokens []int) ([]float32, error)
 }
 
+// prefillEmbedForwarder is the prefill path with per-position input embedding
+// overrides (multimodal image tokens).
+type prefillEmbedForwarder interface {
+	PrefillTokensEmbeds(tokens []int, embeds [][]float32) ([]float32, error)
+}
+
 // graphRunner is the subset of the SIMD Instance needed for graph-based token
 // processing. Backends that support graph execution implement this interface.
 type graphRunner interface {
@@ -44,6 +50,12 @@ type Generator struct {
 	}
 	ContextTokens []int
 	StopTokens    []int
+
+	// Embeds, when non-nil, is parallel to the token slice passed to the next
+	// RunWithContext call and overrides the input embedding of positions with
+	// a non-nil entry (vision embeddings at image-token positions). Consumed
+	// (and cleared) by that call.
+	Embeds [][]float32
 
 	// Graph-based execution path (experimental, activated via --use-graph).
 	useGraph    bool
@@ -98,6 +110,24 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 
 	newInTokens := allTokens[len(g.ContextTokens):]
 
+	// Slice the pending embedding overrides to the tokens actually being
+	// prefilled, then hand them to the embed-aware prefill path.
+	newEmbeds := g.Embeds
+	if newEmbeds != nil {
+		if len(newEmbeds) != len(allTokens) {
+			return nil, stats, fmt.Errorf("embeds length %d != tokens %d", len(newEmbeds), len(allTokens))
+		}
+		newEmbeds = newEmbeds[len(g.ContextTokens):]
+	}
+	g.Embeds = nil
+	hasEmbeds := false
+	for _, e := range newEmbeds {
+		if e != nil {
+			hasEmbeds = true
+			break
+		}
+	}
+
 	var logitsVec []float32
 	var err error
 	promptStart := time.Now()
@@ -133,7 +163,26 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 	}
 
 	if len(newInTokens) > 1 {
-		if pf, ok := g.Model.(prefillForwarder); ok {
+		if hasEmbeds {
+			if pef, ok := g.Model.(prefillEmbedForwarder); ok {
+				prefillLogits, prefillErr := pef.PrefillTokensEmbeds(newInTokens, newEmbeds)
+				if prefillErr == nil && len(prefillLogits) > 0 {
+					logitsVec = prefillLogits
+					g.ContextTokens = append(g.ContextTokens, newInTokens...)
+					stats.PromptTokens = len(newInTokens)
+					stats.PromptDuration = time.Since(promptStart)
+					if stats.PromptDuration.Seconds() > 0 && stats.PromptTokens > 0 {
+						stats.PromptTPS = float64(stats.PromptTokens) / stats.PromptDuration.Seconds()
+					}
+					goto afterPrompt
+				}
+				if prefillErr != nil {
+					log := logger.FromContext(ctx)
+					log.Debug("embed prefill fast path unavailable, falling back to token-by-token", "error", prefillErr)
+				}
+			}
+		}
+		if pf, ok := g.Model.(prefillForwarder); ok && !hasEmbeds {
 			prefillLogits, prefillErr := safePrefillTokens(pf, newInTokens)
 			if prefillErr == nil && len(prefillLogits) > 0 {
 				logitsVec = prefillLogits
@@ -150,7 +199,7 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 				log.Debug("prefill fast path unavailable, falling back to token-by-token", "error", prefillErr)
 			}
 		}
-		if bf, ok := g.Model.(batchForwarder); ok {
+		if bf, ok := g.Model.(batchForwarder); ok && !hasEmbeds {
 			allLogits, batchErr := bf.ForwardTokens(newInTokens)
 			if batchErr == nil && len(allLogits) > 0 {
 				// Use logits from the last token position
@@ -172,8 +221,18 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 	}
 
 	// Process tokens one at a time (fallback or single token)
-	for _, id := range newInTokens {
-		logitsVec, err = safeForwardToken(g.Model, id)
+	for i, id := range newInTokens {
+		if hasEmbeds && newEmbeds[i] != nil {
+			if fe, ok := g.Model.(interface {
+				ForwardTokenEmbed(id int, emb []float32) ([]float32, error)
+			}); ok {
+				logitsVec, err = fe.ForwardTokenEmbed(id, newEmbeds[i])
+			} else {
+				return nil, stats, fmt.Errorf("model does not support embedding overrides")
+			}
+		} else {
+			logitsVec, err = safeForwardToken(g.Model, id)
+		}
 		if err != nil {
 			return nil, stats, err
 		}

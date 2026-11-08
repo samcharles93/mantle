@@ -19,6 +19,10 @@ const (
 	SectionTokenizerConfigJSON    SectionType = 0x0103
 	SectionVocabJSON              SectionType = 0x0104
 	SectionMergesTXT              SectionType = 0x0105
+	// SectionProcessorConfigJSON optionally embeds a multimodal model's
+	// processor_config.json (image/video preprocessing parameters). Absent for
+	// text-only models; readers must tolerate its absence.
+	SectionProcessorConfigJSON SectionType = 0x0106
 )
 
 type MCFSection struct {

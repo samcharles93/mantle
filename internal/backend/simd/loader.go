@@ -60,6 +60,7 @@ func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int, opt
 	if err != nil {
 		return nil, err
 	}
+	opts.ProcessorConfigJSON = mcfFile.SectionData(mcf.SectionProcessorConfigJSON)
 	return loadModelFromSource(cfg, spec, mcfSource{mf: mcfFile}, maxContext, opts)
 }
 
@@ -746,6 +747,25 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	}
 	updateInstanceRoPE(m)
 	adjustGemmaNorms(m, cfg)
+
+	// Multimodal models carry a vision tower + projector alongside the text
+	// decoder; load them when the config declares a vision_config.
+	if cfg.VisionConfig != nil {
+		proc, err := model.LoadProcessorConfigBytes(opts.ProcessorConfigJSON)
+		if err != nil {
+			return nil, err
+		}
+		vc, err := visionConfigFromHFConfig(cfg, proc)
+		if err != nil {
+			return nil, err
+		}
+		tower, err := loadVisionTower(src, cfg, vc)
+		if err != nil {
+			return nil, fmt.Errorf("vision tower: %w", err)
+		}
+		m.Vision = tower
+		modelCfg.Vision = vc
+	}
 	return m, nil
 }
 

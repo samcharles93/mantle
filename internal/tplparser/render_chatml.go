@@ -69,17 +69,48 @@ func renderChatML(opts RenderOptions) (string, bool, error) {
 		content := m.Content
 		if s, ok := content.(string); ok {
 			content = s
-		} else {
+		}
+
+		text := ""
+		switch c := content.(type) {
+		case string:
+			text = c
+		case []any:
+			// multimodal content blocks: image/video placeholders become the
+			// LFM3-VL markers; text blocks inline; anything else is tojson'd
+			for _, item := range c {
+				block, ok := item.(map[string]any)
+				if !ok {
+					j, err := jsonString(item)
+					if err != nil {
+						return "", false, fmt.Errorf("chatml: content block tojson: %w", err)
+					}
+					text += j
+					continue
+				}
+				switch block["type"] {
+				case "image":
+					text += "<|vision_start|><|image|><|vision_end|>"
+				case "video":
+					text += "<|vision_start|><|video|><|vision_end|>"
+				case "text":
+					if t, ok := block["text"].(string); ok {
+						text += t
+					}
+				default:
+					j, err := jsonString(block)
+					if err != nil {
+						return "", false, fmt.Errorf("chatml: content block tojson: %w", err)
+					}
+					text += j
+				}
+			}
+		default:
 			j, err := jsonString(content)
 			if err != nil {
 				return "", false, fmt.Errorf("chatml: content tojson: %w", err)
 			}
-			content = j
-		}
-
-		text := ""
-		if s, ok := content.(string); ok {
-			text = s
+			text = j
 		}
 		if m.Role == "assistant" && i != lastAssistant {
 			if cut := strings.LastIndex(text, "</think>"); cut >= 0 {
@@ -92,7 +123,17 @@ func renderChatML(opts RenderOptions) (string, bool, error) {
 
 	if opts.AddGenerationPrompt {
 		b.WriteString("<|im_start|>assistant\n")
-		writeDisabledThinking(&b, opts)
+		if strings.Contains(opts.Template, "enable_thinking") {
+			// templates with an enable_thinking switch emit the think open tag
+			// (or the empty block) right after the assistant header
+			if opts.DisableThinking {
+				b.WriteString("<think></think>")
+			} else {
+				b.WriteString("<think>")
+			}
+		} else {
+			writeDisabledThinking(&b, opts)
+		}
 	}
 	return b.String(), true, nil
 }

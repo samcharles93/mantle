@@ -51,7 +51,21 @@ func (m *Instance) ForwardToken(tok int) ([]float32, error) {
 		return nil, err
 	}
 	defer cleanup()
+	return m.forwardTokenState(rt)
+}
 
+// ForwardTokenEmbed is ForwardToken with an input embedding override for this
+// position (multimodal image tokens).
+func (m *Instance) ForwardTokenEmbed(tok int, emb []float32) ([]float32, error) {
+	rt, cleanup, err := prepareTokenRuntimeStateEmbed(m, tok, emb)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	return m.forwardTokenState(rt)
+}
+
+func (m *Instance) forwardTokenState(rt *tokenRuntimeState) ([]float32, error) {
 	x := rt.x
 	ops := rt.ops
 	ds := rt.ds

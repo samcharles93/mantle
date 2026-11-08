@@ -41,6 +41,12 @@ type Request struct {
 	Messages []tokenizer.Message
 	Tools    []any
 
+	// Images holds raw encoded image bytes (PNG/JPEG), one per image content
+	// block in the messages, in order. Only valid for models with a vision
+	// tower (Capabilities.SupportsVision); the engine expands each image
+	// placeholder token into the projected vision embeddings.
+	Images [][]byte
+
 	Steps int
 	Seed  int64
 

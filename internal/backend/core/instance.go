@@ -39,6 +39,10 @@ type Instance struct {
 	// HiddenTaps for the buffer contract.
 	HiddenTaps HiddenTaps
 
+	// Vision is the vision encoder of a multimodal model (nil for text-only
+	// models). It runs on the host even when the decoder runs on a device.
+	Vision VisionEncoder
+
 	attnPoolOnce sync.Once
 	attnPool     *AttnPool
 

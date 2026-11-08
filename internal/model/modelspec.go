@@ -1,6 +1,9 @@
 package model
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Mistral Models
 func mistralSpec() *ArchSpec {
@@ -520,6 +523,85 @@ func lfm3Spec() *ArchSpec {
 		return []string{fmt.Sprintf("model.layers.%d.post_ffn_norm.weight", layer)}
 	}
 	return spec
+}
+
+// LiquidAI LFM3-VL: the LFM3 text decoder nested under model.language_model,
+// plus a vision tower (model.vision_tower.*) and multimodal projector
+// (model.multi_modal_projector.*) that the loader attaches separately.
+func lfm3VlSpec() *ArchSpec {
+	spec := lfm3Spec()
+	spec.Name = "lfm3_vl"
+	prefixArchNames(&spec.Names, "model.language_model.")
+	return spec
+}
+
+// prefixArchNames rewrites every tensor name of an arch to live under prefix
+// (e.g. "model.language_model.") instead of the top-level "model.".
+func prefixArchNames(n *ArchNames, prefix string) {
+	rewrite := func(s string) string { return strings.Replace(s, "model.", prefix, 1) }
+	str1 := func(f func(int) string) func(int) string {
+		if f == nil {
+			return nil
+		}
+		return func(i int) string { return rewrite(f(i)) }
+	}
+	strs1 := func(f func(int) []string) func(int) []string {
+		if f == nil {
+			return nil
+		}
+		return func(i int) []string {
+			out := f(i)
+			for j := range out {
+				out[j] = rewrite(out[j])
+			}
+			return out
+		}
+	}
+	n.Embedding = rewrite(n.Embedding)
+	n.OutputNorm = rewrite(n.OutputNorm)
+	if n.OutputCandidates != nil {
+		oc := n.OutputCandidates
+		n.OutputCandidates = func() []string {
+			out := oc()
+			for j := range out {
+				out[j] = rewrite(out[j])
+			}
+			return out
+		}
+	}
+	n.AttnNorm = str1(n.AttnNorm)
+	n.FfnNorm = str1(n.FfnNorm)
+	n.AttnNormCandidates = strs1(n.AttnNormCandidates)
+	n.FfnNormCandidates = strs1(n.FfnNormCandidates)
+	n.PostAttnNormCandidates = strs1(n.PostAttnNormCandidates)
+	n.PostFfnNormCandidates = strs1(n.PostFfnNormCandidates)
+	n.QNormCandidates = strs1(n.QNormCandidates)
+	n.KNormCandidates = strs1(n.KNormCandidates)
+	n.Wq, n.Wk, n.Wv, n.Wo, n.AttnGate = str1(n.Wq), str1(n.Wk), str1(n.Wv), str1(n.Wo), str1(n.AttnGate)
+	n.WqBias, n.WkBias, n.WvBias = str1(n.WqBias), str1(n.WkBias), str1(n.WvBias)
+	n.FfnUp, n.FfnGate, n.FfnDown, n.FfnGateUp = str1(n.FfnUp), str1(n.FfnGate), str1(n.FfnDown), str1(n.FfnGateUp)
+	n.ShortConvKernel, n.ShortConvInProj, n.ShortConvOutProj = str1(n.ShortConvKernel), str1(n.ShortConvInProj), str1(n.ShortConvOutProj)
+	n.PerLayerInputGate = str1(n.PerLayerInputGate)
+	n.PerLayerInputProj = str1(n.PerLayerInputProj)
+	n.PostPerLayerInputNorm = str1(n.PostPerLayerInputNorm)
+	n.LayerScalar = str1(n.LayerScalar)
+	n.AltUpProjection = str1(n.AltUpProjection)
+	n.AltUpUnembedProjection = str1(n.AltUpUnembedProjection)
+	n.AltUpCorrectOutputScale = str1(n.AltUpCorrectOutputScale)
+	n.AltUpCorrectionCoefs = str1(n.AltUpCorrectionCoefs)
+	n.AltUpPredictionCoefs = str1(n.AltUpPredictionCoefs)
+	n.AltUpModalityRouter = str1(n.AltUpModalityRouter)
+	n.AltUpRouterNorm = str1(n.AltUpRouterNorm)
+	n.LaurelLeft, n.LaurelRight, n.LaurelPostNorm = str1(n.LaurelLeft), str1(n.LaurelRight), str1(n.LaurelPostNorm)
+	n.MoERouter, n.MoEExpertBias = str1(n.MoERouter), str1(n.MoEExpertBias)
+	n.MoESharedUp, n.MoESharedGate, n.MoESharedDown = str1(n.MoESharedUp), str1(n.MoESharedGate), str1(n.MoESharedDown)
+	n.DeltaQKVProj, n.DeltaAProj, n.DeltaBProj, n.DeltaZProj, n.DeltaOutProj = str1(n.DeltaQKVProj), str1(n.DeltaAProj), str1(n.DeltaBProj), str1(n.DeltaZProj), str1(n.DeltaOutProj)
+	n.DeltaConv, n.DeltaNorm, n.DeltaALog, n.DeltaDTBias = str1(n.DeltaConv), str1(n.DeltaNorm), str1(n.DeltaALog), str1(n.DeltaDTBias)
+	n.MambaInProj, n.MambaOutProj, n.MambaConv, n.MambaNorm = str1(n.MambaInProj), str1(n.MambaOutProj), str1(n.MambaConv), str1(n.MambaNorm)
+	n.MambaConvBias, n.MambaALog, n.MambaD, n.MambaDTBias = str1(n.MambaConvBias), str1(n.MambaALog), str1(n.MambaD), str1(n.MambaDTBias)
+	n.PerLayerEmbedding = rewrite(n.PerLayerEmbedding)
+	n.PerLayerModelProjection = rewrite(n.PerLayerModelProjection)
+	n.PerLayerProjectionNorm = rewrite(n.PerLayerProjectionNorm)
 }
 
 // IBM GraniteMoeHybrid (e.g. granite-4.0-350M): attention layers with a

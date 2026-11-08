@@ -1,4 +1,4 @@
-# Mantle status (2026-11-07)
+# Mantle status (2026-11-09)
 
 Go 1.27.2 with `GOEXPERIMENT=simd`. `go test ./...`, the CUDA-tagged backend tests and `golangci-lint run` all pass.
 
@@ -37,6 +37,27 @@ MCF's per-tensor DType (needs `quantize --assignments` + budget verification + Q
 SLQ non-uniform codebooks need a new `DTypeUQ*` family (0x0040 range) under a v1.1 minor bump, with
 CPU LUT kernels (pshufb/vpermb/gather) and CUDA dequant-first. Proposal only — no spec change yet.
 
+## LFM3-VL-2B multimodal (2026-11-09)
+
+`LiquidAI/LFM3-VL-2B` packs and runs end to end (text + image). New `lfm3_vl` arch (LFM3 text decoder
+under `model.language_model.*`), a host-side vision tower (`VisionTower`: patchifier, embedding norm,
+14 hybrid gated-conv/bidirectional-attention layers with axial 2D RoPE and per-frame segments,
+multimodal projector) loaded from `model.vision_tower.*` / `model.multi_modal_projector.*`, and a
+new optional MCF section 0x0106 carrying `processor_config.json` (image preprocessing params).
+`mantle pack`/`quantize` work unchanged (all 424 tensors pack generically; q8 VL verified). Image
+input: `mantle run --image file.png ...` (repeatable) and OpenAI-style `input_image` content blocks
+(data URL / file path / http URL) in `serve`. The engine expands each `<|image|>` placeholder into
+one token per projected vision token and splices the embeddings via `PrefillTokensEmbeds`
+(SIMD batch path + CUDA batched plan both support the overrides; per-token `ForwardTokenEmbed`
+fallback). Image preprocessing replicates HF bit-for-bit: torchvision uint8 antialias bicubic
+(fixed-point int16 weights), smart_resize, normalize, merge-block-major patchify.
+Parity vs HF transformers (testdata/lfm3vl_reference.json, `MANTLE_LFM3VL_MCF`): pixel payload exact,
+vision features ~2e-6, prompt logits ~2e-5, 8-token greedy + per-step logits match on text, 256x256 and
+resized 100x70 image prompts (CPU simd + engine; CUDA output identical). Prompt rendering matches
+HF token-for-token including the `<|think|>` generation-prompt tag. CUDA: 89-token image prompt
+prefill ~340-410 tok/s (batched path), decode ~10 tok/s on the RTX 3050 (bf16, 18/24 layers in VRAM).
+Vision tower runs on the host even under CUDA (once per image; a device path is future work).
+
 ## Open work
 
 1. DSpark (CPU first): the draft model loads (`LoadDSparkDraftMCF`), K/V is injected from the target's hidden taps, and a draft block runs with the Markov and confidence heads. The draft decoder is a regular `Instance` (standard Qwen3 layers, loaded with the target's embeddings and LM head through `LoadModelOptions.SharedEmbeddings`/`SharedOutput`), and blocks use the batch path's non-causal mode (`ForwardBlockNonCausal`). On the real pair, drafts match the target's greedy output for 5.1 of 7 tokens per block (`TestDSparkDraftAcceptance`, with `MANTLE_DSPARK_TARGET` and `MANTLE_DSPARK_DRAFT` set). Still needed: the speculative loop (batched verification, accept/reject, KV rollback, sampling at T>0), CLI wiring, then CUDA. The draft MCF was repacked with its `config.json`. Model shape comes from it; speculation on/off, draft length and confidence threshold will be CLI flags.
@@ -44,5 +65,7 @@ CPU LUT kernels (pshufb/vpermb/gather) and CUDA dequant-first. Proposal only —
 3. `mantle trace` is CPU-only, so CPU and CUDA logits can't be compared directly.
 4. Dependency bumps for existing modules (urfave/cli, echo, golang.org/x/*).
 5. Items in `TODO.md`: Gemma3 marked broken, Granite, CI, docs.
+6. LFM3-VL/Omni follow-ups: video input (temporal_patch_size > 1 frames), LFM3-Omni-2B, a device-side
+   vision tower for large images, and `DTypeUQ*` producer CLI (`quantize --method uqN`).
 
 CUDA build: `CUDA=1 task build -f`, then run with `LD_LIBRARY_PATH=/usr/local/cuda-13.2/targets/x86_64-linux/lib`.
