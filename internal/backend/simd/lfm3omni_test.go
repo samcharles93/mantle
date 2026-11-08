@@ -75,7 +75,10 @@ func readF32File(t *testing.T, path string) []float32 {
 // fixture: a text-only prompt and an audio prompt (WAV -> log-mel -> audio
 // tower -> projector -> embedding splice -> prefill), checking the reference
 // mel payload, the projected audio features, last-position top-10 logits, and
-// an 8-token greedy continuation.
+// an 8-token greedy continuation. The audio fixture clip is 3.0 s -> 299 mel
+// frames -> 38 audio tokens, deliberately > 32 so the encoder's
+// sliding_window=32 causal attention window actually truncates (tokens past
+// position 31 attend to a bounded window) in this test.
 func TestLFM3OmniReferenceLogits(t *testing.T) {
 	path := os.Getenv("MANTLE_LFM3OMNI_MCF")
 	if path == "" {
@@ -105,7 +108,7 @@ func TestLFM3OmniReferenceLogits(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadModelMCF: %v", err)
 			}
-			if tc.Name == "audio_1s" && m.Audio == nil {
+			if tc.Name == "audio_3s" && m.Audio == nil {
 				t.Fatalf("model has no audio tower loaded")
 			}
 
@@ -165,14 +168,22 @@ func TestLFM3OmniReferenceLogits(t *testing.T) {
 					if len(ref) != n {
 						t.Fatalf("feats payload %d floats, want %d", len(ref), n)
 					}
-					// Diagnostic only: f32 accumulation over the 17-layer tower
-					// plus the projector's LayerNorm can amplify small diffs at
-					// low-variance tokens; the load-bearing checks are the
-					// spliced-prefill logits and greedy below.
+					// Hard assert. Observed max diff 3.7e-4 (f32 accumulation over
+					// the 17-layer tower + downsample convs with a different
+					// summation order than torch, fed by mel inputs that differ up
+					// to 2.5e-2 at near-floor bins). 5e-3 is ~13x above that noise
+					// floor yet ~100x below the diffs structural bugs produced during
+					// bring-up (projector arg swap ~0.4-0.9, shadowed feats ~0.07+),
+					// so it still catches real regressions. VL uses 1e-4 on vision
+					// feats, but the audio tower runs 17 layers + conv stages, hence
+					// the looser bound.
+					const featTol = 5e-3
 					maxDiff := 0.0
 					for i := range n {
 						g := feats[0][i/tc.FeatsShape[1]][i%tc.FeatsShape[1]]
-						if d := math.Abs(float64(g - ref[i])); d > maxDiff {
+						if d := math.Abs(float64(g - ref[i])); d > featTol {
+							t.Fatalf("audio feature %d: got %g, reference %g (diff %g)", i, g, ref[i], d)
+						} else if d > maxDiff {
 							maxDiff = d
 						}
 					}
@@ -204,11 +215,13 @@ func TestLFM3OmniReferenceLogits(t *testing.T) {
 			}
 			// bf16 weights computed in f32 on both sides. Text-only prompts see
 			// diffs ~2e-5; audio prompts add the 17-layer tower's f32 drift to
-			// the spliced embeddings (observed logit diffs ~7e-3), so allow
-			// 1e-2 there. Greedy tokens and argmax below are exact assertions.
+			// the spliced embeddings (observed logit diffs up to ~1.2e-2 with
+			// 38 audio tokens), so allow 2e-2 there — still >1000x below the
+			// ~15-magnitude logit errors structural bugs produced. Greedy tokens
+			// and argmax below are exact assertions.
 			tol := 2e-3
 			if embeds != nil {
-				tol = 1e-2
+				tol = 2e-2
 			}
 			for k, id := range tc.TopIDs {
 				if d := math.Abs(float64(logits[id]) - tc.TopLogits[k]); d > tol {

@@ -104,7 +104,10 @@ func prepareMultimodal(e *EngineImpl, req *Request, ids []int) ([]int, [][]float
 			pixelValues = append(pixelValues, pv...)
 			grids = append(grids, g)
 		}
-		feats, err := ve.Encode(pixelValues, grids)
+		// NB: assign (not :=) — feats is the outer slice the expansion loop
+		// below reads; a := here would shadow it and leave it nil.
+		var err error
+		feats, err = ve.Encode(pixelValues, grids)
 		if err != nil {
 			return nil, nil, fmt.Errorf("vision encode: %w", err)
 		}

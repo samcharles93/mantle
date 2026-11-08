@@ -40,7 +40,7 @@ func TestLFM3OmniEngineAudioGeneration(t *testing.T) {
 	found := 0
 	for i, c := range fx.Cases {
 		switch c.Name {
-		case "audio_1s":
+		case "audio_3s":
 			audioCase, found = i, found|1
 		case "text_only":
 			textCase, found = i, found|2
@@ -119,7 +119,7 @@ func TestLFM3OmniEngineAudioGeneration(t *testing.T) {
 	})
 
 	audCase := fx.Cases[audioCase]
-	t.Run("audio_1s", func(t *testing.T) {
+	t.Run("audio_3s", func(t *testing.T) {
 		res.Engine.ResetContext()
 		run(t, RequestOptions{
 			Messages: []tokenizer.Message{{
