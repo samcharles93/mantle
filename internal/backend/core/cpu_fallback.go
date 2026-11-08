@@ -46,6 +46,10 @@ func matVecQuantCached(dst []float32, w *Mat, x []float32, qx *QuantVec) {
 		panic("quant cache is nil")
 	}
 	blocksPerRow := qc.BlocksPerRow
+	if qc.UQ {
+		matVecUQCached(dst, w, x, qc, 0, w.R)
+		return
+	}
 	useInt8 := qx != nil && len(qx.Q) >= blocksPerRow*32 && len(qx.Q16) >= blocksPerRow*32 && len(qx.Scales) >= blocksPerRow
 
 	for r := range w.R {
@@ -162,4 +166,56 @@ func FastExp(x float32) float32 {
 	scale := math.Float32frombits(exp)
 
 	return poly * scale
+}
+
+// MatVecRangeUQ computes dst[rs:re] = w[rs:re,:] * x for uq* (non-uniform
+// codebook) weights, building the codebook cache on first use.
+func MatVecRangeUQ(dst []float32, w *Mat, x []float32, rs, re int) {
+	if w.Raw == nil || !mcf.IsUQDType(w.DType) {
+		return
+	}
+	if w.Quant == nil || !w.Quant.ValidFor(w) {
+		qc, err := BuildQuantCache(w)
+		if err != nil {
+			panic(fmt.Errorf("quant matvec cache build failed: %w", err))
+		}
+		w.Quant = qc
+	}
+	matVecUQCached(dst, w, x, w.Quant, rs, re)
+}
+
+// matVecUQCached computes dst[rs:re] = w[rs:re,:]*x for uq* (non-uniform
+// codebook) weights: per block, sum x[i]*codebook[idx[i]], scaled by the
+// per-block scale.
+func matVecUQCached(dst []float32, w *Mat, x []float32, qc *QuantCache, rs, re int) {
+	blocksPerRow := qc.BlocksPerRow
+	cbElems := qc.CodebookElems
+	for r := rs; r < re; r++ {
+		blockBase := r * blocksPerRow
+		superBase := r * qc.SuperBlocksPerRow
+		rowOff := blockBase * 32
+		var sum float32
+		for b := range blocksPerRow {
+			col := b * 32
+			n := w.C - col
+			if n <= 0 {
+				break
+			}
+			if n > 32 {
+				n = 32
+			}
+			scale := qc.Scales[blockBase+b]
+			if scale == 0 {
+				continue
+			}
+			cb := qc.Codebooks[(superBase+b/8)*cbElems:]
+			off := rowOff + b*32
+			var blockSum float32
+			for i := 0; i < n; i++ {
+				blockSum += x[col+i] * cb[qc.UQIndices[off+i]]
+			}
+			sum += scale * blockSum
+		}
+		dst[r] = sum
+	}
 }

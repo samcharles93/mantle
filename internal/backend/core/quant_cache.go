@@ -19,6 +19,13 @@ type QuantLayout struct {
 	SubScaleOff   int
 	SubScaleCount int
 
+	// UQ family: codebook region (f16 levels per super-block) in addition to
+	// the block scales (ScaleOff/ScaleCount) and packed indices (DataOff).
+	CodebookOff   int
+	CodebookBytes int
+	CodebookElems int
+	SuperCount    int
+
 	DataOff   int
 	DataBytes int
 }
@@ -54,8 +61,13 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 		return nil, errors.New("quant cache: payload too large")
 	}
 
-	q := make([]int8, qLen)
 	scales := make([]float32, totalBlocks)
+
+	if layout.Family == 'u' {
+		return buildUQCache(m, layout, totalBlocks, qLen)
+	}
+
+	q := make([]int8, qLen)
 
 	if layout.Family == 'q' {
 		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
@@ -130,6 +142,15 @@ func QuantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (QuantLay
 		bits = 2
 		family = 'k'
 	default:
+		if mcf.IsUQDType(dt) {
+			ub, ok := mcf.UQBits(dt)
+			if !ok {
+				return QuantLayout{}, errors.New("unsupported quant dtype")
+			}
+			bits = ub
+			family = 'u'
+			break
+		}
 		return QuantLayout{}, errors.New("unsupported quant dtype")
 	}
 
@@ -184,6 +205,32 @@ func QuantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (QuantLay
 	if !ok {
 		return QuantLayout{}, errors.New("quant payload too large")
 	}
+	if family == 'u' {
+		ul, err := mcf.UQPayloadLayoutFor([]uint64{uint64(rows), uint64(cols)}, dt)
+		if err != nil {
+			return QuantLayout{}, err
+		}
+		if wantU64 > uint64(int(^uint(0)>>1)) {
+			return QuantLayout{}, errors.New("quant payload too large")
+		}
+		if ul.TotalBytes != wantU64 {
+			return QuantLayout{}, errors.New("quant payload size mismatch")
+		}
+		layout.Bits = ul.Bits
+		layout.BlocksPerRow = int(ul.BlocksPerRow)
+		layout.SuperBlocksPerRow = int(ul.SuperBlocksPerRow)
+		layout.SuperCount = int(ul.SuperCount)
+		layout.BlockDataBytes = int(ul.DataBytes / ul.TotalBlocks)
+		layout.CodebookOff = int(ul.CodebookOff)
+		layout.CodebookBytes = int(ul.CodebookBytes)
+		layout.CodebookElems = int(ul.CodebookElems)
+		layout.ScaleOff = int(ul.ScaleOff)
+		layout.ScaleCount = int(ul.TotalBlocks)
+		layout.DataOff = int(ul.DataOff)
+		layout.DataBytes = int(ul.DataBytes)
+		return layout, nil
+	}
+
 	superBytes, ok := MulInt(superCount, 2)
 	if !ok {
 		return QuantLayout{}, errors.New("quant payload too large")
@@ -287,4 +334,55 @@ func Align64Int(n int) (int, bool) {
 		return 0, false
 	}
 	return (n + 63) &^ 63, true
+}
+
+// buildUQCache pre-unpacks a uq* payload into unsigned indices, per-block
+// scales and per-super-block f32 codebooks.
+func buildUQCache(m *Mat, layout QuantLayout, totalBlocks, qLen int) (*QuantCache, error) {
+	scales := make([]float32, totalBlocks)
+	scaleRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
+	for b := 0; b < totalBlocks; b++ {
+		scales[b] = ScaleAtRawLE(scaleRaw, b)
+	}
+
+	cbRaw := m.Raw[layout.CodebookOff : layout.CodebookOff+layout.CodebookBytes]
+	codebooks := make([]float32, len(cbRaw)/2)
+	for i := range codebooks {
+		codebooks[i] = Float16ToFloat32(uint16(cbRaw[i*2]) | uint16(cbRaw[i*2+1])<<8)
+	}
+
+	indices := make([]uint8, qLen)
+	data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
+	var ibuf [32]uint8
+	for blockIdx := 0; blockIdx < totalBlocks; blockIdx++ {
+		dataOff := blockIdx * layout.BlockDataBytes
+		unpackBlockIndices(&ibuf, data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
+		copy(indices[blockIdx*32:blockIdx*32+32], ibuf[:])
+	}
+
+	return &QuantCache{
+		Scales:            scales,
+		BlocksPerRow:      layout.BlocksPerRow,
+		UQ:                true,
+		UQBits:            layout.Bits,
+		UQIndices:         indices,
+		Codebooks:         codebooks,
+		CodebookElems:     layout.CodebookElems,
+		SuperBlocksPerRow: layout.SuperBlocksPerRow,
+	}, nil
+}
+
+// unpackBlockIndices decodes 32 unsigned b-bit indices (LSB-first packing).
+func unpackBlockIndices(dst *[32]uint8, src []byte, bits int) {
+	bitPos := 0
+	for i := range 32 {
+		var v uint8
+		for b := 0; b < bits; b++ {
+			if (src[bitPos>>3]>>uint(bitPos&7))&1 == 1 {
+				v |= 1 << uint(b)
+			}
+			bitPos++
+		}
+		dst[i] = v
+	}
 }

@@ -142,7 +142,8 @@ func (m *Mat) RowTo(dst []float32, i int) {
 			u := U16LE(m.Raw, off+j*2)
 			dst[j] = fp16ToF32Table(u)
 		}
-	case mcf.DTypeQ8, mcf.DTypeQ4, mcf.DTypeK6, mcf.DTypeK4, mcf.DTypeK3, mcf.DTypeK2:
+	case mcf.DTypeQ8, mcf.DTypeQ4, mcf.DTypeK6, mcf.DTypeK4, mcf.DTypeK3, mcf.DTypeK2,
+		mcf.DTypeUQ2, mcf.DTypeUQ3, mcf.DTypeUQ4, mcf.DTypeUQ5, mcf.DTypeUQ6, mcf.DTypeUQ7, mcf.DTypeUQ8:
 		if err := rowToQuant(dst, m, i); err != nil {
 			panic(err)
 		}

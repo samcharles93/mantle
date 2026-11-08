@@ -73,8 +73,18 @@ These unique identifiers bind `TensorDType` (for fast dispatch) to the QuantInfo
 | 0x31 | DTypeK4 | Super | 4-bit, block 32, super 256 | Workhorse weights. |
 | 0x32 | DTypeK3 | Super | 3-bit, block 32, super 256 | Compressed weights. |
 | 0x33 | DTypeK2 | Super | 2-bit, block 32, super 256 | Extreme compression. |
+| 0x40 | DTypeUQ2 | UQ-Super (v1.1) | 2-bit indices + f16 codebook, block 32, super 256 | Non-uniform codebook weights (SLQ). |
+| 0x41 | DTypeUQ3 | UQ-Super (v1.1) | 3-bit indices + f16 codebook, block 32, super 256 | Non-uniform codebook weights. |
+| 0x42 | DTypeUQ4 | UQ-Super (v1.1) | 4-bit indices + f16 codebook, block 32, super 256 | Non-uniform codebook weights. |
+| 0x43 | DTypeUQ5 | UQ-Super (v1.1) | 5-bit indices + f16 codebook, block 32, super 256 | Non-uniform codebook weights. |
+| 0x44 | DTypeUQ6 | UQ-Super (v1.1) | 6-bit indices + f16 codebook, block 32, super 256 | Non-uniform codebook weights. |
+| 0x45 | DTypeUQ7 | UQ-Super (v1.1) | 7-bit indices + f16 codebook, block 32, super 256 | Non-uniform codebook weights. |
+| 0x46 | DTypeUQ8 | UQ-Super (v1.1) | 8-bit indices + f16 codebook, block 32, super 256 | Non-uniform codebook weights. |
 
 Excluded methods: q2, q3, q6, k8.
+
+The `uq*` family (0x40-0x46) is introduced in **v1.1**. Per the Compatibility rule, v1.0 readers reject
+these `TensorDType` values when they must materialize those tensors; no v1.0 file changes meaning.
 
 ### 2) Domain Logic and Rules
 
@@ -177,6 +187,24 @@ Hierarchical quantization: super-block 256 containing sub-blocks of 32.
 [ Region 4: QuantData ] (packed)
 ```
 
+#### Family uq* (UQ-Super-Block, v1.1)
+
+Non-uniform codebook quantization (e.g. SLQ learned codebooks). Super-block 256 = 8 blocks of 32;
+each super-block carries an explicit codebook of `2^b` float16 levels. Indices are **unsigned**
+b-bit (LSB-first packing, same as k*); the codebook itself expresses any asymmetry, so there is
+no sign bit and no zero point.
+
+```
+[ Region 1: Codebooks ] (float16 array, Count = totalSuper * 2^b)
+-> align64
+[ Region 2: BlockScales ] (float16 array, Count = totalBlocks)
+-> align64
+[ Region 3: Indices ] (packed unsigned b-bit, totalBlocks * (32*b/8) bytes)
+```
+
+Reconstruction: `w = BlockScale * Codebook[idx]` (codebook selected by the element's super-block).
+Files containing `DTypeUQ*` MUST set `FlagTensorDataAligned64`, like q*/k*.
+
 ### 5) Bit Packing
 
 General rules:
@@ -192,9 +220,10 @@ Packing by bit width:
 - k4 / q4 / int4 (4-bit): 2 items per byte.
   - item0 = low nibble (bits 0-3), item1 = high nibble (bits 4-7)
 - k6 (6-bit): tight stream, 4 items in 3 bytes (24 bits total).
+- uq* (b-bit): tight stream, unsigned, LSB first (e.g. uq4: 2 indices per byte, item0 = low nibble).
 
 For symmetric weights (q* and k*), quantized values are signed integers within the bit width. The most-negative code is
-unused to keep Z=0 (for example, 4-bit uses [-7, 7]).
+unused to keep Z=0 (for example, 4-bit uses [-7, 7]). uq* indices are unsigned codebook indices, not signed values.
 
 ### 6) Reconstruction Formulas
 
@@ -210,6 +239,9 @@ For k*:
 S_block = S_super * (u6_subscale / 32.0)
 w = S_block * q_val
 ```
+
+For uq* (v1.1): `w = S_block * codebook_super[idx]`, where `codebook_super` is the f16 codebook of
+the element's super-block and `idx` is the unsigned b-bit index.
 
 Asymmetric activations (int*):
 

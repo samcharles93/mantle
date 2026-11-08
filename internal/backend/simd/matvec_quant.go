@@ -94,6 +94,11 @@ var q4SignTable = [16]int8{
 }
 
 func matVecRangeQuantWithWorker(dst []float32, w *Mat, x []float32, rs, re int, qx *QuantVec, worker *matVecWorker) bool {
+	if mcf.IsUQDType(w.DType) {
+		// Non-uniform codebooks have no int8 dot path; use the core LUT path.
+		instance.MatVecRangeUQ(dst, w, x, rs, re)
+		return true
+	}
 	if w.Quant != nil && w.Quant.ValidFor(w) {
 		matVecRangeQuantCached(dst, w, x, rs, re, qx)
 		return true

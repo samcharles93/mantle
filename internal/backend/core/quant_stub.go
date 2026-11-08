@@ -48,6 +48,38 @@ func rowToQuant(dst []float32, m *Mat, row int) error {
 		return nil
 	}
 
+	if layout.Family == 'u' {
+		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
+		cbRaw := m.Raw[layout.CodebookOff : layout.CodebookOff+layout.CodebookBytes]
+		data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
+		var ibuf [32]uint8
+
+		blockBase := row * layout.BlocksPerRow
+		superBase := row * layout.SuperBlocksPerRow
+		for b := 0; b < layout.BlocksPerRow; b++ {
+			col := b * 32
+			n := m.C - col
+			if n <= 0 {
+				break
+			}
+			if n > 32 {
+				n = 32
+			}
+			blockIdx := blockBase + b
+			superIdx := superBase + (b / 8)
+			scale := ScaleAtRawLE(scalesRaw, blockIdx)
+			cbOff := superIdx * layout.CodebookElems * 2 // into cbRaw
+			dataOff := blockIdx * layout.BlockDataBytes
+			unpackBlockIndices(&ibuf, data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
+			for i := 0; i < n; i++ {
+				idx := int(ibuf[i])
+				u := uint16(cbRaw[cbOff+idx*2]) | uint16(cbRaw[cbOff+idx*2+1])<<8
+				dst[col+i] = scale * Float16ToFloat32(u)
+			}
+		}
+		return nil
+	}
+
 	superRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
 	subRaw := m.Raw[layout.SubScaleOff : layout.SubScaleOff+layout.SubScaleCount]
 	data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]

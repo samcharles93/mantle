@@ -108,4 +108,8 @@ SLQ's learned codebooks are not uniform grids, so q*/k* payloads cannot represen
 2. **P1** `--assignments` + budget verification + QuantInfo provenance (rco/slq). No format change.
 3. **P2** `DTypeUQ*` registry reservation, v1.1 spec addition, payload codec + CPU LUT kernels +
    tests/benchmarks, CUDA dequant-mode support. Format change, versioned, spec updated in the
-   same commit.
+   same commit. DONE: `DTypeUQ2..UQ8` (0x0040-0x0046) under v1.1, codec in `pkg/mcf/uq.go`
+   (`EncodeUQPayload`/`DecodeUQRow`/`UQPayloadLayoutFor`), CPU decode + matvec in
+   `internal/backend/core` (RowTo + codebook-gather matvec, `BenchmarkMatVecUQ4`), CUDA routes
+   uq* to device dequant (no quant-kernel dot path). SIMD pshufb/vpermb LUT specialization of the
+   b<=4 gather loop is a future optimization; the scalar LUT path is correct and benchmarked.

@@ -71,6 +71,18 @@ const (
 	DTypeK4 TensorDType = 0x0031
 	DTypeK3 TensorDType = 0x0032
 	DTypeK2 TensorDType = 0x0033
+
+	// Family: uq* (Non-uniform codebook, super-block; introduced in v1.1)
+	// Payload: per super-block (256 elems = 8 blocks of 32) an explicit
+	// codebook of 2^b f16 levels; then per-block f16 scales and packed
+	// unsigned b-bit indices. Reconstruction: w = blockScale * codebook[idx].
+	DTypeUQ2 TensorDType = 0x0040
+	DTypeUQ3 TensorDType = 0x0041
+	DTypeUQ4 TensorDType = 0x0042
+	DTypeUQ5 TensorDType = 0x0043
+	DTypeUQ6 TensorDType = 0x0044
+	DTypeUQ7 TensorDType = 0x0045
+	DTypeUQ8 TensorDType = 0x0046
 )
 
 const tensorIndexEntrySize = 40

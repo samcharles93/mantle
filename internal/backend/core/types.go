@@ -1,6 +1,10 @@
 package core
 
-import "runtime"
+import (
+	"runtime"
+
+	"github.com/samcharles93/mantle/pkg/mcf"
+)
 
 // TilingConfig holds runtime-configurable tiling parameters.
 type TilingConfig struct {
@@ -14,6 +18,15 @@ type QuantCache struct {
 	Q            []int8
 	Scales       []float32
 	BlocksPerRow int
+
+	// UQ (non-uniform codebook) state: unsigned b-bit indices per element,
+	// per-super-block f32 codebooks, per-block scales.
+	UQ                bool
+	UQBits            int
+	UQIndices         []uint8 // totalBlocks * 32
+	Codebooks         []float32
+	CodebookElems     int
+	SuperBlocksPerRow int
 }
 
 func (qc *QuantCache) validFor(m *Mat) bool {
@@ -21,6 +34,9 @@ func (qc *QuantCache) validFor(m *Mat) bool {
 		return false
 	}
 	if qc.BlocksPerRow <= 0 || m.R <= 0 {
+		return false
+	}
+	if mcf.IsUQDType(m.DType) != qc.UQ {
 		return false
 	}
 	blocksPerRow := (m.C + 31) / 32
@@ -31,11 +47,21 @@ func (qc *QuantCache) validFor(m *Mat) bool {
 	if !ok {
 		return false
 	}
+	if len(qc.Scales) < totalBlocks {
+		return false
+	}
+	if qc.UQ {
+		qLen, ok := MulInt(totalBlocks, 32)
+		if !ok {
+			return false
+		}
+		return len(qc.UQIndices) >= qLen
+	}
 	qLen, ok := MulInt(totalBlocks, 32)
 	if !ok {
 		return false
 	}
-	if len(qc.Q) < qLen || len(qc.Scales) < totalBlocks {
+	if len(qc.Q) < qLen {
 		return false
 	}
 	return true

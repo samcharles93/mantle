@@ -223,6 +223,13 @@ func validateQuantRecord(r QuantRecord) error {
 		if r.BlockSize != uint16(QuantBlockSize) || r.SuperSize != uint16(QuantSuperSize) {
 			return errBadQuantInfo
 		}
+	case DTypeUQ2, DTypeUQ3, DTypeUQ4, DTypeUQ5, DTypeUQ6, DTypeUQ7, DTypeUQ8:
+		if r.Domain != uint8(DomainWeights) {
+			return errBadQuantInfo
+		}
+		if r.BlockSize != uint16(QuantBlockSize) || r.SuperSize != uint16(QuantSuperSize) {
+			return errBadQuantInfo
+		}
 	case DTypeInt8, DTypeInt4:
 		if r.BlockSize != 0 || r.SuperSize != 0 {
 			return errBadQuantInfo
@@ -259,7 +266,8 @@ func mulUint64(a, b uint64) (uint64, bool) {
 // DTypeRequiresAligned64 reports whether the dtype requires 64-byte internal payload alignment.
 func DTypeRequiresAligned64(dt TensorDType) bool {
 	switch dt {
-	case DTypeQ8, DTypeQ4, DTypeK6, DTypeK4, DTypeK3, DTypeK2:
+	case DTypeQ8, DTypeQ4, DTypeK6, DTypeK4, DTypeK3, DTypeK2,
+		DTypeUQ2, DTypeUQ3, DTypeUQ4, DTypeUQ5, DTypeUQ6, DTypeUQ7, DTypeUQ8:
 		return true
 	default:
 		return false

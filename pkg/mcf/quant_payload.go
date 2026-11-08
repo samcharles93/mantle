@@ -16,6 +16,13 @@ func QuantPayloadSize(shape []uint64, dt TensorDType) (uint64, error) {
 	if !DTypeRequiresAligned64(dt) {
 		return 0, errors.New("mcf: dtype is not a quantized payload")
 	}
+	if IsUQDType(dt) {
+		layout, err := UQPayloadLayoutFor(shape, dt)
+		if err != nil {
+			return 0, err
+		}
+		return layout.TotalBytes, nil
+	}
 	if len(shape) != 2 {
 		return 0, errors.New("mcf: quant tensors must be rank-2")
 	}

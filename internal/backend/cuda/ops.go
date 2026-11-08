@@ -1734,7 +1734,7 @@ func (o *Ops) MatVec(dst []float32, w *model.Mat, x []float32) {
 		o.matVecQuant(dst, w, x)
 		return
 	}
-	if useQuantKernel() && w.Quant != nil && w.Quant.ValidFor(w) {
+	if useQuantKernel() && w.Quant != nil && w.Quant.ValidFor(w) && !mcf.IsUQDType(w.DType) {
 		o.matVecQuant(dst, w, x)
 		return
 	}
@@ -1822,7 +1822,7 @@ func (o *Ops) matVecWithDeviceInput(dst []float32, w *model.Mat, xDev native.Dev
 	if _, ok := o.qweights[w]; ok {
 		return o.matVecQuantWithDeviceInput(dst, w, xDev)
 	}
-	if useQuantKernel() && (shouldPreferQuantWeights(w, currentCUDAWeightMode()) || (w.Quant != nil && w.Quant.ValidFor(w))) {
+	if useQuantKernel() && (shouldPreferQuantWeights(w, currentCUDAWeightMode()) || (w.Quant != nil && w.Quant.ValidFor(w) && !mcf.IsUQDType(w.DType))) {
 		return o.matVecQuantWithDeviceInput(dst, w, xDev)
 	}
 	// Regular dequantized path
@@ -1914,7 +1914,7 @@ func (o *Ops) matVecToDeviceBuffer(w *model.Mat, xDev native.DeviceBuffer, xLen 
 		}
 		return o.runQuantKernel(qw, xDev, dst, o.stream)
 	}
-	if useQuantKernel() && (shouldPreferQuantWeights(w, currentCUDAWeightMode()) || (w.Quant != nil && w.Quant.ValidFor(w))) {
+	if useQuantKernel() && (shouldPreferQuantWeights(w, currentCUDAWeightMode()) || (w.Quant != nil && w.Quant.ValidFor(w) && !mcf.IsUQDType(w.DType))) {
 		qw, err := o.ensureQuantMat(w)
 		if err != nil {
 			return err
@@ -1997,7 +1997,7 @@ func (o *Ops) matVecWithDeviceInputNoCopy(w *model.Mat, xDev native.DeviceBuffer
 		}
 		return o.runQuantKernel(qw, xDev, o.yDev, o.stream)
 	}
-	if useQuantKernel() && (shouldPreferQuantWeights(w, currentCUDAWeightMode()) || (w.Quant != nil && w.Quant.ValidFor(w))) {
+	if useQuantKernel() && (shouldPreferQuantWeights(w, currentCUDAWeightMode()) || (w.Quant != nil && w.Quant.ValidFor(w) && !mcf.IsUQDType(w.DType))) {
 		qw, err := o.ensureQuantMat(w)
 		if err != nil {
 			return err
@@ -5105,6 +5105,10 @@ func shouldPreferQuantWeights(mat *model.Mat, mode cudaWeightMode) bool {
 		return false
 	}
 	if !mcf.DTypeRequiresAligned64(mat.DType) || len(mat.Raw) == 0 {
+		return false
+	}
+	if mcf.IsUQDType(mat.DType) {
+		// uq* codebooks have no quant-kernel dot path; always dequant on device.
 		return false
 	}
 	switch mode {
