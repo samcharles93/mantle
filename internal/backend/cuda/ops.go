@@ -91,6 +91,16 @@ type Ops struct {
 	lastResultLen     int
 	lastResultValid   bool
 
+	// pendingNorm, when set, describes a deferred RMSNorm over the pending
+	// lastResult: the norm kernel is not launched until a consumer needs the
+	// materialized value. The sandwich residual add (DeviceAdd) fuses it into
+	// a single rmsnorm+add kernel instead. Cleared together with lastResult.
+	pendingNormValid bool
+	pendingNormSrc   native.DeviceBuffer
+	pendingNormW     native.DeviceBuffer
+	pendingNormEps   float32
+	pendingNormN     int
+
 	// device-resident logits result for greedy decode (no host copy)
 	greedyResultDev     native.DeviceBuffer
 	greedyResultLen     int
@@ -363,6 +373,9 @@ func (o *Ops) flushLastResult() error {
 	if !o.lastResultValid {
 		return nil
 	}
+	if err := o.materializePendingNormLocked(); err != nil {
+		return fmt.Errorf("cuda: materialize pending norm failed: %w", err)
+	}
 	if len(o.lastResultHostRef) == 0 {
 		o.clearLastResult()
 		return nil
@@ -410,6 +423,47 @@ func (o *Ops) clearLastResult() {
 	o.lastResultHostPtr = 0
 	o.lastResultLen = 0
 	o.lastResultValid = false
+	o.pendingNormValid = false
+	o.pendingNormSrc = native.DeviceBuffer{}
+	o.pendingNormW = native.DeviceBuffer{}
+	o.pendingNormEps = 0
+	o.pendingNormN = 0
+}
+
+// materializePendingNormLocked launches the deferred RMSNorm (if any) so the
+// pending lastResult holds the normalized value and the norm device view is
+// published as before. Must be called with o.mu held.
+func (o *Ops) materializePendingNormLocked() error {
+	if !o.pendingNormValid {
+		return nil
+	}
+	n := o.pendingNormN
+	if n <= 0 || !o.lastResultValid {
+		o.pendingNormValid = false
+		return nil
+	}
+	bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
+	outDev := o.normDev
+	if err := o.ensureNormDeviceVec(int(bytes)); err != nil {
+		return err
+	}
+	if o.pendingNormSrc.Ptr() == o.normDev.Ptr() {
+		if err := o.ensureDeviceVecs(0, int(bytes)); err != nil {
+			return err
+		}
+		outDev = o.yDev
+	}
+	if err := native.RMSNormF32(outDev, o.pendingNormSrc, o.pendingNormW, o.pendingNormEps, n, o.stream); err != nil {
+		return err
+	}
+	if outDev.Ptr() == o.normDev.Ptr() {
+		o.normHostPtr = o.lastResultHostPtr
+		o.normHostLen = n
+		o.normDevValid = true
+	}
+	o.lastResultDev = outDev
+	o.pendingNormValid = false
+	return nil
 }
 
 // ResetConvStates invalidates device-resident conv state so it will be
@@ -1188,6 +1242,25 @@ func (o *Ops) DeviceAdd(dst, src []float32) bool {
 
 	// Fast path: consume device-resident block output directly (no H2D round-trip)
 	if o.lastResultValid && uintptr(unsafe.Pointer(&src[0])) == o.lastResultHostPtr && len(src) == o.lastResultLen {
+		// Sandwich case: the pending result is a deferred post-branch norm —
+		// fuse the norm and the residual add into one kernel.
+		if o.pendingNormValid && o.pendingNormN == len(dst) {
+			if err := native.RMSNormResidualF32(o.xPersistDev, o.pendingNormSrc, o.pendingNormW, o.pendingNormEps, len(dst), o.stream); err != nil {
+				o.recordFastPathErrorLocked(fmt.Errorf("cuda: fused norm+residual failed (n=%d): %w", len(dst), err))
+				if flushErr := o.flushLastResult(); flushErr != nil {
+					o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add flush after fused failure failed: %w", flushErr))
+				}
+				return false
+			}
+			o.clearLastResult()
+			o.xHostDirty = false
+			o.xDevDirty = true
+			return true
+		}
+		if err := o.materializePendingNormLocked(); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add norm materialize failed: %w", err))
+			return false
+		}
 		if err := native.AddVectorsF32(o.xPersistDev, o.lastResultDev, len(dst), o.stream); err != nil {
 			o.recordFastPathErrorLocked(fmt.Errorf("cuda: device add fast path kernel failed (n=%d): %w", len(dst), err))
 			if flushErr := o.flushLastResult(); flushErr != nil {
@@ -1252,33 +1325,23 @@ func (o *Ops) DeviceRMSNorm(dst, src, weight []float32, eps float32) bool {
 		if err != nil {
 			return false
 		}
-		bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
-		// Output buffer: normDev normally, but never alias the input (the
-		// kernel declares out/x __restrict__).
-		outDev := o.normDev
-		if err := o.ensureNormDeviceVec(int(bytes)); err != nil {
-			return false
-		}
-		if o.lastResultDev.Ptr() == o.normDev.Ptr() {
-			if err := o.ensureDeviceVecs(0, int(bytes)); err != nil {
+		// Chained norm over another pending norm: materialize the inner one
+		// first so lastResultDev holds plain data.
+		if o.pendingNormValid {
+			if err := o.materializePendingNormLocked(); err != nil {
+				o.recordFastPathErrorLocked(fmt.Errorf("cuda: chained norm materialize failed (n=%d): %w", n, err))
 				return false
 			}
-			outDev = o.yDev
 		}
-		if err := native.RMSNormF32(outDev, o.lastResultDev, wDev, eps, n, o.stream); err != nil {
-			o.recordFastPathErrorLocked(fmt.Errorf("cuda: rmsnorm of pending result failed (n=%d): %w", n, err))
-			return false
-		}
-		o.clearLastResult()
-		// Publish as the last result so the residual add (DeviceAdd) consumes
-		// it without a D2H round-trip; also publish as the norm device view
-		// when the output landed in normDev so matvecs can chain on it.
-		if outDev.Ptr() == o.normDev.Ptr() {
-			o.normHostPtr = uintptr(unsafe.Pointer(&dst[0]))
-			o.normHostLen = n
-			o.normDevValid = true
-		}
-		o.setLastResult(outDev, dst, n)
+		// Defer the norm kernel: the sandwich residual add (DeviceAdd) fuses
+		// it with the add into one launch; every other consumer materializes
+		// it via materializePendingNormLocked. Bit-identical either way.
+		o.pendingNormValid = true
+		o.pendingNormSrc = o.lastResultDev
+		o.pendingNormW = wDev
+		o.pendingNormEps = eps
+		o.pendingNormN = n
+		o.setLastResult(o.lastResultDev, dst, n)
 		return true
 	}
 	return false
@@ -2571,6 +2634,54 @@ func runQuantKernelDirect(qw deviceQuantMat, xDev, yDev native.DeviceBuffer, str
 }
 
 func (o *Ops) runQuantFFNDirect(qUp, qGate, qDown deviceQuantMat, xInput native.DeviceBuffer, interm int, useGelu, roundBF16 bool, stream native.Stream) error {
+	// Fused path (bit-identical to the sequence below): one multi-segment
+	// matvec computing Up|Gate into yDev|zDev in a single launch (two kernels
+	// instead of three before the activation). Only when both are cached-int8
+	// with a common shape. The activation and Down stay separate: fusing the
+	// activation into the Down matvec would both alias zDev (Down's output
+	// buffer) and recompute the expf per output row.
+	if qUp.format == quantMatFormatCachedInt8 &&
+		qGate.format == quantMatFormatCachedInt8 &&
+		qUp.cols == qGate.cols && qUp.blocksPerRow == qGate.blocksPerRow {
+		upGate := []native.QuantMatVecSegment{
+			{Q: qUp.q, Scales: qUp.scales, Y: o.yDev, Rows: qUp.rows},
+			{Q: qGate.q, Scales: qGate.scales, Y: o.zDev, Rows: qGate.rows},
+		}
+		if err := native.QuantMatVecInt8BlocksF32Multi(upGate, xInput, native.DeviceBuffer{}, native.QuantActNone, qUp.cols, qUp.blocksPerRow, stream); err != nil {
+			return err
+		}
+		if roundBF16 {
+			if err := native.RoundBF16InPlaceF32(o.yDev, interm, stream); err != nil {
+				return fmt.Errorf("up round failed (n=%d): %w", interm, err)
+			}
+			if err := native.RoundBF16InPlaceF32(o.zDev, interm, stream); err != nil {
+				return fmt.Errorf("gate round failed (n=%d): %w", interm, err)
+			}
+		}
+		activateMul := native.SiluMulF32
+		actName := "silu"
+		if useGelu {
+			activateMul = native.GeluMulF32
+			actName = "gelu"
+		}
+		if err := activateMul(o.zDev, o.yDev, o.yDev, interm, stream); err != nil {
+			return fmt.Errorf("%s kernel failed (n=%d): %w", actName, interm, err)
+		}
+		if roundBF16 {
+			if err := native.RoundBF16InPlaceF32(o.yDev, interm, stream); err != nil {
+				return fmt.Errorf("activation round failed (n=%d): %w", interm, err)
+			}
+		}
+		if err := runQuantKernelDirect(qDown, o.yDev, o.zDev, stream); err != nil {
+			return err
+		}
+		if roundBF16 {
+			if err := native.RoundBF16InPlaceF32(o.zDev, qDown.rows, stream); err != nil {
+				return fmt.Errorf("down round failed (n=%d): %w", qDown.rows, err)
+			}
+		}
+		return nil
+	}
 	if err := runQuantKernelDirect(qUp, xInput, o.yDev, stream); err != nil {
 		return err
 	}
@@ -2651,49 +2762,9 @@ func (o *Ops) runQuantFFNGraph(qUp, qGate, qDown deviceQuantMat, xInput native.D
 		return err
 	}
 	native.RecordGraphCapture()
-	if err := runQuantKernelDirect(qUp, xInput, o.yDev, stream); err != nil {
+	if err := o.runQuantFFNDirect(qUp, qGate, qDown, xInput, interm, useGelu, roundBF16, stream); err != nil {
 		_, _ = stream.EndCapture()
 		return err
-	}
-	if err := runQuantKernelDirect(qGate, xInput, o.zDev, stream); err != nil {
-		_, _ = stream.EndCapture()
-		return err
-	}
-	if roundBF16 {
-		if err := native.RoundBF16InPlaceF32(o.yDev, interm, stream); err != nil {
-			_, _ = stream.EndCapture()
-			return fmt.Errorf("up round failed (n=%d): %w", interm, err)
-		}
-		if err := native.RoundBF16InPlaceF32(o.zDev, interm, stream); err != nil {
-			_, _ = stream.EndCapture()
-			return fmt.Errorf("gate round failed (n=%d): %w", interm, err)
-		}
-	}
-	activateMul := native.SiluMulF32
-	actName := "silu"
-	if useGelu {
-		activateMul = native.GeluMulF32
-		actName = "gelu"
-	}
-	if err := activateMul(o.zDev, o.yDev, o.yDev, interm, stream); err != nil {
-		_, _ = stream.EndCapture()
-		return fmt.Errorf("%s kernel failed (n=%d): %w", actName, interm, err)
-	}
-	if roundBF16 {
-		if err := native.RoundBF16InPlaceF32(o.yDev, interm, stream); err != nil {
-			_, _ = stream.EndCapture()
-			return fmt.Errorf("activation round failed (n=%d): %w", interm, err)
-		}
-	}
-	if err := runQuantKernelDirect(qDown, o.yDev, o.zDev, stream); err != nil {
-		_, _ = stream.EndCapture()
-		return err
-	}
-	if roundBF16 {
-		if err := native.RoundBF16InPlaceF32(o.zDev, outRows, stream); err != nil {
-			_, _ = stream.EndCapture()
-			return fmt.Errorf("down round failed (n=%d): %w", outRows, err)
-		}
 	}
 
 	graph, err := stream.EndCapture()
@@ -4681,6 +4752,12 @@ func (o *Ops) RMSNormBatched(dst, src, weight []float32, eps float32, headDim, n
 		xInput = o.xPersistDev
 		usedDeviceInput = true
 	} else if o.lastResultValid && uintptr(unsafe.Pointer(&src[0])) == o.lastResultHostPtr && totalElems == o.lastResultLen {
+		if o.pendingNormValid {
+			if err := o.materializePendingNormLocked(); err != nil {
+				o.recordFastPathErrorLocked(fmt.Errorf("cuda: matvec norm materialize failed: %w", err))
+				return false
+			}
+		}
 		xInput = o.lastResultDev
 		usedDeviceInput = true
 	}
@@ -4718,6 +4795,12 @@ func (o *Ops) RMSNormBatched(dst, src, weight []float32, eps float32, headDim, n
 
 	if err := o.waitForResult(o.yHost.Ptr(), dstDev, bytes); err != nil {
 		return false
+	}
+	if usedDeviceInput && o.lastResultValid && uintptr(unsafe.Pointer(&src[0])) == o.lastResultHostPtr && totalElems == o.lastResultLen && o.pendingNormValid {
+		if err := o.materializePendingNormLocked(); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: matvec norm materialize (2) failed: %w", err))
+			return false
+		}
 	}
 	if usedDeviceInput && o.lastResultValid && uintptr(unsafe.Pointer(&src[0])) == o.lastResultHostPtr && totalElems == o.lastResultLen {
 		o.clearLastResult()

@@ -591,43 +591,56 @@ func (o *Ops) QKVAttentionProjection(
 	}
 
 	// Wq projection (always). Wk/Wv/K-store only on source layers.
-	if err := o.projectInto(o.qProjDev, layer.Wq, xDev); err != nil {
-		o.recordFastPathErrorLocked(err)
-		return false
-	}
-	// Attention output gate projection (LFM3-style): runs from the same
-	// normed input as Q; applied to the attention output before Wo.
-	if layer.AttnGate != nil {
-		if err := o.ensureActTmp(gateRows * 4); err != nil {
+	// When every projection is a cached-int8 quant mat with a common shape,
+	// run Wq|gate|Wk|Wv as ONE fused multi-segment matvec (bit-identical to
+	// the individual launches, one kernel launch instead of up to four).
+	fusedProj := o.tryFusedAttnProjections(layer, xDev, isConsumer, gateRows)
+	if !fusedProj {
+		if err := o.projectInto(o.qProjDev, layer.Wq, xDev); err != nil {
 			o.recordFastPathErrorLocked(err)
 			return false
 		}
-		if err := o.projectInto(o.aDev, layer.AttnGate, xDev); err != nil {
-			o.recordFastPathErrorLocked(err)
-			return false
-		}
-	}
-	if !isConsumer {
-		if err := o.projectInto(o.kProjDev, layer.Wk, xDev); err != nil {
-			o.recordFastPathErrorLocked(err)
-			return false
-		}
-		if layer.Wv != nil {
-			if err := o.projectInto(o.vProjDev, layer.Wv, xDev); err != nil {
+		// Attention output gate projection (LFM3-style): runs from the same
+		// normed input as Q; applied to the attention output before Wo.
+		if layer.AttnGate != nil {
+			if err := o.ensureActTmp(gateRows * 4); err != nil {
 				o.recordFastPathErrorLocked(err)
 				return false
 			}
-		} else {
-			// ValueFromKey: V starts as a copy of post-projection K,
-			// before any bias/norm has been applied.
-			vBytes := int64(kvStride) * int64(unsafe.Sizeof(float32(0)))
-			if err := native.MemcpyD2DAsync(o.vProjDev, o.kProjDev, vBytes, o.stream); err != nil {
+			if err := o.projectInto(o.aDev, layer.AttnGate, xDev); err != nil {
 				o.recordFastPathErrorLocked(err)
 				return false
 			}
 		}
+		if !isConsumer {
+			if err := o.projectInto(o.kProjDev, layer.Wk, xDev); err != nil {
+				o.recordFastPathErrorLocked(err)
+				return false
+			}
+			if layer.Wv != nil {
+				if err := o.projectInto(o.vProjDev, layer.Wv, xDev); err != nil {
+					o.recordFastPathErrorLocked(err)
+					return false
+				}
+			} else {
+				// ValueFromKey: V starts as a copy of post-projection K,
+				// before any bias/norm has been applied.
+				vBytes := int64(kvStride) * int64(unsafe.Sizeof(float32(0)))
+				if err := native.MemcpyD2DAsync(o.vProjDev, o.kProjDev, vBytes, o.stream); err != nil {
+					o.recordFastPathErrorLocked(err)
+					return false
+				}
+			}
+		}
+	} else if !isConsumer && layer.Wv == nil {
+		// ValueFromKey: V starts as a copy of post-projection K,
+		// before any bias/norm has been applied.
+		vBytes := int64(kvStride) * int64(unsafe.Sizeof(float32(0)))
+		if err := native.MemcpyD2DAsync(o.vProjDev, o.kProjDev, vBytes, o.stream); err != nil {
+			o.recordFastPathErrorLocked(err)
+			return false
+		}
 	}
-
 	// Biases (optional).
 	if len(layer.WqBias) == qDim {
 		bDev, err := o.deviceNormWeight(layer.WqBias)
@@ -665,21 +678,39 @@ func (o *Ops) QKVAttentionProjection(
 		}
 	}
 
-	// RMSNorm on Q (per-head) always; K/V only on source layers.
-	if len(layer.AttnQNorm) == headDim {
-		wDev, err := o.deviceNormWeight(layer.AttnQNorm)
+	// RMSNorm on Q (per-head) always; K/V only on source layers. Q+K in one
+	// launch when both norms exist (bit-identical to two launches).
+	pairNorm := len(layer.AttnQNorm) == headDim && !isConsumer && len(layer.AttnKNorm) == headDim
+	if pairNorm {
+		qNormDev, err := o.deviceNormWeight(layer.AttnQNorm)
+		if err != nil {
+			o.recordFastPathErrorLocked(err)
+			return false
+		}
+		kNormDev, err := o.deviceNormWeight(layer.AttnKNorm)
 		if err != nil {
 			o.recordFastPathErrorLocked(err)
 			return false
 		}
 		native.RecordRMSNorm()
-		if err := native.RMSNormBatchedF32(o.qProjDev, o.qProjDev, wDev, epsilon, headDim, nHead, o.stream); err != nil {
+		if err := native.RMSNormBatchedPairF32(o.qProjDev, o.qProjDev, qNormDev, o.kProjDev, o.kProjDev, kNormDev, epsilon, headDim, nHead, kvHeads, o.stream); err != nil {
 			o.recordFastPathErrorLocked(err)
 			return false
 		}
-	}
-	if !isConsumer {
-		if len(layer.AttnKNorm) == headDim {
+	} else {
+		if len(layer.AttnQNorm) == headDim {
+			wDev, err := o.deviceNormWeight(layer.AttnQNorm)
+			if err != nil {
+				o.recordFastPathErrorLocked(err)
+				return false
+			}
+			native.RecordRMSNorm()
+			if err := native.RMSNormBatchedF32(o.qProjDev, o.qProjDev, wDev, epsilon, headDim, nHead, o.stream); err != nil {
+				o.recordFastPathErrorLocked(err)
+				return false
+			}
+		}
+		if !isConsumer && len(layer.AttnKNorm) == headDim {
 			wDev, err := o.deviceNormWeight(layer.AttnKNorm)
 			if err != nil {
 				o.recordFastPathErrorLocked(err)
@@ -691,6 +722,8 @@ func (o *Ops) QKVAttentionProjection(
 				return false
 			}
 		}
+	}
+	if !isConsumer {
 		if layer.ApplyVNorm {
 			wDev, err := o.ensureOnesDev(headDim)
 			if err != nil {
@@ -715,15 +748,14 @@ func (o *Ops) QKVAttentionProjection(
 		if half*2 > headDim {
 			return false
 		}
-		if err := native.ApplyRoPEInplaceF32(o.qProjDev, rDev, pos, ropeAttnScale, headDim, half, nHead, o.stream); err != nil {
-			o.recordFastPathErrorLocked(err)
-			return false
-		}
 		if !isConsumer {
-			if err := native.ApplyRoPEInplaceF32(o.kProjDev, rDev, pos, ropeAttnScale, headDim, half, kvHeads, o.stream); err != nil {
+			if err := native.ApplyRoPEPairF32(o.qProjDev, o.kProjDev, rDev, pos, ropeAttnScale, headDim, half, nHead, kvHeads, o.stream); err != nil {
 				o.recordFastPathErrorLocked(err)
 				return false
 			}
+		} else if err := native.ApplyRoPEInplaceF32(o.qProjDev, rDev, pos, ropeAttnScale, headDim, half, nHead, o.stream); err != nil {
+			o.recordFastPathErrorLocked(err)
+			return false
 		}
 	}
 
@@ -741,26 +773,40 @@ func (o *Ops) QKVAttentionProjection(
 	}
 
 	if !isConsumer {
-		if cache.useQ8K {
-			if err := native.StoreKVQ8RowBroadcast(cache.kQ8, cache.kQ8Scales, o.kProjDev, cachePos, kvStride, blocksPerStride, o.stream); err != nil {
+		if cache.useQ8K && cache.useQ8V {
+			// K+V q8 rows in one launch (bit-identical to two launches).
+			if err := native.StoreKVPairsQ8RowBroadcast(cache.kQ8, cache.kQ8Scales, cache.vQ8, cache.vQ8Scales, o.kProjDev, o.vProjDev, cachePos, kvStride, blocksPerStride, o.stream); err != nil {
+				o.recordFastPathErrorLocked(err)
+				return false
+			}
+		} else if !cache.useQ8K && !cache.useQ8V {
+			// K+V f16 rows in one launch.
+			if err := native.StoreKVPairsF16(cache.kF16, cache.vF16, o.kProjDev, o.vProjDev, cachePos, kvStride, o.stream); err != nil {
 				o.recordFastPathErrorLocked(err)
 				return false
 			}
 		} else {
-			if err := native.StoreKVF16Row(cache.kF16, o.kProjDev, cachePos, kvStride, o.stream); err != nil {
-				o.recordFastPathErrorLocked(err)
-				return false
+			if cache.useQ8K {
+				if err := native.StoreKVQ8RowBroadcast(cache.kQ8, cache.kQ8Scales, o.kProjDev, cachePos, kvStride, blocksPerStride, o.stream); err != nil {
+					o.recordFastPathErrorLocked(err)
+					return false
+				}
+			} else {
+				if err := native.StoreKVF16Row(cache.kF16, o.kProjDev, cachePos, kvStride, o.stream); err != nil {
+					o.recordFastPathErrorLocked(err)
+					return false
+				}
 			}
-		}
-		if cache.useQ8V {
-			if err := native.StoreKVQ8RowBroadcast(cache.vQ8, cache.vQ8Scales, o.vProjDev, cachePos, kvStride, blocksPerStride, o.stream); err != nil {
-				o.recordFastPathErrorLocked(err)
-				return false
-			}
-		} else {
-			if err := native.StoreKVF16Row(cache.vF16, o.vProjDev, cachePos, kvStride, o.stream); err != nil {
-				o.recordFastPathErrorLocked(err)
-				return false
+			if cache.useQ8V {
+				if err := native.StoreKVQ8RowBroadcast(cache.vQ8, cache.vQ8Scales, o.vProjDev, cachePos, kvStride, blocksPerStride, o.stream); err != nil {
+					o.recordFastPathErrorLocked(err)
+					return false
+				}
+			} else {
+				if err := native.StoreKVF16Row(cache.vF16, o.vProjDev, cachePos, kvStride, o.stream); err != nil {
+					o.recordFastPathErrorLocked(err)
+					return false
+				}
 			}
 		}
 		// Record that this source layer's device KV cache now holds
@@ -837,5 +883,73 @@ func (o *Ops) QKVAttentionProjection(
 	o.setLastResult(o.zDev, projOut, projDim)
 	runtime.KeepAlive(projOut)
 	runtime.KeepAlive(x)
+	return true
+}
+
+// tryFusedAttnProjections runs the Wq / AttnGate / Wk / Wv projections as a
+// single multi-segment quant matvec when every involved weight is a
+// cached-int8 quant mat with a common cols/blocksPerRow. The fused kernel is
+// bit-identical to running each projection separately (same per-row lane
+// mapping and accumulation order), but issues one kernel launch instead of up
+// to four. Returns false (with no device state mutated) when any weight is
+// not a compatible cached-int8 mat, in which case the caller falls back to
+// the per-matrix projectInto path.
+//
+// Requires o.mu held.
+func (o *Ops) tryFusedAttnProjections(layer *instance.Layer, xDev native.DeviceBuffer, isConsumer bool, gateRows int) bool {
+	mats := make([]*instance.Mat, 0, 4)
+	ys := make([]native.DeviceBuffer, 0, 4)
+	mats = append(mats, layer.Wq)
+	ys = append(ys, o.qProjDev)
+	if layer.AttnGate != nil {
+		if err := o.ensureActTmp(gateRows * 4); err != nil {
+			o.recordFastPathErrorLocked(err)
+			return false
+		}
+		mats = append(mats, layer.AttnGate)
+		ys = append(ys, o.aDev)
+	}
+	if !isConsumer {
+		mats = append(mats, layer.Wk)
+		ys = append(ys, o.kProjDev)
+		if layer.Wv != nil {
+			mats = append(mats, layer.Wv)
+			ys = append(ys, o.vProjDev)
+		}
+	}
+	segs := make([]native.QuantMatVecSegment, 0, len(mats))
+	cols := -1
+	bpr := -1
+	for i, m := range mats {
+		// Only fuse when this weight would take the quant kernel path in
+		// projectInto; never build a quant cache for a dense weight here.
+		_, cached := o.qweights[m]
+		quantPath := cached || (useQuantKernel() && (shouldPreferQuantWeights(m, currentCUDAWeightMode()) || (m.Quant != nil && m.Quant.ValidFor(m))))
+		if !quantPath {
+			return false
+		}
+		qw, err := o.ensureQuantMat(m)
+		if err != nil {
+			o.recordFastPathErrorLocked(err)
+			return false
+		}
+		if qw.format != quantMatFormatCachedInt8 {
+			return false
+		}
+		if cols < 0 {
+			cols = qw.cols
+			bpr = qw.blocksPerRow
+		} else if qw.cols != cols || qw.blocksPerRow != bpr {
+			return false
+		}
+		if ys[i].Ptr() == nil {
+			return false
+		}
+		segs = append(segs, native.QuantMatVecSegment{Q: qw.q, Scales: qw.scales, Y: ys[i], Rows: qw.rows})
+	}
+	if err := native.QuantMatVecInt8BlocksF32Multi(segs, xDev, native.DeviceBuffer{}, native.QuantActNone, cols, bpr, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: fused attn projections failed: %w", err))
+		return false
+	}
 	return true
 }
