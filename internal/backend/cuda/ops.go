@@ -1224,24 +1224,62 @@ func (o *Ops) DeviceRMSNorm(dst, src, weight []float32, eps float32) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.clearNormDeviceView()
-	if !o.isDeviceX(src) {
-		return false
-	}
 	if len(dst) != len(src) || len(weight) != len(src) {
 		return false
 	}
-	if o.xHostDirty {
-		bytes := int64(o.xHostLen) * int64(unsafe.Sizeof(float32(0)))
-		if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&src[0]), bytes); err != nil {
+	if o.isDeviceX(src) {
+		if o.xHostDirty {
+			bytes := int64(o.xHostLen) * int64(unsafe.Sizeof(float32(0)))
+			if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&src[0]), bytes); err != nil {
+				return false
+			}
+			o.xHostDirty = false
+			o.xDevDirty = false
+		}
+		if err := o.rmsNormWithDeviceX(dst, weight, eps); err != nil {
 			return false
 		}
-		o.xHostDirty = false
-		o.xDevDirty = false
+		return true
 	}
-	if err := o.rmsNormWithDeviceX(dst, weight, eps); err != nil {
-		return false
+	// Consume a pending device-resident block result (attention/conv/FFN
+	// output) directly: norm it on device and re-publish it as the new last
+	// result, so the residual add consumes it without a D2H round-trip.
+	if o.lastResultValid && len(src) == o.lastResultLen && uintptr(unsafe.Pointer(&src[0])) == o.lastResultHostPtr {
+		n := len(src)
+		wDev, err := o.deviceNormWeight(weight)
+		if err != nil {
+			return false
+		}
+		bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
+		// Output buffer: normDev normally, but never alias the input (the
+		// kernel declares out/x __restrict__).
+		outDev := o.normDev
+		if err := o.ensureNormDeviceVec(int(bytes)); err != nil {
+			return false
+		}
+		if o.lastResultDev.Ptr() == o.normDev.Ptr() {
+			if err := o.ensureDeviceVecs(0, int(bytes)); err != nil {
+				return false
+			}
+			outDev = o.yDev
+		}
+		if err := native.RMSNormF32(outDev, o.lastResultDev, wDev, eps, n, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: rmsnorm of pending result failed (n=%d): %w", n, err))
+			return false
+		}
+		o.clearLastResult()
+		// Publish as the last result so the residual add (DeviceAdd) consumes
+		// it without a D2H round-trip; also publish as the norm device view
+		// when the output landed in normDev so matvecs can chain on it.
+		if outDev.Ptr() == o.normDev.Ptr() {
+			o.normHostPtr = uintptr(unsafe.Pointer(&dst[0]))
+			o.normHostLen = n
+			o.normDevValid = true
+		}
+		o.setLastResult(outDev, dst, n)
+		return true
 	}
-	return true
+	return false
 }
 
 // DeviceMatVec implements instance.DeviceStateOps.

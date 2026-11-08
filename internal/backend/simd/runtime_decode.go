@@ -126,12 +126,18 @@ func runDecoderLayers(m *Instance, rt *tokenRuntimeState) error {
 			return err
 		}
 		if len(layer.PostAttnNorm) > 0 {
-			if bf != nil {
-				if err := bf.FlushBlockResult(); err != nil {
-					return fmt.Errorf("post-attention flush failed: %w", err)
-				}
+			postAttnNormFast := ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
+			if err := consumeFastPathError(ops); err != nil {
+				return fmt.Errorf("post-attention norm fast path failed: %w", err)
 			}
-			ops.RMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
+			if !postAttnNormFast {
+				if bf != nil {
+					if err := bf.FlushBlockResult(); err != nil {
+						return fmt.Errorf("post-attention flush failed: %w", err)
+					}
+				}
+				ops.RMSNorm(m.Scratch.Tmp2, opOut, layer.PostAttnNorm, m.RMSEpsilon)
+			}
 			opOut = m.Scratch.Tmp2
 		}
 		addResidualScaled(ds, x, opOut, m.Config.Config.ResidualScale())
@@ -278,14 +284,21 @@ func computeStandardFFNOutput(m *Instance, ops Ops, layer *Layer, normed []float
 		return nil, fmt.Errorf("ffn fast path failed: %w", err)
 	}
 	if len(layer.PostFfnNorm) > 0 {
-		if bf != nil {
-			if err := bf.FlushBlockResult(); err != nil {
-				return nil, fmt.Errorf("post-ffn flush failed: %w", err)
-			}
-		}
-		ops.RMSNorm(m.Scratch.Tmp, ffnOut, layer.PostFfnNorm, m.RMSEpsilon)
+		ds, _ := ops.(DeviceStateOps)
+		postFfnNormFast := ds != nil && ds.DeviceRMSNorm(m.Scratch.Tmp, ffnOut, layer.PostFfnNorm, m.RMSEpsilon)
 		if err := consumeFastPathError(ops); err != nil {
-			return nil, fmt.Errorf("post-ffn norm failed: %w", err)
+			return nil, fmt.Errorf("post-ffn norm fast path failed: %w", err)
+		}
+		if !postFfnNormFast {
+			if bf != nil {
+				if err := bf.FlushBlockResult(); err != nil {
+					return nil, fmt.Errorf("post-ffn flush failed: %w", err)
+				}
+			}
+			ops.RMSNorm(m.Scratch.Tmp, ffnOut, layer.PostFfnNorm, m.RMSEpsilon)
+			if err := consumeFastPathError(ops); err != nil {
+				return nil, fmt.Errorf("post-ffn norm failed: %w", err)
+			}
 		}
 		ffnOut = m.Scratch.Tmp
 	}
