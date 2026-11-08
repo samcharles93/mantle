@@ -26,24 +26,29 @@ func TestLFM3VLEngineImageGeneration(t *testing.T) {
 	}
 	var fx struct {
 		Cases []struct {
-			Name   string `json:"name"`
-			Tokens []int  `json:"tokens"`
-			Greedy []int  `json:"greedy"`
+			Name   string   `json:"name"`
+			Tokens []int    `json:"tokens"`
+			Greedy []int    `json:"greedy"`
+			Video  bool     `json:"video,omitempty"`
+			Frames []string `json:"frames,omitempty"`
 		} `json:"cases"`
 	}
 	if err := json.Unmarshal(raw, &fx); err != nil {
 		t.Fatalf("parse fixture: %v", err)
 	}
-	var imageCase, textCase int
+	var imageCase, textCase, videoCase int
+	found := 0
 	for i, c := range fx.Cases {
-		if c.Name == "image_256" {
-			imageCase = i
-		}
-		if c.Name == "text_only" {
-			textCase = i
+		switch c.Name {
+		case "image_256":
+			imageCase, found = i, found|1
+		case "text_only":
+			textCase, found = i, found|2
+		case "video_4frames":
+			videoCase, found = i, found|4
 		}
 	}
-	if imageCase == textCase {
+	if found != 7 {
 		t.Fatalf("fixture missing cases")
 	}
 
@@ -67,8 +72,10 @@ func TestLFM3VLEngineImageGeneration(t *testing.T) {
 		t.Helper()
 		steps := len(wantGreedy)
 		zero := 0.0
+		one := 1.0
 		opts.Steps = &steps
 		opts.Temperature = &zero
+		opts.RepeatPenalty = &one // the fixture is pure argmax (HF default)
 		req := ResolveRequest(opts, res.GenerationDefaults)
 		result, err := res.Engine.Generate(context.Background(), &req, nil)
 		if err != nil {
@@ -123,5 +130,28 @@ func TestLFM3VLEngineImageGeneration(t *testing.T) {
 			}},
 			Images: [][]byte{img},
 		}, imgCase.Tokens, imgCase.Greedy)
+	})
+
+	vidCase := fx.Cases[videoCase]
+	t.Run("video_4frames", func(t *testing.T) {
+		var frames [][]byte
+		for _, f := range vidCase.Frames {
+			b, err := os.ReadFile("../backend/simd/testdata/" + f)
+			if err != nil {
+				t.Fatalf("read frame: %v", err)
+			}
+			frames = append(frames, b)
+		}
+		res.Engine.ResetContext()
+		run(t, RequestOptions{
+			Messages: []tokenizer.Message{{
+				Role: "user",
+				Content: []any{
+					map[string]any{"type": "video"},
+					map[string]any{"type": "text", "text": "What happens in this video?"},
+				},
+			}},
+			Videos: [][][]byte{frames},
+		}, vidCase.Tokens, vidCase.Greedy)
 	})
 }

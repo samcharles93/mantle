@@ -133,7 +133,7 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 	// Multimodal: expand image placeholder tokens and attach the projected
 	// vision embeddings for the prefill.
 	var embeds [][]float32
-	if len(req.Images) > 0 || visionConfigOf(e) != nil {
+	if len(req.Images) > 0 || len(req.Videos) > 0 || visionConfigOf(e) != nil {
 		expanded, emb, err := prepareMultimodal(e, req, ids)
 		if err != nil {
 			return nil, err

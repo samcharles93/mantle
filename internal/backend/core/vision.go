@@ -28,8 +28,9 @@ type VisionConfig struct {
 	ProjectorBias         bool
 	TextHiddenSize        int
 
-	// Special token ids used to mark image placeholders in the prompt.
+	// Special token ids used to mark image/video placeholders in the prompt.
 	ImageTokenID       int
+	VideoTokenID       int
 	VisionStartTokenID int
 	VisionEndTokenID   int
 
@@ -39,6 +40,10 @@ type VisionConfig struct {
 	RescaleFactor float64
 	MinPixels     int
 	MaxPixels     int
+	// Video processor parameters (per-frame resize bounds and sampling fps).
+	VideoMinPixels int
+	VideoMaxPixels int
+	VideoFPS       float64
 }
 
 // PatchDim is the flattened per-patch input size of the patchifier:

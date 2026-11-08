@@ -29,6 +29,8 @@ type lfm3vlReferenceCase struct {
 	GridTHW     [][]int   `json:"grid_thw,omitempty"`
 	ImageFile   string    `json:"image_file,omitempty"`
 	FeatsFile   string    `json:"feats_file,omitempty"`
+	Video       bool      `json:"video,omitempty"`
+	Frames      []string  `json:"frames,omitempty"`
 	// StepTop holds the reference top-10 (ids, logits) at every greedy step,
 	// captured with a manual greedy loop in HF transformers.
 	StepTop []struct {
@@ -66,18 +68,38 @@ func TestLFM3VLImageProcessing(t *testing.T) {
 			continue
 		}
 		t.Run(tc.Name, func(t *testing.T) {
-			imgPath := "testdata/lfm3vl_test_256.png"
-			if tc.Name == "image_100x70" {
-				imgPath = "testdata/lfm3vl_test_100x70.png"
-			}
-			raw, err := os.ReadFile(imgPath)
-			if err != nil {
-				t.Fatalf("read image: %v", err)
-			}
 			vc := coreVisionConfigForTest(t, tc)
-			pix, grids, err := ProcessImages([][]byte{raw}, vc)
-			if err != nil {
-				t.Fatalf("ProcessImages: %v", err)
+			var pix []float32
+			var grids [][3]int
+			var err error
+			if tc.Video {
+				var frames [][]byte
+				for _, f := range tc.Frames {
+					raw, err := os.ReadFile("testdata/" + f)
+					if err != nil {
+						t.Fatalf("read frame: %v", err)
+					}
+					frames = append(frames, raw)
+				}
+				var grid [3]int
+				pix, grid, err = ProcessVideoFrames(frames, vc)
+				if err != nil {
+					t.Fatalf("ProcessVideoFrames: %v", err)
+				}
+				grids = [][3]int{grid}
+			} else {
+				imgPath := "testdata/lfm3vl_test_256.png"
+				if tc.Name == "image_100x70" {
+					imgPath = "testdata/lfm3vl_test_100x70.png"
+				}
+				raw, err := os.ReadFile(imgPath)
+				if err != nil {
+					t.Fatalf("read image: %v", err)
+				}
+				pix, grids, err = ProcessImages([][]byte{raw}, vc)
+				if err != nil {
+					t.Fatalf("ProcessImages: %v", err)
+				}
 			}
 			if len(grids) != 1 || grids[0][0] != tc.GridTHW[0][0] || grids[0][1] != tc.GridTHW[0][1] || grids[0][2] != tc.GridTHW[0][2] {
 				t.Fatalf("grid = %v, want %v", grids, tc.GridTHW)
@@ -114,15 +136,18 @@ func coreVisionConfigForTest(t *testing.T, tc lfm3vlReferenceCase) *core.VisionC
 	// temporal 2, mean/std 0.5, rescale 1/255, min/max pixels from the packed
 	// processor_config.json
 	return &core.VisionConfig{
-		InChannels:    3,
-		PatchSize:     16,
-		MergeSize:     2,
-		TemporalPatch: 2,
-		ImageMean:     []float64{0.5, 0.5, 0.5},
-		ImageStd:      []float64{0.5, 0.5, 0.5},
-		RescaleFactor: 1.0 / 255.0,
-		MinPixels:     65536,
-		MaxPixels:     16777216,
+		InChannels:     3,
+		PatchSize:      16,
+		MergeSize:      2,
+		TemporalPatch:  2,
+		ImageMean:      []float64{0.5, 0.5, 0.5},
+		ImageStd:       []float64{0.5, 0.5, 0.5},
+		RescaleFactor:  1.0 / 255.0,
+		MinPixels:      65536,
+		MaxPixels:      16777216,
+		VideoMinPixels: 4096,
+		VideoMaxPixels: 25165824,
+		VideoFPS:       2.0,
 	}
 }
 
@@ -160,18 +185,41 @@ func TestLFM3VLReferenceLogits(t *testing.T) {
 
 			tokens := tc.Tokens
 			var embeds [][]float32
+			mediaTokenID := imageTokenID
+			if tc.Video {
+				mediaTokenID = 125029
+			}
 			if tc.PixelsFile != "" {
-				imgPath := "testdata/lfm3vl_test_256.png"
-				if tc.Name == "image_100x70" {
-					imgPath = "testdata/lfm3vl_test_100x70.png"
-				}
-				raw, err := os.ReadFile(imgPath)
-				if err != nil {
-					t.Fatalf("read image: %v", err)
-				}
-				pix, grids, err := ProcessImages([][]byte{raw}, vc)
-				if err != nil {
-					t.Fatalf("ProcessImages: %v", err)
+				var pix []float32
+				var grids [][3]int
+				if tc.Video {
+					var frames [][]byte
+					for _, f := range tc.Frames {
+						raw, err := os.ReadFile("testdata/" + f)
+						if err != nil {
+							t.Fatalf("read frame: %v", err)
+						}
+						frames = append(frames, raw)
+					}
+					var grid [3]int
+					pix, grid, err = ProcessVideoFrames(frames, vc)
+					if err != nil {
+						t.Fatalf("ProcessVideoFrames: %v", err)
+					}
+					grids = [][3]int{grid}
+				} else {
+					imgPath := "testdata/lfm3vl_test_256.png"
+					if tc.Name == "image_100x70" {
+						imgPath = "testdata/lfm3vl_test_100x70.png"
+					}
+					raw, err := os.ReadFile(imgPath)
+					if err != nil {
+						t.Fatalf("read image: %v", err)
+					}
+					pix, grids, err = ProcessImages([][]byte{raw}, vc)
+					if err != nil {
+						t.Fatalf("ProcessImages: %v", err)
+					}
 				}
 				feats, err := m.Vision.Encode(pix, grids)
 				if err != nil {
@@ -201,7 +249,7 @@ func TestLFM3VLReferenceLogits(t *testing.T) {
 				embeds = make([][]float32, len(tokens))
 				row := 0
 				for i, id := range tokens {
-					if id == imageTokenID {
+					if id == mediaTokenID {
 						embeds[i] = feats[0][row]
 						row++
 					}

@@ -38,5 +38,5 @@
   - [X] Gemma3 text support: verified against HF transformers (testdata/gemma3_reference.json, short + past-512 sliding-window prompts; TestGemma3ReferenceLogits with MANTLE_GEMMA3_MCF). Multimodal (vision) variant still open.
   - [X] Granite support: granitemoehybrid (granite-4.0-350M) verified against HF transformers (TestGraniteReferenceLogits with MANTLE_GRANITE_MCF); fused gate+up split + attention/logits/residual/embedding multipliers wired.
   - [ ] Improve ease of use for adding new architectures
-  - [X] LFM3-VL (lfm3_vl) multimodal: vision tower + projector + image preprocessing + placeholder expansion, verified against HF transformers (testdata/lfm3vl_reference.json, TestLFM3VLReferenceLogits / TestLFM3VLEngineImageGeneration with MANTLE_LFM3VL_MCF). Video input and LFM3-Omni remain open.
+  - [X] LFM3-VL (lfm3_vl) multimodal: vision tower + projector + image preprocessing + placeholder expansion, verified against HF transformers (testdata/lfm3vl_reference.json, TestLFM3VLReferenceLogits / TestLFM3VLEngineImageGeneration with MANTLE_LFM3VL_MCF). Video input via frame sequences DONE (2026-11-09); LFM3-Omni (audio) remains open.
 

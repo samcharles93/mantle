@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +45,7 @@ func runCmd() *cli.Command {
 		toolsJSON    string
 		hfConfigFile string
 		imagePaths   []string
+		videoPaths   []string
 
 		// Streaming options
 		streamMode string
@@ -98,6 +101,12 @@ func runCmd() *cli.Command {
 			Category:    "Generation",
 			Usage:       "path to an image file (PNG/JPEG) to attach to the prompt; repeatable (vision models only)",
 			Destination: &imagePaths,
+		},
+		&cli.StringSliceFlag{
+			Name:        "video",
+			Category:    "Generation",
+			Usage:       "path to a directory of frame images (sorted by name) or a single image, attached as a video; repeatable (vision models only)",
+			Destination: &videoPaths,
 		},
 		&cli.Int64Flag{
 			Name:        "steps",
@@ -678,6 +687,17 @@ func runCmd() *cli.Command {
 			if len(images) > 0 {
 				log.Info("attached images", "count", len(images))
 			}
+			var videos [][][]byte
+			for _, vp := range videoPaths {
+				frames, err := loadVideoFrames(vp)
+				if err != nil {
+					return cli.Exit(fmt.Sprintf("error: load video %s: %v", vp, err), 1)
+				}
+				videos = append(videos, frames)
+			}
+			if len(videos) > 0 {
+				log.Info("attached videos", "count", len(videos))
+			}
 			if toolsJSON != "" {
 				if !fileExists(toolsJSON) {
 					return cli.Exit(fmt.Sprintf("error: tools json not found: %s", toolsJSON), 1)
@@ -708,7 +728,7 @@ func runCmd() *cli.Command {
 					msgs = append(msgs, tokenizer.Message{Role: "system", Content: system})
 				}
 				if prompt != "" {
-					msgs = append(msgs, tokenizer.Message{Role: "user", Content: userContentWithImages(prompt, images)})
+					msgs = append(msgs, tokenizer.Message{Role: "user", Content: userContentWithMedia(prompt, images, videos)})
 				} else {
 					interactive = true
 					log.Info("interactive mode enabled", "hint", "type /help for commands, /exit to quit")
@@ -856,6 +876,9 @@ func runCmd() *cli.Command {
 				if len(images) > 0 {
 					opts.Images = images
 				}
+				if len(videos) > 0 {
+					opts.Videos = videos
+				}
 				opts.EchoPrompt = &echoPromptVal
 				req := inference.ResolveRequest(opts, genDefaults)
 
@@ -959,17 +982,64 @@ func joinInts(ids []int) string {
 	return b.String()
 }
 
-// userContentWithImages builds a multimodal user message content: one image
-// block per attached image followed by the text block, which the chat
-// template renders as <|vision_start|><|image|><|vision_end|> markers.
-func userContentWithImages(prompt string, images [][]byte) any {
-	if len(images) == 0 {
+// userContentWithMedia builds a multimodal user message content: one block per
+// attached image/video followed by the text block, which the chat template
+// renders as <|vision_start|><|image|><|vision_end|> /
+// <|vision_start|><|video|><|vision_end|> markers.
+func userContentWithMedia(prompt string, images [][]byte, videos [][][]byte) any {
+	if len(images) == 0 && len(videos) == 0 {
 		return prompt
 	}
-	blocks := make([]any, 0, len(images)+1)
+	blocks := make([]any, 0, len(images)+len(videos)+1)
 	for range images {
 		blocks = append(blocks, map[string]any{"type": "image"})
 	}
+	for range videos {
+		blocks = append(blocks, map[string]any{"type": "video"})
+	}
 	blocks = append(blocks, map[string]any{"type": "text", "text": prompt})
 	return blocks
+}
+
+// loadVideoFrames reads a video given as a directory of image files (sorted by
+// name) or a single image file (one frame).
+func loadVideoFrames(path string) ([][]byte, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !st.IsDir() {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		return [][]byte{b}, nil
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, en := range entries {
+		if en.IsDir() {
+			continue
+		}
+		n := strings.ToLower(en.Name())
+		if strings.HasSuffix(n, ".png") || strings.HasSuffix(n, ".jpg") || strings.HasSuffix(n, ".jpeg") {
+			names = append(names, en.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no image frames in %s", path)
+	}
+	out := make([][]byte, 0, len(names))
+	for _, n := range names {
+		b, err := os.ReadFile(filepath.Join(path, n))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, nil
 }

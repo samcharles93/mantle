@@ -29,20 +29,22 @@ func visionEncoderOf(e *EngineImpl) core.VisionEncoder {
 	return p.VisionEncoder()
 }
 
-// prepareMultimodal encodes the request's images through the vision tower and
-// expands the prompt's image placeholder tokens into one token per projected
-// image embedding. It returns the expanded token ids plus a parallel
-// embeddings slice (nil except at image-token positions) suitable for
-// PrefillTokensEmbeds.
+// prepareMultimodal encodes the request's images/videos through the vision
+// tower and expands the prompt's placeholder tokens: each image placeholder
+// becomes one token per projected image embedding; each video placeholder
+// becomes per-temporal-segment timestamp text plus vision_start, one video
+// token per projected token, and vision_end. It returns the expanded token
+// ids plus a parallel embeddings slice (nil except at media-token positions)
+// suitable for PrefillTokensEmbeds.
 func prepareMultimodal(e *EngineImpl, req *Request, ids []int) ([]int, [][]float32, error) {
 	vc := visionConfigOf(e)
 	if vc == nil {
-		if len(req.Images) > 0 {
-			return nil, nil, fmt.Errorf("model has no vision tower but %d image(s) were provided", len(req.Images))
+		if len(req.Images) > 0 || len(req.Videos) > 0 {
+			return nil, nil, fmt.Errorf("model has no vision tower but media was provided")
 		}
 		return ids, nil, nil
 	}
-	if len(req.Images) == 0 {
+	if len(req.Images) == 0 && len(req.Videos) == 0 {
 		return ids, nil, nil
 	}
 	ve := visionEncoderOf(e)
@@ -53,53 +55,98 @@ func prepareMultimodal(e *EngineImpl, req *Request, ids []int) ([]int, [][]float
 		return nil, nil, fmt.Errorf("vision config missing image_token_id")
 	}
 
-	pixelValues, grids, err := simd.ProcessImages(req.Images, vc)
-	if err != nil {
-		return nil, nil, fmt.Errorf("process images: %w", err)
+	// Build the combined patch payload: images first, then videos.
+	var pixelValues []float32
+	var grids [][3]int
+	for _, img := range req.Images {
+		pv, g, err := simd.ProcessImages([][]byte{img}, vc)
+		if err != nil {
+			return nil, nil, fmt.Errorf("process image: %w", err)
+		}
+		pixelValues = append(pixelValues, pv...)
+		grids = append(grids, g[0])
+	}
+	for _, frames := range req.Videos {
+		pv, g, err := simd.ProcessVideoFrames(frames, vc)
+		if err != nil {
+			return nil, nil, fmt.Errorf("process video: %w", err)
+		}
+		pixelValues = append(pixelValues, pv...)
+		grids = append(grids, g)
 	}
 	feats, err := ve.Encode(pixelValues, grids)
 	if err != nil {
 		return nil, nil, fmt.Errorf("vision encode: %w", err)
 	}
 	if len(feats) != len(grids) {
-		return nil, nil, fmt.Errorf("vision encode returned %d images, want %d", len(feats), len(grids))
+		return nil, nil, fmt.Errorf("vision encode returned %d media items, want %d", len(feats), len(grids))
 	}
 
-	// Count image placeholder tokens in the prompt; each one consumes one
-	// image's features in order.
-	counts := make([]int, len(grids))
-	nPlaceholders := 0
+	// Placeholder counts must match the provided media.
+	nImg, nVid := 0, 0
 	for _, id := range ids {
-		if id == vc.ImageTokenID {
-			nPlaceholders++
+		switch id {
+		case vc.ImageTokenID:
+			nImg++
+		case vc.VideoTokenID:
+			nVid++
 		}
 	}
-	if nPlaceholders != len(req.Images) {
-		return nil, nil, fmt.Errorf("prompt has %d image placeholder token(s) but %d image(s) were provided", nPlaceholders, len(req.Images))
+	if nImg != len(req.Images) {
+		return nil, nil, fmt.Errorf("prompt has %d image placeholder token(s) but %d image(s) were provided", nImg, len(req.Images))
 	}
-	for i, g := range grids {
-		counts[i] = vc.TokensPerImage(g)
-		if len(feats[i]) != counts[i] {
-			return nil, nil, fmt.Errorf("image %d: vision produced %d token rows, grid implies %d", i, len(feats[i]), counts[i])
-		}
+	if nVid != len(req.Videos) {
+		return nil, nil, fmt.Errorf("prompt has %d video placeholder token(s) but %d video(s) were provided", nVid, len(req.Videos))
 	}
 
-	// Expand: each image placeholder token becomes counts[img] copies of the
-	// image token id, carrying that many embedding rows.
+	// Expand placeholders in prompt order, consuming media of each kind in order.
 	var newIDs []int
 	embeds := make([][]float32, 0, len(ids))
-	img := 0
-	for _, id := range ids {
-		if id == vc.ImageTokenID {
-			for k := range counts[img] {
-				newIDs = append(newIDs, id)
-				embeds = append(embeds, feats[img][k])
-			}
-			img++
-			continue
-		}
+	imgIdx, vidIdx := 0, 0
+	appendTok := func(id int, emb []float32) {
 		newIDs = append(newIDs, id)
-		embeds = append(embeds, nil)
+		embeds = append(embeds, emb)
+	}
+	imgGridBase, vidGridBase := 0, len(req.Images)
+	for _, id := range ids {
+		switch id {
+		case vc.ImageTokenID:
+			gi := imgGridBase + imgIdx
+			n := len(feats[gi])
+			for k := 0; k < n; k++ {
+				appendTok(id, feats[gi][k])
+			}
+			imgIdx++
+		case vc.VideoTokenID:
+			gi := vidGridBase + vidIdx
+			g := grids[gi]
+			segLen := vc.TokensPerImage([3]int{1, g[1], g[2]})
+			fps := vc.VideoFPS
+			if fps <= 0 {
+				fps = 2
+			}
+			for k := 0; k < g[0]; k++ {
+				// timestamp of segment k: average of its two frames' times,
+				// frame j at j/fps (HF _calculate_timestamps)
+				ts := float64(4*k+1) / (2 * fps)
+				tsIDs, err := safeEncode(e.tokenizer, fmt.Sprintf("<%.1f seconds>", ts))
+				if err != nil {
+					return nil, nil, fmt.Errorf("encode video timestamp: %w", err)
+				}
+				for _, tid := range tsIDs {
+					appendTok(tid, nil)
+				}
+				appendTok(vc.VisionStartTokenID, nil)
+				rowBase := k * segLen
+				for j := 0; j < segLen; j++ {
+					appendTok(id, feats[gi][rowBase+j])
+				}
+				appendTok(vc.VisionEndTokenID, nil)
+			}
+			vidIdx++
+		default:
+			appendTok(id, nil)
+		}
 	}
 	return newIDs, embeds, nil
 }

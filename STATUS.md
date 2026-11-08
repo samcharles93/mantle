@@ -68,6 +68,17 @@ answers correctly; pure uq4 on the embedding degrades (heavy tails + sqrt(hidden
 is the expected per-tensor assignment use case. Unit tests cover codec round-trip, derived and
 explicit codebooks, determinism, and bits->dtype mapping.
 
+## LFM3-VL video input (2026-11-09)
+
+Videos are accepted as frame sequences — `mantle run --video <dir-of-frames|single-image>` (repeatable);
+mp4 decoding would need a new dependency, so it's out of scope. Each frame is resized with the video
+processor's bounds, odd frame counts pad by repeating the last frame, and patches pair frames
+(2s, 2s+1) in their temporal slots. The engine expands each `<|video|>` placeholder into per-segment
+`<t seconds>` + `<|vision_start|>` + video tokens + `<|vision_end|>` (HF `_calculate_timestamps`
+semantics) and splices the vision tower's per-segment embeddings. Parity vs HF on a 4-frame video
+(grid [2,16,16], 128 video tokens): pixel payload exact, logits/greedy match (fixture case
+video_4frames in TestLFM3VLReferenceLogits / TestLFM3VLEngineImageGeneration).
+
 ## Open work
 
 1. DSpark (CPU first): the draft model loads (`LoadDSparkDraftMCF`), K/V is injected from the target's hidden taps, and a draft block runs with the Markov and confidence heads. The draft decoder is a regular `Instance` (standard Qwen3 layers, loaded with the target's embeddings and LM head through `LoadModelOptions.SharedEmbeddings`/`SharedOutput`), and blocks use the batch path's non-causal mode (`ForwardBlockNonCausal`). On the real pair, drafts match the target's greedy output for 5.1 of 7 tokens per block (`TestDSparkDraftAcceptance`, with `MANTLE_DSPARK_TARGET` and `MANTLE_DSPARK_DRAFT` set). Still needed: the speculative loop (batched verification, accept/reject, KV rollback, sampling at T>0), CLI wiring, then CUDA. The draft MCF was repacked with its `config.json`. Model shape comes from it; speculation on/off, draft length and confidence threshold will be CLI flags.
@@ -75,7 +86,7 @@ explicit codebooks, determinism, and bits->dtype mapping.
 3. `mantle trace` is CPU-only, so CPU and CUDA logits can't be compared directly.
 4. Dependency bumps for existing modules (urfave/cli, echo, golang.org/x/*).
 5. Items in `TODO.md`: Gemma3 marked broken, Granite, CI, docs.
-6. LFM3-VL/Omni follow-ups: video input (temporal_patch_size > 1 frames), LFM3-Omni-2B, a device-side
-   vision tower for large images.
+6. LFM3-VL/Omni follow-ups: mp4/video-file decoding (currently frame directories only), LFM3-Omni-2B
+   (audio encoder + Liquid RVQ codec), a device-side vision tower for large images.
 
 CUDA build: `CUDA=1 task build -f`, then run with `LD_LIBRARY_PATH=/usr/local/cuda-13.2/targets/x86_64-linux/lib`.

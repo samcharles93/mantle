@@ -281,46 +281,112 @@ func resizeBicubicUInt8(pix []uint8, h, w, H, W int) []uint8 {
 // temporal slots duplicated for still images. Values are rescaled and
 // normalized per channel: (px*rescale - mean) / std.
 func patchify(pix []uint8, h, w int, cfg *core.VisionConfig) []float32 {
+	gh, gw := h/cfg.PatchSize, w/cfg.PatchSize
+	patchDim := cfg.PatchDim()
+	out := make([]float32, gh*gw*patchDim)
+	for bi := 0; bi < (gh/cfg.MergeSize)*(gw/cfg.MergeSize); bi++ {
+		for wi := 0; wi < cfg.MergeSize*cfg.MergeSize; wi++ {
+			row := (bi*cfg.MergeSize*cfg.MergeSize + wi) * patchDim
+			writePatch(out[row:row+patchDim], func(t int) []uint8 { return pix }, h, w, cfg, bi, wi)
+		}
+	}
+	return out
+}
+
+// writePatch writes one patch row: [channel][temporal][patch row][patch col],
+// frame(t) returning the channel-first uint8 image for temporal slot t.
+func writePatch(dst []float32, frame func(t int) []uint8, h, w int, cfg *core.VisionConfig, bi, wi int) {
 	C := cfg.InChannels
 	patch := cfg.PatchSize
 	merge := cfg.MergeSize
-	temporal := cfg.TemporalPatch
-	gh, gw := h/patch, w/patch
-	patchDim := C * temporal * patch * patch
-	n := gh * gw
-	out := make([]float32, n*patchDim)
-	mean := cfg.ImageMean
-	std := cfg.ImageStd
-	rescale := cfg.RescaleFactor
-	for bi := 0; bi < (gh/merge)*(gw/merge); bi++ {
-		bh := bi / (gw / merge)
-		bw := bi % (gw / merge)
-		for wi := 0; wi < merge*merge; wi++ {
-			mh := wi / merge
-			mw := wi % merge
-			py := (bh*merge + mh) * patch
-			px := (bw*merge + mw) * patch
-			row := (bi*merge*merge + wi) * patchDim
-			off := 0
-			for c := 0; c < C; c++ {
-				m, s := 0.5, 0.5
-				if len(mean) > c {
-					m = mean[c]
-				}
-				if len(std) > c {
-					s = std[c]
-				}
-				for t := 0; t < temporal; t++ {
-					for pi := 0; pi < patch; pi++ {
-						for pj := 0; pj < patch; pj++ {
-							v := float64(pix[c*h*w+(py+pi)*w+(px+pj)]) * rescale
-							out[row+off] = float32((v - m) / s)
-							off++
-						}
-					}
+	bh := bi / (w / patch / merge)
+	bw := bi % (w / patch / merge)
+	mh := wi / merge
+	mw := wi % merge
+	py := (bh*merge + mh) * patch
+	px := (bw*merge + mw) * patch
+	mean, std, rescale := cfg.ImageMean, cfg.ImageStd, cfg.RescaleFactor
+	off := 0
+	for c := 0; c < C; c++ {
+		m, s := 0.5, 0.5
+		if len(mean) > c {
+			m = mean[c]
+		}
+		if len(std) > c {
+			s = std[c]
+		}
+		for t := 0; t < cfg.TemporalPatch; t++ {
+			pix := frame(t)
+			for pi := 0; pi < patch; pi++ {
+				for pj := 0; pj < patch; pj++ {
+					v := float64(pix[c*h*w+(py+pi)*w+(px+pj)]) * rescale
+					dst[off] = float32((v - m) / s)
+					off++
 				}
 			}
 		}
 	}
-	return out
+}
+
+// ProcessVideoFrames preprocesses one video given as a list of encoded frame
+// images (PNG/JPEG), in temporal order. Each frame is resized independently
+// with the video processor's bounds; an odd frame count is padded by repeating
+// the last frame (HF behavior). The returned payload holds grid_t*gh*gw rows
+// of PatchDim() floats in segment-major then merge-block-major order, each
+// row [channel][temporal slot][patch row][patch col] with temporal slots
+// pairing frames (2s, 2s+1); the grid is [grid_t, gh, gw].
+func ProcessVideoFrames(frames [][]byte, cfg *core.VisionConfig) (pixelValues []float32, grid [3]int, err error) {
+	if cfg == nil || len(frames) == 0 {
+		return nil, grid, fmt.Errorf("vision: no video frames")
+	}
+	patch := cfg.PatchSize
+	merge := cfg.MergeSize
+	factor := patch * merge
+	temporal := cfg.TemporalPatch
+	if temporal <= 0 {
+		temporal = 1
+	}
+	// decode + resize every frame
+	pixs := make([][]uint8, len(frames))
+	h, w := 0, 0
+	for i, raw := range frames {
+		pix, fh, fw, err := decodeImageRGB(raw)
+		if err != nil {
+			return nil, grid, fmt.Errorf("vision: frame %d: %w", i, err)
+		}
+		rh, rw := smartResize(fh, fw, factor, cfg.VideoMinPixels, cfg.VideoMaxPixels)
+		if rh != fh || rw != fw {
+			pix = resizeBicubicUInt8(pix, fh, fw, rh, rw)
+			fh, fw = rh, rw
+		}
+		if i == 0 {
+			h, w = fh, fw
+		} else if fh != h || fw != w {
+			return nil, grid, fmt.Errorf("vision: frame %d is %dx%d, want %dx%d (all frames must resize to one shape)", i, fh, fw, h, w)
+		}
+		pixs[i] = pix
+	}
+	// pad odd frame count by repeating the last frame
+	if pad := -len(pixs) % temporal; pad != 0 {
+		for i := 0; i < pad; i++ {
+			pixs = append(pixs, pixs[len(pixs)-1])
+		}
+	}
+	gridT := len(pixs) / temporal
+	gh, gw := h/patch, w/patch
+	if gh*patch != h || gw*patch != w {
+		return nil, grid, fmt.Errorf("vision: resized frame %dx%d not divisible by patch %d", h, w, patch)
+	}
+	grid = [3]int{gridT, gh, gw}
+	patchDim := cfg.PatchDim()
+	out := make([]float32, gridT*gh*gw*patchDim)
+	for s := 0; s < gridT; s++ {
+		for bi := 0; bi < (gh/merge)*(gw/merge); bi++ {
+			for wi := 0; wi < merge*merge; wi++ {
+				row := (s*gh*gw + bi*merge*merge + wi) * patchDim
+				writePatch(out[row:row+patchDim], func(t int) []uint8 { return pixs[s*temporal+t] }, h, w, cfg, bi, wi)
+			}
+		}
+	}
+	return out, grid, nil
 }

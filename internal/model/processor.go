@@ -9,6 +9,22 @@ import (
 // runtime needs for multimodal inputs (image preprocessing parameters).
 type ProcessorConfig struct {
 	ImageProcessor *ImageProcessorConfig `json:"image_processor"`
+	VideoProcessor *VideoProcessorConfig `json:"video_processor"`
+}
+
+// VideoProcessorConfig mirrors the video_processor half of processor_config.json.
+type VideoProcessorConfig struct {
+	FPS           float64   `json:"fps"`
+	ImageMean     []float64 `json:"image_mean"`
+	ImageStd      []float64 `json:"image_std"`
+	RescaleFactor float64   `json:"rescale_factor"`
+	PatchSize     int       `json:"patch_size"`
+	MergeSize     int       `json:"merge_size"`
+	TemporalPatch int       `json:"temporal_patch_size"`
+	Size          *struct {
+		ShortestEdge int `json:"shortest_edge"`
+		LongestEdge  int `json:"longest_edge"`
+	} `json:"size"`
 }
 
 type ImageProcessorConfig struct {

@@ -47,6 +47,12 @@ type Request struct {
 	// placeholder token into the projected vision embeddings.
 	Images [][]byte
 
+	// Videos holds one video as an ordered list of encoded frame images
+	// (PNG/JPEG), one per video content block in the messages. Frames are
+	// treated as sampled at the processor's fps; the engine expands each
+	// video placeholder into per-segment timestamp + vision tokens.
+	Videos [][][]byte
+
 	Steps int
 	Seed  int64
 

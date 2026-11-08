@@ -99,6 +99,7 @@ func visionConfigFromHFConfig(cfg *model.HFConfig, proc *model.ProcessorConfig) 
 		ProjectorBias:         cfg.ProjectorBias,
 		TextHiddenSize:        cfg.HiddenSize,
 		ImageTokenID:          cfg.ImageTokenID,
+		VideoTokenID:          cfg.VideoTokenID,
 		VisionStartTokenID:    cfg.VisionStartTokenID,
 		VisionEndTokenID:      cfg.VisionEndTokenID,
 		ImageMean:             []float64{0.5, 0.5, 0.5},
@@ -106,6 +107,23 @@ func visionConfigFromHFConfig(cfg *model.HFConfig, proc *model.ProcessorConfig) 
 		RescaleFactor:         1.0 / 255.0,
 		MinPixels:             65536,
 		MaxPixels:             16777216,
+		VideoMinPixels:        4096,
+		VideoMaxPixels:        25165824,
+		VideoFPS:              2.0,
+	}
+	if proc != nil && proc.VideoProcessor != nil {
+		vp := proc.VideoProcessor
+		if vp.FPS > 0 {
+			out.VideoFPS = vp.FPS
+		}
+		if vp.Size != nil {
+			if vp.Size.ShortestEdge > 0 {
+				out.VideoMinPixels = vp.Size.ShortestEdge
+			}
+			if vp.Size.LongestEdge > 0 {
+				out.VideoMaxPixels = vp.Size.LongestEdge
+			}
+		}
 	}
 	if proc != nil && proc.ImageProcessor != nil {
 		ip := proc.ImageProcessor

@@ -6,6 +6,7 @@ type RequestOptions struct {
 	Messages []tokenizer.Message
 	Tools    []any
 	Images   [][]byte
+	Videos   [][][]byte
 
 	Steps *int
 	Seed  *int64
@@ -30,6 +31,7 @@ func ResolveRequest(opts RequestOptions, defaults GenDefaults) Request {
 		Messages:        opts.Messages,
 		Tools:           opts.Tools,
 		Images:          opts.Images,
+		Videos:          opts.Videos,
 		Steps:           -1,
 		Seed:            -1,
 		Temperature:     0.8,
