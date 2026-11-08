@@ -18,6 +18,39 @@ extern int mantleCudaQuantMatVecInt8BlocksF32(
 	int blocksPerRow,
 	int cols,
 	cudaStream_t stream);
+extern int mantleCudaQuantMatVecInt8BlocksF32Legacy(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	float* y,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream);
+extern int mantleCudaQuantMatVecInt8BlocksF32Multi(
+	const signed char* q0,
+	const float* s0,
+	float* y0,
+	int rows0,
+	const signed char* q1,
+	const float* s1,
+	float* y1,
+	int rows1,
+	const signed char* q2,
+	const float* s2,
+	float* y2,
+	int rows2,
+	const signed char* q3,
+	const float* s3,
+	float* y3,
+	int rows3,
+	int nSegs,
+	const float* xUp,
+	const float* xGate,
+	int act,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream);
 extern int mantleCudaQuantMatVecQ4F32(
 	const unsigned char* qData,
 	const unsigned short* scalesF16,
@@ -107,6 +140,50 @@ static int mantleCudaQuantMatVecInt8BlocksF32Wrapper(
 	int cols,
 	cudaStream_t stream) {
 	return mantleCudaQuantMatVecInt8BlocksF32(q, scales, x, y, rows, blocksPerRow, cols, stream);
+}
+
+static int mantleCudaQuantMatVecInt8BlocksF32LegacyWrapper(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	float* y,
+	int rows,
+	int blocksPerRow,
+	int cols,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecInt8BlocksF32Legacy(q, scales, x, y, rows, blocksPerRow, cols, stream);
+}
+
+static int mantleCudaQuantMatVecInt8BlocksF32MultiWrapper(
+	const signed char* q0,
+	const float* s0,
+	float* y0,
+	int rows0,
+	const signed char* q1,
+	const float* s1,
+	float* y1,
+	int rows1,
+	const signed char* q2,
+	const float* s2,
+	float* y2,
+	int rows2,
+	const signed char* q3,
+	const float* s3,
+	float* y3,
+	int rows3,
+	int nSegs,
+	const float* xUp,
+	const float* xGate,
+	int act,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecInt8BlocksF32Multi(
+		q0, s0, y0, rows0,
+		q1, s1, y1, rows1,
+		q2, s2, y2, rows2,
+		q3, s3, y3, rows3,
+		nSegs, xUp, xGate, act, cols, blocksPerRow, stream);
 }
 
 static int mantleCudaQuantMatVecCachedBatchDp4aWrapper(
@@ -215,6 +292,7 @@ import "C"
 
 import (
 	"fmt"
+	"unsafe"
 )
 
 func QuantMatVecInt8BlocksF32(q, scales, x, y DeviceBuffer, rows, blocksPerRow, cols int, stream Stream) error {
@@ -232,6 +310,94 @@ func QuantMatVecInt8BlocksF32(q, scales, x, y DeviceBuffer, rows, blocksPerRow, 
 		C.int(rows),
 		C.int(blocksPerRow),
 		C.int(cols),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecInt8BlocksF32Legacy runs the original per-lane int8-blocks
+// matvec kernels. It is bit-identical to QuantMatVecInt8BlocksF32 but keeps
+// the legacy code path reachable for parity tests and explicit fallbacks.
+func QuantMatVecInt8BlocksF32Legacy(q, scales, x, y DeviceBuffer, rows, blocksPerRow, cols int, stream Stream) error {
+	if q.ptr == nil || scales.ptr == nil || x.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("quant matvec legacy buffer is nil")
+	}
+	if rows <= 0 || blocksPerRow <= 0 || cols <= 0 {
+		return fmt.Errorf("quant matvec legacy rows/blocks/cols must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecInt8BlocksF32LegacyWrapper(
+		(*C.schar)(q.ptr),
+		(*C.float)(scales.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(blocksPerRow),
+		C.int(cols),
+		stream.ptr,
+	))
+}
+
+// Activation modes for QuantMatVecInt8BlocksF32Multi (must match the .cu).
+const (
+	QuantActNone = 0
+	QuantActSilu = 1
+	QuantActGelu = 2
+)
+
+// QuantMatVecSegment describes one quantized weight matrix (cached-int8
+// layout) and its output buffer within a fused multi-segment matvec.
+type QuantMatVecSegment struct {
+	Q      DeviceBuffer
+	Scales DeviceBuffer
+	Y      DeviceBuffer
+	Rows   int
+}
+
+// QuantMatVecInt8BlocksF32Multi computes, in a single kernel launch, one
+// matvec per segment over the shared input xUp: y[seg] = W[seg]^T * x. When
+// act != QuantActNone, the effective input is act(xGate[c]) * xUp[c], using
+// the exact expressions of SiluMulF32/GeluMulF32, so the launch is
+// bit-identical to running the activation kernel and then a matvec per
+// segment. All segments must share cols and blocksPerRow. Returns an error
+// when len(segs) is out of range or the shared-memory budget does not fit
+// (caller should fall back to per-segment QuantMatVecInt8BlocksF32 calls).
+func QuantMatVecInt8BlocksF32Multi(segs []QuantMatVecSegment, xUp, xGate DeviceBuffer, act int, cols, blocksPerRow int, stream Stream) error {
+	if len(segs) < 1 || len(segs) > 4 {
+		return fmt.Errorf("quant matvec multi: need 1..4 segments, got %d", len(segs))
+	}
+	if xUp.ptr == nil {
+		return fmt.Errorf("quant matvec multi: xUp is nil")
+	}
+	if act != QuantActNone && xGate.ptr == nil {
+		return fmt.Errorf("quant matvec multi: act=%d requires xGate", act)
+	}
+	if cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("quant matvec multi: cols/blocksPerRow must be > 0")
+	}
+	var q, s, y [4]unsafe.Pointer
+	var rows [4]C.int
+	for i, seg := range segs {
+		if seg.Q.ptr == nil || seg.Scales.ptr == nil || seg.Y.ptr == nil {
+			return fmt.Errorf("quant matvec multi: segment %d has a nil buffer", i)
+		}
+		if seg.Rows <= 0 {
+			return fmt.Errorf("quant matvec multi: segment %d rows must be > 0", i)
+		}
+		q[i] = seg.Q.ptr
+		s[i] = seg.Scales.ptr
+		y[i] = seg.Y.ptr
+		rows[i] = C.int(seg.Rows)
+	}
+	return cudaErr(C.mantleCudaQuantMatVecInt8BlocksF32MultiWrapper(
+		(*C.schar)(q[0]), (*C.float)(s[0]), (*C.float)(y[0]), rows[0],
+		(*C.schar)(q[1]), (*C.float)(s[1]), (*C.float)(y[1]), rows[1],
+		(*C.schar)(q[2]), (*C.float)(s[2]), (*C.float)(y[2]), rows[2],
+		(*C.schar)(q[3]), (*C.float)(s[3]), (*C.float)(y[3]), rows[3],
+		C.int(len(segs)),
+		(*C.float)(xUp.ptr),
+		(*C.float)(xGate.ptr),
+		C.int(act),
+		C.int(cols),
+		C.int(blocksPerRow),
 		stream.ptr,
 	))
 }

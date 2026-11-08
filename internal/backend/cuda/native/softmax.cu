@@ -171,6 +171,185 @@ extern "C"
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Fused multi-segment decode matvec.
+  //
+  // One launch computes up to 4 quantized matvecs that share the same input
+  // vector x (e.g. Wq | gate | Wk | Wv, or FFN Up | Gate). One warp per row;
+  // the b-loop is unrolled 8 deep so each lane keeps 8 independent 1-byte
+  // weight loads in flight (decode is weight-bandwidth bound and the
+  // per-lane 1-byte loads of the xshared kernel are latency-bound).
+  //
+  // Bit-stability: every output row is computed exactly like
+  // quant_matvec_int8_blocks_f32_xshared_kernel would compute it — lane l
+  // accumulates elements c = b*32 + l for ascending block b via
+  // sum = fmaf(s * (float)q[c], x[c], sum), blocks with s == 0 skipped, and a
+  // final warp_reduce_sum. When act != 0 the x vector is applied inline as
+  // x[c] = act(xGate[c]) * xUp[c] with the exact expressions the
+  // silu_mul/gelu_mul kernels use, so the fused launch is bit-identical to
+  // running the activation kernel and then the matvec over its output.
+  // ---------------------------------------------------------------------------
+
+#define QMV_MAX_SEGS 4
+#define QMV_UNROLL 32
+#define QMV_ROWS_PER_BLOCK_DEF 8 // warps per block, one row per warp
+
+  struct QuantMatVecSeg
+  {
+    const int8_t *q;
+    const float *scales;
+    float *y;
+    int rows;
+  };
+
+  // Passed by value as a single kernel parameter (a bare array parameter
+  // would decay to a host pointer).
+  struct QuantMatVecSegArray
+  {
+    QuantMatVecSeg seg[QMV_MAX_SEGS];
+    int nSegs;
+    int totalRows;
+  };
+
+  __device__ __forceinline__ float qmv_apply_act(int act, float g, float u)
+  {
+    if (act == 1) // silu — identical expression to silu_mul_f32_kernel
+    {
+      const float s = 1.0f / (1.0f + __expf(-g));
+      return (g * s) * u;
+    }
+    if (act == 2) // gelu — identical expression to gelu_mul_f32_kernel
+    {
+      const float inner = 0.7978845608028654f * (g + 0.044715f * g * g * g);
+      const float a = 0.5f * g * (1.0f + static_cast<float>(tanh(static_cast<double>(inner))));
+      return a * u;
+    }
+    return u;
+  }
+
+  // Row dot-product with the activation mode compiled in (ACT: 0 none,
+  // 1 silu, 2 gelu) so the act == 0 decode path has no per-element branch and
+  // unrolls cleanly. Bit-identical to the legacy xshared kernel per row.
+  extern "C++" {
+  template <int ACT>
+  __device__ __forceinline__ void qmv_row_dot(
+      const int8_t *__restrict__ q, const float *__restrict__ scales,
+      const float *__restrict__ xUp, const float *__restrict__ xGate,
+      int row_block_base, int full_blocks, int blocksPerRow, int cols,
+      int lane, float &sum)
+  {
+    int b = 0;
+    for (; b + QMV_UNROLL <= full_blocks; b += QMV_UNROLL)
+    {
+      // One coalesced 128B scale load per warp covers QMV_UNROLL blocks; the
+      // per-block scale is then broadcast with a shuffle. This keeps the
+      // scale stream from doubling the L2 sector traffic (a warp-uniform
+      // scalar load per block costs one 32B sector per 32 weight bytes).
+      // The shuffled value is bit-identical to a direct load of scales[bb].
+      const float sv = __ldg(scales + row_block_base + b + lane);
+      int8_t qv[QMV_UNROLL];
+      float xv[QMV_UNROLL];
+#pragma unroll
+      for (int u = 0; u < QMV_UNROLL; u++)
+      {
+        const int bb = row_block_base + b + u;
+        const int c = (b + u) * 32 + lane;
+        qv[u] = __ldg(q + (size_t)bb * 32 + lane);
+        if (ACT == 0)
+          xv[u] = __ldg(xUp + c);
+        else
+          xv[u] = qmv_apply_act(ACT, __ldg(xGate + c), __ldg(xUp + c));
+      }
+#pragma unroll
+      for (int u = 0; u < QMV_UNROLL; u++)
+      {
+        const float s = __shfl_sync(0xffffffffu, sv, u);
+        if (s != 0.0f)
+          sum = fmaf(s * static_cast<float>(qv[u]), xv[u], sum);
+      }
+    }
+    for (; b < full_blocks; b++)
+    {
+      const float s = __ldg(scales + row_block_base + b);
+      if (s == 0.0f)
+        continue;
+      const int8_t qv = __ldg(q + (size_t)(row_block_base + b) * 32 + lane);
+      const int c = b * 32 + lane;
+      const float xv = (ACT == 0) ? __ldg(xUp + c)
+                                  : qmv_apply_act(ACT, __ldg(xGate + c), __ldg(xUp + c));
+      sum = fmaf(s * static_cast<float>(qv), xv, sum);
+    }
+    if (full_blocks < blocksPerRow)
+    {
+      const int rem = cols - (full_blocks << 5);
+      if (rem > 0 && lane < rem)
+      {
+        const float s = __ldg(scales + row_block_base + full_blocks);
+        if (s != 0.0f)
+        {
+          const int8_t qv = __ldg(q + (size_t)(row_block_base + full_blocks) * 32 + lane);
+          const int c = (full_blocks * 32) + lane;
+          const float xv = (ACT == 0) ? __ldg(xUp + c)
+                                      : qmv_apply_act(ACT, __ldg(xGate + c), __ldg(xUp + c));
+          sum = fmaf(s * static_cast<float>(qv), xv, sum);
+        }
+      }
+    }
+  }
+
+  } // extern "C++"
+
+  __global__ void quant_matvec_int8_blocks_f32_multi_act_kernel(
+      QuantMatVecSegArray sa,
+      const float *__restrict__ xUp,
+      const float *__restrict__ xGate, // may be null when act == 0
+      int act,
+      int cols,
+      int blocksPerRow)
+  {
+    const QuantMatVecSeg *segs = sa.seg;
+    const int nSegs = sa.nSegs;
+    const int totalRows = sa.totalRows;
+
+    const int lane = threadIdx.x & (WARP_SIZE - 1);
+    const int warp = threadIdx.x / WARP_SIZE;
+    const int wpb = blockDim.x / WARP_SIZE;
+
+    // Resolve this warp's global row to (segment, local row).
+    const int grow = blockIdx.x * wpb + warp;
+    int seg = 0;
+    int lrow = grow;
+    while (seg < nSegs - 1 && lrow >= segs[seg].rows)
+    {
+      lrow -= segs[seg].rows;
+      seg++;
+    }
+    if (grow >= totalRows || lrow >= segs[seg].rows)
+      return;
+
+    const int8_t *q = segs[seg].q;
+    const float *scales = segs[seg].scales;
+    const int row_block_base = lrow * blocksPerRow;
+    const int full_blocks = min(blocksPerRow, cols >> 5);
+
+    float sum = 0.0f;
+    if (act == 0)
+      qmv_row_dot<0>(q, scales, xUp, xGate, row_block_base, full_blocks,
+                     blocksPerRow, cols, lane, sum);
+    else if (act == 1)
+      qmv_row_dot<1>(q, scales, xUp, xGate, row_block_base, full_blocks,
+                     blocksPerRow, cols, lane, sum);
+    else
+      qmv_row_dot<2>(q, scales, xUp, xGate, row_block_base, full_blocks,
+                     blocksPerRow, cols, lane, sum);
+
+    const float warp_sum = warp_reduce_sum(sum);
+    if (lane == 0)
+    {
+      segs[seg].y[lrow] = warp_sum;
+    }
+  }
+
   __global__ void softmax_rows_optimized_kernel(float *__restrict__ __align__(16)
                                                     data,
                                                 int rows, int cols)
@@ -1265,10 +1444,23 @@ extern "C"
     return (int)err;
   }
 
-  int mantleCudaQuantMatVecInt8BlocksF32(const int8_t *q, const float *scales,
-                                         const float *x, float *y, int rows,
-                                         int blocksPerRow, int cols,
-                                         cudaStream_t stream)
+  static void qmv_launch_multi(QuantMatVecSegArray sa,
+                               const float *xUp, const float *xGate, int act,
+                               int cols, int blocksPerRow, cudaStream_t stream)
+  {
+    const int threads = QMV_ROWS_PER_BLOCK_DEF * WARP_SIZE;
+    dim3 block(threads);
+    dim3 grid((sa.totalRows + QMV_ROWS_PER_BLOCK_DEF - 1) / QMV_ROWS_PER_BLOCK_DEF);
+    quant_matvec_int8_blocks_f32_multi_act_kernel<<<grid, block, 0, stream>>>(
+        sa, xUp, xGate, act, cols, blocksPerRow);
+  }
+
+  // Legacy single-matvec entry: always uses the original per-lane kernels.
+  // Kept for bit-parity tests and as an explicit fallback.
+  int mantleCudaQuantMatVecInt8BlocksF32Legacy(const int8_t *q, const float *scales,
+                                               const float *x, float *y, int rows,
+                                               int blocksPerRow, int cols,
+                                               cudaStream_t stream)
   {
     if (!q || !scales || !x || !y || rows <= 0 || blocksPerRow <= 0 || cols <= 0)
       return cudaErrorInvalidValue;
@@ -1290,6 +1482,59 @@ extern "C"
       quant_matvec_int8_blocks_f32_kernel<<<grid, block, 0, stream>>>(
           q, scales, x, y, rows, blocksPerRow, cols);
     }
+    return (int)cudaGetLastError();
+  }
+
+  int mantleCudaQuantMatVecInt8BlocksF32(const int8_t *q, const float *scales,
+                                         const float *x, float *y, int rows,
+                                         int blocksPerRow, int cols,
+                                         cudaStream_t stream)
+  {
+    if (!q || !scales || !x || !y || rows <= 0 || blocksPerRow <= 0 || cols <= 0)
+      return cudaErrorInvalidValue;
+    // Route through the fused kernel (single segment, no activation); it is
+    // bit-identical to the legacy kernels but keeps wide loads in flight.
+    QuantMatVecSegArray sa;
+    sa.seg[0] = {q, scales, y, rows};
+    sa.nSegs = 1;
+    sa.totalRows = rows;
+    qmv_launch_multi(sa, x, nullptr, 0, cols, blocksPerRow, stream);
+    return (int)cudaGetLastError();
+  }
+
+  // Fused multi-segment matvec: segs i in [0, nSegs) all multiply the same
+  // xUp [cols] (optionally activated by xGate with act) into their own y.
+  // act: 0 = none, 1 = silu, 2 = gelu (applied as act(xGate[c]) * xUp[c]).
+  int mantleCudaQuantMatVecInt8BlocksF32Multi(
+      const int8_t *q0, const float *s0, float *y0, int rows0,
+      const int8_t *q1, const float *s1, float *y1, int rows1,
+      const int8_t *q2, const float *s2, float *y2, int rows2,
+      const int8_t *q3, const float *s3, float *y3, int rows3,
+      int nSegs,
+      const float *xUp, const float *xGate, int act,
+      int cols, int blocksPerRow, cudaStream_t stream)
+  {
+    if (nSegs < 1 || nSegs > QMV_MAX_SEGS || !xUp || cols <= 0 || blocksPerRow <= 0)
+      return cudaErrorInvalidValue;
+    if (act != 0 && !xGate)
+      return cudaErrorInvalidValue;
+    if (act < 0 || act > 2)
+      return cudaErrorInvalidValue;
+    const int8_t *qs[QMV_MAX_SEGS] = {q0, q1, q2, q3};
+    const float *ss[QMV_MAX_SEGS] = {s0, s1, s2, s3};
+    float *ys[QMV_MAX_SEGS] = {y0, y1, y2, y3};
+    const int rws[QMV_MAX_SEGS] = {rows0, rows1, rows2, rows3};
+    QuantMatVecSegArray sa;
+    sa.nSegs = nSegs;
+    sa.totalRows = 0;
+    for (int i = 0; i < nSegs; i++)
+    {
+      if (!qs[i] || !ss[i] || !ys[i] || rws[i] <= 0)
+        return cudaErrorInvalidValue;
+      sa.seg[i] = {qs[i], ss[i], ys[i], rws[i]};
+      sa.totalRows += rws[i];
+    }
+    qmv_launch_multi(sa, xUp, xGate, act, cols, blocksPerRow, stream);
     return (int)cudaGetLastError();
   }
 

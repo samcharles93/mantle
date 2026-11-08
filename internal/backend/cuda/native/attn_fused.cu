@@ -197,4 +197,213 @@ __host__ int mantleCudaStoreKVQ8RowBroadcast(
   return cudaGetLastError();
 }
 
+
+// One launch applies RoPE in place to both the Q tensor [nHeadsQ, headDim]
+// and the K tensor [nHeadsK, headDim] (grid = nHeadsQ + nHeadsK). Per-element
+// math is identical to apply_rope_f32_inplace_kernel, so results are
+// bit-identical to two separate launches.
+__global__ void apply_rope_f32_pair_kernel(
+    float* __restrict__ xQ,
+    float* __restrict__ xK,
+    const float* __restrict__ inv_freq,
+    int pos,
+    float attn_scale,
+    int head_dim,
+    int half,
+    int n_heads_q,
+    int n_heads_k)
+{
+  const int head = blockIdx.x;
+  float* x;
+  int h;
+  if (head < n_heads_q) {
+    x = xQ;
+    h = head;
+  } else {
+    x = xK;
+    h = head - n_heads_q;
+  }
+  const int tid = threadIdx.x;
+  float* xh = x + h * head_dim;
+  const float fpos = static_cast<float>(pos);
+  for (int i = tid; i < half; i += blockDim.x) {
+    float angle = fpos * inv_freq[i];
+    float c, s;
+    __sincosf(angle, &s, &c);
+    c *= attn_scale;
+    s *= attn_scale;
+    const int i0 = i;
+    const int i1 = i + half;
+    float x0 = xh[i0];
+    float x1 = xh[i1];
+    xh[i0] = x0 * c - x1 * s;
+    xh[i1] = x0 * s + x1 * c;
+  }
+}
+
+__host__ int mantleCudaApplyRoPEPairF32(
+    float* xQ,
+    float* xK,
+    const float* inv_freq,
+    int pos,
+    float attn_scale,
+    int head_dim,
+    int half,
+    int n_heads_q,
+    int n_heads_k,
+    cudaStream_t stream)
+{
+  if (!xQ || !xK || !inv_freq || head_dim <= 0 || half <= 0 || n_heads_q <= 0 || n_heads_k <= 0) {
+    return cudaErrorInvalidValue;
+  }
+  if (half * 2 > head_dim) {
+    return cudaErrorInvalidValue;
+  }
+  if (attn_scale == 0.0f) attn_scale = 1.0f;
+  int block = 128;
+  if (half < 128) block = 64;
+  if (half < 64) block = 32;
+  apply_rope_f32_pair_kernel<<<n_heads_q + n_heads_k, block, 0, stream>>>(
+      xQ, xK, inv_freq, pos, attn_scale, head_dim, half, n_heads_q, n_heads_k);
+  return cudaGetLastError();
+}
+
+// One launch writes both the K and V f16 rows (grid = 2: block 0 -> K,
+// block 1 -> V). Per-element conversion is identical to store_kv_f16_row_kernel.
+__global__ void store_kv_pair_f16_kernel(
+    uint16_t* __restrict__ k_cache,
+    uint16_t* __restrict__ v_cache,
+    const float* __restrict__ k_src,
+    const float* __restrict__ v_src,
+    int cache_pos,
+    int kv_stride)
+{
+  uint16_t* cache = (blockIdx.x == 0) ? k_cache : v_cache;
+  const float* src = (blockIdx.x == 0) ? k_src : v_src;
+  const int tid = threadIdx.x;
+  uint16_t* dst = cache + (size_t)cache_pos * (size_t)kv_stride;
+  for (int i = tid; i < kv_stride; i += blockDim.x) {
+    __half h = __float2half(src[i]);
+    dst[i] = __half_as_ushort(h);
+  }
+}
+
+__host__ int mantleCudaStoreKVPairsF16(
+    uint16_t* k_cache,
+    uint16_t* v_cache,
+    const float* k_src,
+    const float* v_src,
+    int cache_pos,
+    int kv_stride,
+    cudaStream_t stream)
+{
+  if (!k_cache || !v_cache || !k_src || !v_src || cache_pos < 0 || kv_stride <= 0) {
+    return cudaErrorInvalidValue;
+  }
+  int block = 256;
+  if (kv_stride < 256) block = 128;
+  if (kv_stride < 128) block = 64;
+  store_kv_pair_f16_kernel<<<2, block, 0, stream>>>(
+      k_cache, v_cache, k_src, v_src, cache_pos, kv_stride);
+  return cudaGetLastError();
+}
+
+// One launch quantizes and stores both the K and V q8 rows (grid = 2:
+// block 0 -> K, block 1 -> V). The absmax reduction uses the same
+// max-of-abs values (max is exact and order-independent), so the derived
+// scale, the quantized bytes, and the broadcast scale strip are
+// bit-identical to two separate store_kv_q8_row_broadcast_kernel launches.
+__global__ void store_kv_pair_q8_row_broadcast_kernel(
+    int8_t* __restrict__ k_q_cache,
+    float* __restrict__ k_scales,
+    int8_t* __restrict__ v_q_cache,
+    float* __restrict__ v_scales,
+    const float* __restrict__ k_src,
+    const float* __restrict__ v_src,
+    int cache_pos,
+    int kv_stride,
+    int blocks_per_row)
+{
+  extern __shared__ float shmem[];
+  int8_t* q_cache = (blockIdx.x == 0) ? k_q_cache : v_q_cache;
+  float* scales = (blockIdx.x == 0) ? k_scales : v_scales;
+  const float* src = (blockIdx.x == 0) ? k_src : v_src;
+
+  const int tid = threadIdx.x;
+  const int bs = blockDim.x;
+
+  float local = 0.0f;
+  for (int i = tid; i < kv_stride; i += bs) {
+    float v = fabsf(src[i]);
+    if (v > local) local = v;
+  }
+  shmem[tid] = local;
+  __syncthreads();
+  for (int s = bs / 2; s > 0; s >>= 1) {
+    if (tid < s) {
+      float a = shmem[tid];
+      float b = shmem[tid + s];
+      shmem[tid] = (a > b) ? a : b;
+    }
+    __syncthreads();
+  }
+
+  __shared__ float scale_s;
+  __shared__ float inv_scale_s;
+  if (tid == 0) {
+    float absmax = shmem[0];
+    float scale = (absmax == 0.0f) ? 0.0f : (absmax / 127.0f);
+    scale_s = scale;
+    inv_scale_s = (scale == 0.0f) ? 0.0f : (127.0f / absmax);
+  }
+  __syncthreads();
+
+  int8_t* qdst = q_cache + (size_t)cache_pos * (size_t)kv_stride;
+  const float inv_scale = inv_scale_s;
+  if (inv_scale == 0.0f) {
+    for (int i = tid; i < kv_stride; i += bs) qdst[i] = 0;
+  } else {
+    for (int i = tid; i < kv_stride; i += bs) {
+      float v = src[i];
+      float scaled = v * inv_scale;
+      float rounded = (v >= 0.0f) ? (scaled + 0.5f) : (scaled - 0.5f);
+      int q = static_cast<int>(rounded);
+      if (q > 127) q = 127;
+      else if (q < -127) q = -127;
+      qdst[i] = static_cast<int8_t>(q);
+    }
+  }
+
+  float* sdst = scales + (size_t)cache_pos * (size_t)blocks_per_row;
+  const float scale = scale_s;
+  for (int i = tid; i < blocks_per_row; i += bs) {
+    sdst[i] = scale;
+  }
+}
+
+__host__ int mantleCudaStoreKVPairsQ8RowBroadcast(
+    int8_t* k_q_cache,
+    float* k_scales,
+    int8_t* v_q_cache,
+    float* v_scales,
+    const float* k_src,
+    const float* v_src,
+    int cache_pos,
+    int kv_stride,
+    int blocks_per_row,
+    cudaStream_t stream)
+{
+  if (!k_q_cache || !k_scales || !v_q_cache || !v_scales || !k_src || !v_src ||
+      cache_pos < 0 || kv_stride <= 0 || blocks_per_row <= 0) {
+    return cudaErrorInvalidValue;
+  }
+  int block = 256;
+  if (kv_stride < 256) block = 128;
+  if (kv_stride < 128) block = 64;
+  size_t shmem_bytes = block * sizeof(float);
+  store_kv_pair_q8_row_broadcast_kernel<<<2, block, shmem_bytes, stream>>>(
+      k_q_cache, k_scales, v_q_cache, v_scales, k_src, v_src, cache_pos, kv_stride, blocks_per_row);
+  return cudaGetLastError();
+}
+
 } // extern "C"
