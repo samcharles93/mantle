@@ -113,3 +113,9 @@ SLQ's learned codebooks are not uniform grids, so q*/k* payloads cannot represen
    `internal/backend/core` (RowTo + codebook-gather matvec, `BenchmarkMatVecUQ4`), CUDA routes
    uq* to device dequant (no quant-kernel dot path). SIMD pshufb/vpermb LUT specialization of the
    b<=4 gather loop is a future optimization; the scalar LUT path is correct and benchmarked.
+   Producer DONE (2026-11-09): `mantle quantize --method uqN [--codebooks slq.json]` calls
+   `mcf.EncodeUQTensor` (`pkg/mcf/uq.go`) — per-256-element super-block codebooks from the
+   SLQ JSON when given, else a deterministic k-means; per-32-block f16 scales; binary-search
+   nearest-level indices. Note for assignments: embeddings are heavy-tailed, so keep them at
+   q8/k6 via `--assignments` (verified on gemma-3-270m: uq4 layers + q8 embedding answers
+   correctly; uq4 embedding alone degrades).

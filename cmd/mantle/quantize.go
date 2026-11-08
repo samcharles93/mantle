@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/urfave/cli/v3"
@@ -58,6 +59,10 @@ func quantizeCmd() *cli.Command {
 				Name:  "budget-bytes",
 				Usage: "Exact total budget in bytes for quantized tensor payloads; quantize fails if the result exceeds it (RCO/SLQ guarantee).",
 			},
+			&cli.StringFlag{
+				Name:  "codebooks",
+				Usage: `Path to a JSON file with per-tensor uq* codebooks (SLQ search output): {"tensors": {"<name>": [[...2^bits levels...] per super-block]}}. Tensors without an entry get a derived k-means codebook. Only used by --method uqN.`,
+			},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			log := logger.FromContext(ctx)
@@ -104,6 +109,15 @@ func quantizeCmd() *cli.Command {
 				budget = &b
 			}
 
+			var codebooks map[string][][]float32
+			if cbPath := cmd.String("codebooks"); cbPath != "" {
+				cb, err := loadUQCodebooks(cbPath)
+				if err != nil {
+					return fmt.Errorf("quantize: %w", err)
+				}
+				codebooks = cb
+			}
+
 			opts := quantizeOptions{
 				Input:       inPath,
 				Output:      outPath,
@@ -112,6 +126,7 @@ func quantizeCmd() *cli.Command {
 				BudgetBytes: budget,
 				MinClip:     minClip,
 				MaxClip:     maxClip,
+				Codebooks:   codebooks,
 				Progress:    50,
 				Logger:      log,
 			}
@@ -128,8 +143,30 @@ type quantizeOptions struct {
 	BudgetBytes *uint64
 	MinClip     *float32
 	MaxClip     *float32
-	Progress    int
-	Logger      logger.Logger
+	// Codebooks maps tensor name -> per-super-block codebooks for uq* methods
+	// (SLQ search output). Nil or missing entries derive a k-means codebook.
+	Codebooks map[string][][]float32
+	Progress  int
+	Logger    logger.Logger
+}
+
+// loadUQCodebooks reads the --codebooks JSON file:
+// {"tensors": {"<name>": [[levels...] per super-block]}}.
+func loadUQCodebooks(path string) (map[string][][]float32, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Tensors map[string][][]float32 `json:"tensors"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("parse codebooks: %w", err)
+	}
+	if doc.Tensors == nil {
+		return nil, errors.New("codebooks file has no \"tensors\" object")
+	}
+	return doc.Tensors, nil
 }
 
 // quantAssignments is a per-tensor quantization method assignment, as produced by
@@ -240,6 +277,17 @@ func parseQuantMethod(s string) (quantMethod, error) {
 	case "int8", "int4":
 		return quantMethod{}, errors.New("int* quantization is reserved for activations and is not implemented")
 	default:
+		if strings.HasPrefix(strings.ToLower(s), "uq") {
+			bits, err := strconv.Atoi(s[2:])
+			if err != nil {
+				return quantMethod{}, fmt.Errorf("unsupported method %q", s)
+			}
+			dt, err := mcf.UQDTypeForBits(bits)
+			if err != nil {
+				return quantMethod{}, err
+			}
+			return quantMethod{Name: strings.ToLower(s), DType: dt, Bits: bits, BlockSize: bSize, SuperSize: sSize, Family: "u"}, nil
+		}
 		return quantMethod{}, fmt.Errorf("unsupported method %q", s)
 	}
 }
@@ -395,7 +443,7 @@ func runQuantize(opts quantizeOptions) error {
 			}
 			rows := info.Shape[0]
 			cols := info.Shape[1]
-			payload, minClip, maxClip, err = quantizeTensor(data, rows, cols, method, opts.MinClip, opts.MaxClip)
+			payload, minClip, maxClip, err = quantizeTensor(name, data, rows, cols, method, opts.MinClip, opts.MaxClip, opts.Codebooks[name])
 			if err != nil {
 				return fmt.Errorf("quantize: tensor %s: %w", name, err)
 			}
@@ -486,7 +534,7 @@ func runQuantize(opts quantizeOptions) error {
 	return w.Finalise()
 }
 
-func quantizeTensor(src []float32, rows, cols int, method quantMethod, minOverride, maxOverride *float32) ([]byte, float32, float32, error) {
+func quantizeTensor(name string, src []float32, rows, cols int, method quantMethod, minOverride, maxOverride *float32, codebooks [][]float32) ([]byte, float32, float32, error) {
 	if rows <= 0 || cols <= 0 {
 		return nil, 0, 0, errors.New("invalid tensor shape")
 	}
@@ -512,7 +560,7 @@ func quantizeTensor(src []float32, rows, cols int, method quantMethod, minOverri
 		return nil, 0, 0, errors.New("min-clip greater than max-clip")
 	}
 
-	if method.Family != "q" && method.Family != "k" {
+	if method.Family != "q" && method.Family != "k" && method.Family != "u" {
 		return nil, 0, 0, errors.New("unsupported quantization family")
 	}
 
@@ -529,6 +577,15 @@ func quantizeTensor(src []float32, rows, cols int, method quantMethod, minOverri
 	case "k":
 		payload, err := quantizeK(src, rows, cols, method.Bits, minClip, maxClip)
 		return payload, minClip, maxClip, err
+	case "u":
+		dt, payload, err := mcf.EncodeUQTensor(src, rows, cols, method.Bits, codebooks)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		if dt != method.DType {
+			return nil, 0, 0, fmt.Errorf("uq dtype mismatch: method %s, encoded %v", method.Name, dt)
+		}
+		return payload, minClip, maxClip, nil
 	default:
 		return nil, 0, 0, errors.New("unsupported quantization family")
 	}

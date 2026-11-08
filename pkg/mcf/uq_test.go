@@ -1,7 +1,9 @@
 package mcf
 
 import (
+	"bytes"
 	"math"
+	"math/rand"
 	"testing"
 )
 
@@ -94,5 +96,109 @@ func TestUQErrors(t *testing.T) {
 	}
 	if err := DecodeUQRow(payload[:len(payload)-1], layout, 0, 32, make([]float32, 32)); err == nil {
 		t.Fatal("truncated payload should fail")
+	}
+}
+
+// TestEncodeUQTensorDerivedCodebook checks the producer path with derived
+// k-means codebooks: payload size matches the layout and decoded rows
+// reconstruct the source within a sane relative error.
+func TestEncodeUQTensorDerivedCodebook(t *testing.T) {
+	rows, cols := 4, 256 // one super-block per row
+	src := make([]float32, rows*cols)
+	rng := rand.New(rand.NewSource(7))
+	for i := range src {
+		src[i] = float32(rng.NormFloat64() * 0.05)
+	}
+	dt, payload, err := EncodeUQTensor(src, rows, cols, 4, nil)
+	if err != nil {
+		t.Fatalf("EncodeUQTensor: %v", err)
+	}
+	if dt != DTypeUQ4 {
+		t.Fatalf("dtype %v, want UQ4", dt)
+	}
+	layout, err := UQPayloadLayoutFor([]uint64{uint64(rows), uint64(cols)}, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uint64(len(payload)) != layout.TotalBytes {
+		t.Fatalf("payload %d bytes, layout says %d", len(payload), layout.TotalBytes)
+	}
+	dst := make([]float32, cols)
+	var sumSq float64
+	for _, v := range src {
+		sumSq += float64(v) * float64(v)
+	}
+	rms := math.Sqrt(sumSq / float64(len(src)))
+	// 4-bit non-uniform codebook on gaussian data: quantization noise should be
+	// a small fraction of the tensor's variance
+	var sumErrSq float64
+	for r := range rows {
+		if err := DecodeUQRow(payload, layout, r, cols, dst); err != nil {
+			t.Fatalf("decode row %d: %v", r, err)
+		}
+		for c := range cols {
+			d := float64(dst[c] - src[r*cols+c])
+			sumErrSq += d * d
+		}
+	}
+	rmse := math.Sqrt(sumErrSq / float64(len(src)))
+	if rmse > 0.25*rms {
+		t.Fatalf("rmse %g too large vs rms %g", rmse, rms)
+	}
+}
+
+// TestEncodeUQTensorExplicitCodebook checks that provided codebooks are used
+// verbatim and indices pick the nearest scaled level.
+func TestEncodeUQTensorExplicitCodebook(t *testing.T) {
+	rows, cols := 1, 256
+	levels := make([]float32, 16) // 16 = 2^4, range [-8, 7]
+	for i := range levels {
+		levels[i] = float32(i) - 8
+	}
+	src := make([]float32, cols)
+	for i := range src {
+		src[i] = float32(i%16) - 8 // sweeps the codebook range exactly
+	}
+	cbs := [][]float32{levels}
+	dt, payload, err := EncodeUQTensor(src, rows, cols, 4, cbs)
+	if err != nil {
+		t.Fatalf("EncodeUQTensor: %v", err)
+	}
+	layout, _ := UQPayloadLayoutFor([]uint64{1, uint64(cols)}, dt)
+	dst := make([]float32, cols)
+	if err := DecodeUQRow(payload, layout, 0, cols, dst); err != nil {
+		t.Fatal(err)
+	}
+	for i := range src {
+		if d := math.Abs(float64(dst[i] - src[i])); d > 0.51 { // levels are 1 apart
+			t.Fatalf("elem %d: got %g want %g", i, dst[i], src[i])
+		}
+	}
+	// determinism
+	_, payload2, err := EncodeUQTensor(src, rows, cols, 4, cbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(payload, payload2) {
+		t.Fatal("encode not deterministic")
+	}
+}
+
+// TestUQDTypeForBits checks the bits->dtype mapping.
+func TestUQDTypeForBits(t *testing.T) {
+	for bits := 2; bits <= 8; bits++ {
+		dt, err := UQDTypeForBits(bits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b, ok := UQBits(dt); !ok || b != bits {
+			t.Fatalf("bits %d -> dtype %v -> bits %d", bits, dt, b)
+		}
+	}
+	if _, err := UQDTypeForBits(1); err == nil {
+		t.Fatal("bits 1 should fail")
+	}
+	if _, err := UQDTypeForBits(9); err == nil {
+		t.Fatal("bits 9 should fail")
 	}
 }

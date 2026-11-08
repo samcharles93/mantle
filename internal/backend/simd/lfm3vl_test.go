@@ -12,7 +12,6 @@ import (
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
-
 // lfm3vlReferenceCase mirrors one case of testdata/lfm3vl_reference.json,
 // captured from HF transformers (LiquidAI/LFM3-VL-2B, float32) via the
 // Lfm3VlProcessor: prompt token ids (with image placeholders already expanded

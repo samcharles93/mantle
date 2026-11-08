@@ -3,6 +3,7 @@ package mcf
 import (
 	"errors"
 	"fmt"
+	"sort"
 )
 
 // UQ (non-uniform codebook) quantization payload codec. Introduced in MCF
@@ -220,3 +221,173 @@ func Float32ToFP16(f float32) uint16 { return float32ToFP16Bits(f) }
 
 // FP16ToFloat32 converts IEEE half bits to float32.
 func FP16ToFloat32(h uint16) float32 { return fp16ToFloat32(h) }
+
+// UQDTypeForBits returns the uq* dtype for an index bit width (2..8).
+func UQDTypeForBits(bits int) (TensorDType, error) {
+	if bits < 2 || bits > 8 {
+		return 0, fmt.Errorf("mcf: uq bits %d out of range [2,8]", bits)
+	}
+	return DTypeUQ2 + TensorDType(bits-2), nil
+}
+
+// EncodeUQTensor quantizes a rank-2 f32 tensor into a uq* payload. Each
+// 256-element super-block gets one codebook of 2^bits levels: taken from
+// codebooks[superIdx] when provided (SLQ search output), otherwise derived by
+// a deterministic k-means (quantile init, Lloyd iterations). Each 32-element
+// block stores an f16 scale and packed per-element nearest-level indices;
+// reconstruction is w = scale * codebook[idx].
+func EncodeUQTensor(src []float32, rows, cols, bits int, codebooks [][]float32) (TensorDType, []byte, error) {
+	if rows <= 0 || cols <= 0 || len(src) != rows*cols {
+		return 0, nil, errors.New("mcf: uq encode: bad shape/size")
+	}
+	dt, err := UQDTypeForBits(bits)
+	if err != nil {
+		return 0, nil, err
+	}
+	shape := []uint64{uint64(rows), uint64(cols)}
+	layout, err := UQPayloadLayoutFor(shape, dt)
+	if err != nil {
+		return 0, nil, err
+	}
+	cb := make([]float32, layout.SuperCount*layout.CodebookElems)
+	scales := make([]float32, layout.TotalBlocks)
+	indices := make([]uint8, rows*cols)
+
+	levels := int(layout.CodebookElems)
+	for sb := uint64(0); sb < layout.SuperCount; sb++ {
+		// gather the super-block's 256 values (row-major, clamped at row end)
+		vals := make([]float32, 0, QuantSuperSize)
+		row := int(sb / layout.SuperBlocksPerRow)
+		sbInRow := sb % layout.SuperBlocksPerRow
+		col0 := int(sbInRow * QuantSuperSize)
+		for c := col0; c < col0+int(QuantSuperSize) && c < cols; c++ {
+			vals = append(vals, src[int(row)*cols+c])
+		}
+		var levelsArr []float32
+		if sb < uint64(len(codebooks)) && len(codebooks[sb]) == levels {
+			levelsArr = codebooks[sb]
+		} else {
+			levelsArr = deriveUQCodebook(vals, levels)
+		}
+		// binary search in the per-block loop needs sorted levels
+		sortedLevels := make([]float32, levels)
+		copy(sortedLevels, levelsArr)
+		sortF32(sortedLevels)
+		copy(cb[sb*uint64(levels):(sb+1)*uint64(levels)], sortedLevels)
+	}
+
+	for r := 0; r < rows; r++ {
+		blockBase := uint64(r) * layout.BlocksPerRow
+		superBase := uint64(r) * layout.SuperBlocksPerRow
+		for b := uint64(0); b < layout.BlocksPerRow; b++ {
+			col0 := int(b * QuantBlockSize)
+			n := cols - col0
+			if n <= 0 {
+				break
+			}
+			if n > 32 {
+				n = 32
+			}
+			superIdx := superBase + b/QuantSuperBlocks
+			levelsArr := cb[superIdx*uint64(levels) : (superIdx+1)*uint64(levels)]
+			// block scale: span the block's max magnitude with the codebook's
+			maxAbs := float32(0)
+			for i := 0; i < n; i++ {
+				if a := absF32(src[r*cols+col0+i]); a > maxAbs {
+					maxAbs = a
+				}
+			}
+			cbMax := float32(0)
+			for _, lv := range levelsArr {
+				if a := absF32(lv); a > cbMax {
+					cbMax = a
+				}
+			}
+			scale := float32(0)
+			if cbMax > 0 {
+				scale = maxAbs / cbMax
+			}
+			scales[blockBase+b] = scale
+			for i := 0; i < n; i++ {
+				w := src[r*cols+col0+i]
+				best := 0
+				if scale > 0 {
+					best = nearestLevel(levelsArr, w/scale)
+				}
+				indices[r*cols+col0+i] = uint8(best)
+			}
+		}
+	}
+	payload, err := EncodeUQPayload(shape, dt, cb, scales, indices)
+	if err != nil {
+		return 0, nil, err
+	}
+	return dt, payload, nil
+}
+
+// deriveUQCodebook runs a deterministic k-means over vals: quantile-initialized
+// centers, a fixed number of Lloyd iterations, sorted output levels.
+func deriveUQCodebook(vals []float32, levels int) []float32 {
+	if len(vals) == 0 || levels <= 0 {
+		return make([]float32, max(levels, 0))
+	}
+	sorted := make([]float32, len(vals))
+	copy(sorted, vals)
+	sortF32(sorted)
+	centers := make([]float32, levels)
+	for i := range centers {
+		// quantile init
+		pos := (2*i + 1) * len(sorted) / (2 * levels)
+		if pos >= len(sorted) {
+			pos = len(sorted) - 1
+		}
+		centers[i] = sorted[pos]
+	}
+	sums := make([]float64, levels)
+	counts := make([]int, levels)
+	for iter := 0; iter < 12; iter++ {
+		for i := range sums {
+			sums[i] = 0
+			counts[i] = 0
+		}
+		sortF32(centers)
+		for _, v := range vals {
+			best := nearestLevel(centers, v)
+			sums[best] += float64(v)
+			counts[best]++
+		}
+		for li := range centers {
+			if counts[li] > 0 {
+				centers[li] = float32(sums[li] / float64(counts[li]))
+			}
+		}
+	}
+	sortF32(centers)
+	return centers
+}
+
+func absF32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func sortF32(v []float32) {
+	sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })
+}
+
+// nearestLevel returns the index of the sorted level nearest to t.
+func nearestLevel(levels []float32, t float32) int {
+	i := sort.Search(len(levels), func(i int) bool { return levels[i] >= t })
+	if i == 0 {
+		return 0
+	}
+	if i == len(levels) {
+		return len(levels) - 1
+	}
+	if levels[i]-t < t-levels[i-1] {
+		return i
+	}
+	return i - 1
+}

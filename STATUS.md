@@ -58,6 +58,16 @@ HF token-for-token including the `<|think|>` generation-prompt tag. CUDA: 89-tok
 prefill ~340-410 tok/s (batched path), decode ~10 tok/s on the RTX 3050 (bf16, 18/24 layers in VRAM).
 Vision tower runs on the host even under CUDA (once per image; a device path is future work).
 
+## UQ producer CLI (2026-11-09)
+
+`mantle quantize --method uq2..uq8 [--codebooks file.json]` produces `DTypeUQ*` MCFs end to end:
+per-256-element super-block codebooks (from the SLQ JSON when provided, else deterministic k-means),
+per-32-block f16 scales, packed indices via binary-search nearest level (`mcf.EncodeUQTensor`).
+Verified on gemma-3-270m and functiongemma-270m: uq6 layers + q8 embedding (via `--assignments`)
+answers correctly; pure uq4 on the embedding degrades (heavy tails + sqrt(hidden) multiplier), which
+is the expected per-tensor assignment use case. Unit tests cover codec round-trip, derived and
+explicit codebooks, determinism, and bits->dtype mapping.
+
 ## Open work
 
 1. DSpark (CPU first): the draft model loads (`LoadDSparkDraftMCF`), K/V is injected from the target's hidden taps, and a draft block runs with the Markov and confidence heads. The draft decoder is a regular `Instance` (standard Qwen3 layers, loaded with the target's embeddings and LM head through `LoadModelOptions.SharedEmbeddings`/`SharedOutput`), and blocks use the batch path's non-causal mode (`ForwardBlockNonCausal`). On the real pair, drafts match the target's greedy output for 5.1 of 7 tokens per block (`TestDSparkDraftAcceptance`, with `MANTLE_DSPARK_TARGET` and `MANTLE_DSPARK_DRAFT` set). Still needed: the speculative loop (batched verification, accept/reject, KV rollback, sampling at T>0), CLI wiring, then CUDA. The draft MCF was repacked with its `config.json`. Model shape comes from it; speculation on/off, draft length and confidence threshold will be CLI flags.
@@ -66,6 +76,6 @@ Vision tower runs on the host even under CUDA (once per image; a device path is 
 4. Dependency bumps for existing modules (urfave/cli, echo, golang.org/x/*).
 5. Items in `TODO.md`: Gemma3 marked broken, Granite, CI, docs.
 6. LFM3-VL/Omni follow-ups: video input (temporal_patch_size > 1 frames), LFM3-Omni-2B, a device-side
-   vision tower for large images, and `DTypeUQ*` producer CLI (`quantize --method uqN`).
+   vision tower for large images.
 
 CUDA build: `CUDA=1 task build -f`, then run with `LD_LIBRARY_PATH=/usr/local/cuda-13.2/targets/x86_64-linux/lib`.
