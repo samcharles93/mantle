@@ -535,6 +535,25 @@ func lfm3VlSpec() *ArchSpec {
 	return spec
 }
 
+// LiquidAI LFM3-Omni: same text decoder as LFM3-VL (model.language_model.*)
+// plus vision and audio towers (model.vision_tower.*, model.audio_encoder.*)
+// that the loader attaches separately. The omni config.json omits
+// vision_start/end_token_id; the LFM3-family tokenizer pins them as added
+// tokens 125009/125010, so detection fills the defaults here.
+func lfm3OmniSpec(cfg *HFConfig) *ArchSpec {
+	spec := lfm3VlSpec()
+	spec.Name = "lfm3_omni"
+	if cfg != nil {
+		if cfg.VisionStartTokenID == 0 {
+			cfg.VisionStartTokenID = 125009 // <|vision_start|>
+		}
+		if cfg.VisionEndTokenID == 0 {
+			cfg.VisionEndTokenID = 125010 // <|vision_end|>
+		}
+	}
+	return spec
+}
+
 // prefixArchNames rewrites every tensor name of an arch to live under prefix
 // (e.g. "model.language_model.") instead of the top-level "model.".
 func prefixArchNames(n *ArchNames, prefix string) {

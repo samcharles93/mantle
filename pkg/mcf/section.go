@@ -23,6 +23,11 @@ const (
 	// processor_config.json (image/video preprocessing parameters). Absent for
 	// text-only models; readers must tolerate its absence.
 	SectionProcessorConfigJSON SectionType = 0x0106
+	// SectionAudioTokenizer optionally embeds an audio model's speech codec
+	// directory (audio_tokenizer/config.json + audio_tokenizer/model.safetensors,
+	// e.g. LFM3-Omni's LiquidCodec) as a versioned blob; see audio_tokenizer.go.
+	// Absent for models without a codec; readers must tolerate its absence.
+	SectionAudioTokenizer SectionType = 0x0107
 )
 
 type MCFSection struct {

@@ -61,7 +61,7 @@ func templateWantsLeadingBOS(tpl string) bool {
 
 func renderByArchDefault(opts RenderOptions) (string, bool, error) {
 	switch strings.ToLower(strings.TrimSpace(opts.Arch)) {
-	case "lfm2", "lfm3", "lfm3_vl":
+	case "lfm2", "lfm3", "lfm3_vl", "lfm3_omni":
 		return renderChatML(opts)
 	case "gemma":
 		return renderGemma3(opts)

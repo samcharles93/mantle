@@ -26,6 +26,7 @@ type EngineCapabilities struct {
 	MaxContext     int
 	VocabSize      int
 	SupportsVision bool
+	SupportsAudio  bool
 	SupportsTools  bool
 	Quantization   string
 }
@@ -52,6 +53,13 @@ type Request struct {
 	// treated as sampled at the processor's fps; the engine expands each
 	// video placeholder into per-segment timestamp + vision tokens.
 	Videos [][][]byte
+
+	// Audio holds raw WAV bytes (16 kHz mono/stereo PCM16 or float32), one per
+	// audio content block in the messages, in order. Only valid for models
+	// with an audio tower (Capabilities.SupportsAudio); the engine expands
+	// each <|audio|> placeholder token into ceil(melFrames/stride) tokens,
+	// one per projected audio embedding (processing_lfm3_omni.py semantics).
+	Audio [][]byte
 
 	Steps int
 	Seed  int64

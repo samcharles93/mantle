@@ -334,6 +334,9 @@ func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message
 	if images, err := extractMessageImages(msgs); err == nil && len(images) > 0 {
 		opts.Images = images
 	}
+	if audio, err := extractMessageAudio(msgs); err == nil && len(audio) > 0 {
+		opts.Audio = audio
+	}
 	opts.NoTemplate = new(bool)
 	*opts.NoTemplate = false
 	opts.EchoPrompt = new(bool)
@@ -421,13 +424,78 @@ func loadImageBlock(block map[string]any) ([]byte, error) {
 	return loadImageRef(ref)
 }
 
+// extractMessageAudio collects the raw WAV bytes of every audio content block
+// in the messages, in order. Supported block types follow the HF LFM3-Omni
+// template ("audio", "audio_url", "input_audio"): a reference via "audio" /
+// "audio_url" (data: URL, local path, or http(s) URL, like images), or an
+// OpenAI-style {"type":"input_audio","input_audio":{"data":<base64>,"format":"wav"}}.
+func extractMessageAudio(msgs []tokenizer.Message) ([][]byte, error) {
+	var out [][]byte
+	for _, m := range msgs {
+		blocks, ok := m.Content.([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range blocks {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			typ, _ := block["type"].(string)
+			if typ != "audio" && typ != "audio_url" && typ != "input_audio" {
+				continue
+			}
+			raw, err := loadAudioBlock(block)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, raw)
+		}
+	}
+	return out, nil
+}
+
+func loadAudioBlock(block map[string]any) ([]byte, error) {
+	typ, _ := block["type"].(string)
+	if typ == "input_audio" {
+		ia, ok := block["input_audio"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("input_audio block has no input_audio object")
+		}
+		if format, _ := ia["format"].(string); format != "" && format != "wav" {
+			return nil, fmt.Errorf("input_audio format %q: only \"wav\" is supported", format)
+		}
+		data, _ := ia["data"].(string)
+		if data == "" {
+			return nil, fmt.Errorf("input_audio block has no data")
+		}
+		raw, err := base64.StdEncoding.DecodeString(data)
+		if err != nil {
+			return nil, fmt.Errorf("input_audio data is not base64: %w", err)
+		}
+		return raw, nil
+	}
+	var ref string
+	if u, ok := block["audio_url"].(string); ok {
+		ref = u
+	} else if m, ok := block["audio_url"].(map[string]any); ok {
+		ref, _ = m["url"].(string)
+	} else if u, ok := block["audio"].(string); ok {
+		ref = u
+	}
+	if ref == "" {
+		return nil, fmt.Errorf("audio block has no audio_url")
+	}
+	return loadImageRef(ref)
+}
+
 func loadImageRef(ref string) ([]byte, error) {
 	if strings.HasPrefix(ref, "data:") {
-		if i := strings.Index(ref, ","); i >= 0 {
-			if strings.Contains(ref[:i], ";base64") {
-				return base64.StdEncoding.DecodeString(ref[i+1:])
+		if before, after, ok := strings.Cut(ref, ","); ok {
+			if strings.Contains(before, ";base64") {
+				return base64.StdEncoding.DecodeString(after)
 			}
-			return []byte(ref[i+1:]), nil
+			return []byte(after), nil
 		}
 		return nil, fmt.Errorf("malformed data URL")
 	}

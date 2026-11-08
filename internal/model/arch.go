@@ -121,6 +121,45 @@ type HFConfig struct {
 	ProjectorHiddenAct    string          `json:"projector_hidden_act"`
 	ProjectorLayerNormEps float64         `json:"projector_layer_norm_eps"`
 	ProjectorBias         bool            `json:"projector_bias"`
+
+	// Multimodal (audio) fields, e.g. LFM3-Omni. The audio tower lives under
+	// audio_encoder_config (with a nested LFM2 "text_config") and its tensors
+	// under model.audio_encoder.* / model.audio_projector.* in the checkpoint.
+	AudioEncoderConfig *AudioEncoderHFConfig `json:"audio_encoder_config"`
+	AudioTokenID       int                   `json:"audio_token_id"`
+	AudioStartTokenID  int                   `json:"audio_start_token_id"`
+	AudioOutTokenID    int                   `json:"audio_out_token_id"`
+}
+
+// AudioEncoderHFConfig is the audio tower half of an lfm3_omni config.json:
+// a stride-8 (mel, time) downsampler feeding an LFM2 stack described by the
+// nested TextConfig (the "lfm" sub-model of HF's Lfm3OmniEncoder).
+type AudioEncoderHFConfig struct {
+	ModelType     string              `json:"model_type"`
+	ConvChannels  int                 `json:"conv_channels"`
+	HiddenSize    int                 `json:"hidden_size"`
+	NumMelBins    int                 `json:"num_mel_bins"`
+	SlidingWindow int                 `json:"sliding_window"`
+	TextConfig    *AudioTowerHFConfig `json:"text_config"`
+}
+
+// AudioTowerHFConfig is the LFM2 stack config nested under
+// audio_encoder_config.text_config.
+type AudioTowerHFConfig struct {
+	ModelType             string      `json:"model_type"`
+	HiddenSize            int         `json:"hidden_size"`
+	IntermediateSize      int         `json:"intermediate_size"`
+	BlockAutoAdjustFFDim  bool        `json:"block_auto_adjust_ff_dim"`
+	BlockFFNDimMultiplier float64     `json:"block_ffn_dim_multiplier"`
+	BlockMultipleOf       int         `json:"block_multiple_of"`
+	NumHiddenLayers       int         `json:"num_hidden_layers"`
+	NumAttentionHeads     int         `json:"num_attention_heads"`
+	NumKeyValueHeads      int         `json:"num_key_value_heads"`
+	ConvLCache            int         `json:"conv_L_cache"`
+	ConvBias              bool        `json:"conv_bias"`
+	NormEps               float64     `json:"norm_eps"`
+	LayerTypes            []string    `json:"layer_types"`
+	RopeParameters        *ropeParams `json:"rope_parameters"`
 }
 
 // VisionHFConfig is the vision encoder half of a multimodal config (e.g.
@@ -752,6 +791,10 @@ func DetectArch(cfg *HFConfig) (*ArchSpec, error) {
 		return nil, fmt.Errorf("DSpark draft models require a speculative runtime")
 	case hasArch("falcon_h1"):
 		return falconH1Spec(), nil
+	case hasArch("lfm3_omni"), hasArch("lfm3omni"):
+		// must precede the lfm3_vl and plain lfm3 cases: "lfm3_omni..."
+		// contains "lfm3"
+		return lfm3OmniSpec(cfg), nil
 	case hasArch("lfm3_vl"), hasArch("lfm3vl"):
 		// must precede the plain lfm3 case: "lfm3vl..." contains "lfm3"
 		return lfm3VlSpec(), nil

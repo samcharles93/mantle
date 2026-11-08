@@ -241,3 +241,19 @@ func (f *File) SectionData(s *MCFSection) []byte {
 	// Safe because Open() rejects files that don't fit into an int-sized slice.
 	return f.Data[int(start):int(end)]
 }
+
+// AudioTokenizerPayload returns the audio codec's config.json and
+// model.safetensors bytes from the optional section 0x0107. When the section
+// is absent it returns (nil, nil, nil); a present but malformed section is an
+// error. The returned slices alias the file data and must not be retained
+// after Close().
+func (f *File) AudioTokenizerPayload() (configJSON, safetensors []byte, err error) {
+	if f == nil {
+		return nil, nil, nil
+	}
+	sec := f.Section(SectionAudioTokenizer)
+	if sec == nil {
+		return nil, nil, nil
+	}
+	return DecodeAudioTokenizerSection(f.SectionData(sec))
+}

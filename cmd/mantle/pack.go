@@ -68,6 +68,7 @@ func packCmd() *cli.Command {
 			&cli.StringFlag{Name: "tokenizer-json", Usage: "Override tokenizer.json path"},
 			&cli.StringFlag{Name: "tokenizer-config-json", Usage: "Override tokenizer_config.json path"},
 			&cli.StringFlag{Name: "processor-config-json", Usage: "Override processor_config.json path (multimodal models)"},
+			&cli.StringFlag{Name: "audio-tokenizer-dir", Usage: "Override audio_tokenizer/ codec directory path (audio models; packs section 0x0107)"},
 			&cli.StringFlag{Name: "vocab-json", Usage: "Override vocab.json path"},
 			&cli.StringFlag{Name: "merges-txt", Usage: "Override merges.txt path"},
 		},
@@ -108,6 +109,7 @@ func packCmd() *cli.Command {
 				TokenizerJSONPath:        cmd.String("tokenizer-json"),
 				TokenizerConfigJSONPath:  cmd.String("tokenizer-config-json"),
 				ProcessorConfigJSONPath:  cmd.String("processor-config-json"),
+				AudioTokenizerDir:        cmd.String("audio-tokenizer-dir"),
 				VocabJSONPath:            cmd.String("vocab-json"),
 				MergesTXTPath:            cmd.String("merges-txt"),
 			}

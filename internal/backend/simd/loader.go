@@ -61,6 +61,11 @@ func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int, opt
 		return nil, err
 	}
 	opts.ProcessorConfigJSON = mcfFile.SectionData(mcf.SectionProcessorConfigJSON)
+	atConfig, _, err := mcfFile.AudioTokenizerPayload()
+	if err != nil {
+		return nil, fmt.Errorf("mcf: audio tokenizer section: %w", err)
+	}
+	opts.AudioTokenizerConfigJSON = atConfig
 	return loadModelFromSource(cfg, spec, mcfSource{mf: mcfFile}, maxContext, opts)
 }
 
@@ -748,23 +753,40 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	updateInstanceRoPE(m)
 	adjustGemmaNorms(m, cfg)
 
-	// Multimodal models carry a vision tower + projector alongside the text
-	// decoder; load them when the config declares a vision_config.
-	if cfg.VisionConfig != nil {
+	// Multimodal models carry a vision tower + projector and/or an audio tower
+	// alongside the text decoder; load them when the config declares a
+	// vision_config / audio_encoder_config.
+	if cfg.VisionConfig != nil || cfg.AudioEncoderConfig != nil {
 		proc, err := model.LoadProcessorConfigBytes(opts.ProcessorConfigJSON)
 		if err != nil {
 			return nil, err
 		}
-		vc, err := visionConfigFromHFConfig(cfg, proc)
-		if err != nil {
-			return nil, err
+		if cfg.VisionConfig != nil {
+			vc, err := visionConfigFromHFConfig(cfg, proc)
+			if err != nil {
+				return nil, err
+			}
+			tower, err := loadVisionTower(src, cfg, vc)
+			if err != nil {
+				return nil, fmt.Errorf("vision tower: %w", err)
+			}
+			m.Vision = tower
+			modelCfg.Vision = vc
 		}
-		tower, err := loadVisionTower(src, cfg, vc)
-		if err != nil {
-			return nil, fmt.Errorf("vision tower: %w", err)
+		if cfg.AudioEncoderConfig != nil {
+			ac, err := audioConfigFromHFConfig(cfg, proc)
+			if err != nil {
+				return nil, err
+			}
+			if ac != nil {
+				tower, err := loadAudioTower(src, cfg, ac)
+				if err != nil {
+					return nil, fmt.Errorf("audio tower: %w", err)
+				}
+				m.Audio = tower
+				modelCfg.Audio = ac
+			}
 		}
-		m.Vision = tower
-		modelCfg.Vision = vc
 	}
 	return m, nil
 }

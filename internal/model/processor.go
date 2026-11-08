@@ -3,13 +3,26 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/samcharles93/mantle/internal/audio"
 )
 
 // ProcessorConfig mirrors the subset of a HF processor_config.json that the
-// runtime needs for multimodal inputs (image preprocessing parameters).
+// runtime needs for multimodal inputs (image/video preprocessing parameters
+// and, for audio models such as LFM3-Omni, the log-mel feature extractor and
+// the placeholder marker strings).
 type ProcessorConfig struct {
-	ImageProcessor *ImageProcessorConfig `json:"image_processor"`
-	VideoProcessor *VideoProcessorConfig `json:"video_processor"`
+	ImageProcessor   *ImageProcessorConfig         `json:"image_processor"`
+	VideoProcessor   *VideoProcessorConfig         `json:"video_processor"`
+	FeatureExtractor *audio.FeatureExtractorConfig `json:"feature_extractor"`
+
+	// Placeholder marker strings (resolved to token ids by the tokenizer).
+	AudioToken       string `json:"audio_token"`        // "<|audio|>"
+	AudioOutToken    string `json:"audio_out_token"`    // "<|audio_out|>"
+	ImageToken       string `json:"image_token"`        // "<|image|>"
+	VideoToken       string `json:"video_token"`        // "<|video|>"
+	VisionStartToken string `json:"vision_start_token"` // "<|vision_start|>"
+	VisionEndToken   string `json:"vision_end_token"`   // "<|vision_end|>"
 }
 
 // VideoProcessorConfig mirrors the video_processor half of processor_config.json.

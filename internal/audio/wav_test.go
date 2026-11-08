@@ -3,6 +3,7 @@ package audio
 import (
 	"encoding/binary"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -211,5 +212,68 @@ func TestDecodeWAVRoundTripPCM16(t *testing.T) {
 		if math.Abs(float64(got[i]-want[i])) > 1.0/32768.0+1e-7 {
 			t.Fatalf("sample %d: got %v want %v", i, got[i], want[i])
 		}
+	}
+}
+
+// TestDecodeWAVHugeChunkSize pins the overflow guard at wav.go: a chunk whose
+// declared size is near 2^32 (e.g. 0xFFFFFFFF) must be rejected as truncated
+// via the uint64 bounds check, never panic or allocate. Review follow-up P2
+// from review-omni-core-rv-omni-b/c: the path was fuzz-verified out-of-tree but
+// not pinned by a committed named test.
+func TestDecodeWAVHugeChunkSize(t *testing.T) {
+	t.Parallel()
+
+	withChunkSize := func(id string, size uint32) []byte {
+		out := []byte("RIFF")
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], 4+8+16+8+size)
+		out = append(out, b[:]...)
+		out = append(out, "WAVE"...)
+		out = append(out, "fmt "...)
+		binary.LittleEndian.PutUint32(b[:], 16)
+		out = append(out, b[:]...)
+		var fmt [16]byte
+		binary.LittleEndian.PutUint16(fmt[0:], 1) // PCM
+		binary.LittleEndian.PutUint16(fmt[2:], 1) // mono
+		binary.LittleEndian.PutUint32(fmt[4:], 16000)
+		binary.LittleEndian.PutUint32(fmt[8:], 32000)
+		binary.LittleEndian.PutUint16(fmt[12:], 2)
+		binary.LittleEndian.PutUint16(fmt[14:], 16)
+		out = append(out, fmt[:]...)
+		out = append(out, id...)
+		binary.LittleEndian.PutUint32(b[:], size)
+		out = append(out, b[:]...)
+		return out // no payload follows
+	}
+
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"data size 0xFFFFFFFF", withChunkSize("data", 0xFFFFFFFF)},
+		{"data size 0x80000000", withChunkSize("data", 0x80000000)},
+		{"data size 0x7FFFFFFF", withChunkSize("data", 0x7FFFFFFF)},
+		{"fmt size 0xFFFFFFFF", func() []byte {
+			out := []byte("RIFF")
+			var b [4]byte
+			binary.LittleEndian.PutUint32(b[:], 0xFFFFFFFF)
+			out = append(out, b[:]...)
+			out = append(out, "WAVE"...)
+			out = append(out, "fmt "...)
+			binary.LittleEndian.PutUint32(b[:], 0xFFFFFFFF)
+			out = append(out, b[:]...)
+			return out
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			samples, sr, err := DecodeWAV(tc.data)
+			if err == nil {
+				t.Fatalf("expected error, got %d samples @ %d Hz", len(samples), sr)
+			}
+			if !strings.Contains(err.Error(), "truncated") {
+				t.Fatalf("expected truncated-chunk error, got %v", err)
+			}
+		})
 	}
 }

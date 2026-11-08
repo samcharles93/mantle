@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v5"
 	"github.com/samcharles93/mantle/internal/inference"
+	"github.com/samcharles93/mantle/internal/tokenizer"
 )
 
 func TestChatCompletionsBasic(t *testing.T) {
@@ -237,5 +239,44 @@ func TestChatMessageContentTypes(t *testing.T) {
 	}
 	if len(contentArr) != 2 {
 		t.Fatalf("expected 2 content parts, got %d", len(contentArr))
+	}
+}
+
+// TestExtractMessageAudio pins the audio content-block extraction: "audio",
+// "audio_url", and OpenAI-style "input_audio" blocks are collected in order
+// (data: URLs and base64 payloads decode to the raw WAV bytes), other block
+// types are ignored, and non-wav formats are rejected.
+func TestExtractMessageAudio(t *testing.T) {
+	t.Parallel()
+
+	wav := []byte("RIFF....WAVE")
+	b64 := base64.StdEncoding.EncodeToString(wav)
+	msgs := []tokenizer.Message{
+		{Role: "user", Content: []any{
+			map[string]any{"type": "text", "text": "listen"},
+			map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": b64, "format": "wav"}},
+			map[string]any{"type": "audio_url", "audio_url": "data:audio/wav;base64," + b64},
+			map[string]any{"type": "audio", "audio": "data:audio/wav;base64," + b64},
+			map[string]any{"type": "image", "image_url": "data:image/png;base64,AAAA"},
+		}},
+	}
+	got, err := extractMessageAudio(msgs)
+	if err != nil {
+		t.Fatalf("extractMessageAudio: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d audio blocks, want 3", len(got))
+	}
+	for i, b := range got {
+		if string(b) != string(wav) {
+			t.Fatalf("block %d = %q, want %q", i, b, wav)
+		}
+	}
+
+	bad := []tokenizer.Message{{Role: "user", Content: []any{
+		map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": b64, "format": "mp3"}},
+	}}}
+	if _, err := extractMessageAudio(bad); err == nil {
+		t.Fatalf("expected error for mp3 format")
 	}
 }

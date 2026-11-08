@@ -302,3 +302,76 @@ func TestLayerZeroTailRoPEForConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestDetectArchLFM3Omni pins the lfm3_omni detection: it must resolve BEFORE
+// the plain lfm3 case ("lfm3_omni" contains "lfm3"), reuse the lfm3 text-decoder
+// spec under model.language_model., and parse the audio tower config and token
+// ids. The omni config.json omits vision_start/end_token_id, so detection
+// supplies the tokenizer-pinned defaults (125009/125010).
+func TestDetectArchLFM3Omni(t *testing.T) {
+	raw := []byte(`{
+		"model_type": "lfm3_omni",
+		"architectures": ["Lfm3OmniForConditionalGeneration"],
+		"image_token_id": 125030, "video_token_id": 125029,
+		"audio_token_id": 125031, "audio_start_token_id": 125012, "audio_out_token_id": 125032,
+		"text_config": {"hidden_size": 2048, "num_hidden_layers": 24, "vocab_size": 128000,
+			"bos_token_id": 124894, "eos_token_id": 124900, "pad_token_id": 124893},
+		"audio_encoder_config": {
+			"model_type": "lfm3_omni_encoder", "conv_channels": 256, "hidden_size": 768,
+			"num_mel_bins": 128, "sliding_window": 32,
+			"text_config": {"model_type": "lfm2", "hidden_size": 768, "intermediate_size": 2560,
+				"block_auto_adjust_ff_dim": true, "block_ffn_dim_multiplier": 1.0, "block_multiple_of": 256,
+				"num_hidden_layers": 17, "num_attention_heads": 8, "num_key_value_heads": 4,
+				"conv_L_cache": 3, "conv_bias": false, "norm_eps": 1e-5,
+				"layer_types": ["conv", "conv", "full_attention"],
+				"rope_parameters": {"rope_type": "default", "rope_theta": 1000000.0}}
+		}
+	}`)
+	cfg, err := LoadHFConfigBytes(raw)
+	if err != nil {
+		t.Fatalf("LoadHFConfigBytes: %v", err)
+	}
+	spec, err := DetectArch(cfg)
+	if err != nil {
+		t.Fatalf("DetectArch: %v", err)
+	}
+	if spec.Name != "lfm3_omni" {
+		t.Fatalf("spec=%q want lfm3_omni (must not fall through to plain lfm3)", spec.Name)
+	}
+	n := spec.Names
+	if got := n.Embedding; got != "model.language_model.embed_tokens.weight" {
+		t.Fatalf("embedding name %q, want model.language_model. prefixed", got)
+	}
+	if got := n.Wo(2); got != "model.language_model.layers.2.self_attn.o_proj.weight" {
+		t.Fatalf("Wo(2)=%q, want model.language_model. prefixed", got)
+	}
+	if !spec.ZeroTailPartialRoPE {
+		t.Fatalf("lfm3_omni must keep the lfm3 zero-tail RoPE semantics")
+	}
+	if cfg.AudioTokenID != 125031 || cfg.AudioOutTokenID != 125032 || cfg.AudioStartTokenID != 125012 {
+		t.Fatalf("audio token ids: %d/%d/%d", cfg.AudioTokenID, cfg.AudioOutTokenID, cfg.AudioStartTokenID)
+	}
+	if cfg.VisionStartTokenID != 125009 || cfg.VisionEndTokenID != 125010 {
+		t.Fatalf("vision marker defaults: %d/%d want 125009/125010", cfg.VisionStartTokenID, cfg.VisionEndTokenID)
+	}
+	aec := cfg.AudioEncoderConfig
+	if aec == nil || aec.HiddenSize != 768 || aec.ConvChannels != 256 || aec.NumMelBins != 128 || aec.SlidingWindow != 32 {
+		t.Fatalf("audio_encoder_config not parsed: %#v", aec)
+	}
+	if aec.TextConfig == nil || aec.TextConfig.NumHiddenLayers != 17 || aec.TextConfig.NumAttentionHeads != 8 ||
+		aec.TextConfig.NumKeyValueHeads != 4 || aec.TextConfig.ConvLCache != 3 || aec.TextConfig.ConvBias {
+		t.Fatalf("audio lfm text_config not parsed: %#v", aec.TextConfig)
+	}
+	// text_config merge: the decoder fields come from the nested text_config.
+	if cfg.HiddenSize != 2048 || cfg.NumHiddenLayers != 24 || cfg.VocabSize != 128000 {
+		t.Fatalf("text_config merge: hidden=%d layers=%d vocab=%d", cfg.HiddenSize, cfg.NumHiddenLayers, cfg.VocabSize)
+	}
+
+	// Regression guards: plain lfm3 and lfm3_vl must be unaffected.
+	if s, _ := DetectArch(&HFConfig{ModelType: "lfm3", Architectures: []string{"Lfm3ForCausalLM"}}); s == nil || s.Name != "lfm3" {
+		t.Fatal("plain lfm3 must still detect as lfm3")
+	}
+	if s, _ := DetectArch(&HFConfig{ModelType: "lfm3_vl", Architectures: []string{"Lfm3VlForConditionalGeneration"}}); s == nil || s.Name != "lfm3_vl" {
+		t.Fatal("lfm3_vl must still detect as lfm3_vl")
+	}
+}

@@ -138,10 +138,11 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 		return nil, err
 	}
 
-	// Multimodal: expand image placeholder tokens and attach the projected
-	// vision embeddings for the prefill.
+	// Multimodal: expand image/video/audio placeholder tokens and attach the
+	// projected vision/audio embeddings for the prefill.
 	var embeds [][]float32
-	if len(req.Images) > 0 || len(req.Videos) > 0 || visionConfigOf(e) != nil {
+	if len(req.Images) > 0 || len(req.Videos) > 0 || len(req.Audio) > 0 ||
+		visionConfigOf(e) != nil || audioConfigOf(e) != nil {
 		expanded, emb, err := prepareMultimodal(e, req, ids)
 		if err != nil {
 			return nil, err
@@ -233,6 +234,7 @@ func (e *EngineImpl) Capabilities() EngineCapabilities {
 		Arch:           e.arch,
 		SupportsTools:  len(e.stopTokens) > 0,
 		SupportsVision: visionConfigOf(e) != nil,
+		SupportsAudio:  audioConfigOf(e) != nil,
 	}
 	if rt, ok := e.model.(interface{ ModelConfig() *core.ModelConfig }); ok {
 		if mc := rt.ModelConfig(); mc != nil {

@@ -95,6 +95,16 @@ func (f *File) SectionData(t mcf.SectionType) []byte {
 	return f.file.SectionData(sec)
 }
 
+// AudioTokenizerPayload returns the audio codec's config.json and
+// model.safetensors bytes from the optional MCF section 0x0107. When the
+// section is absent it returns (nil, nil, nil).
+func (f *File) AudioTokenizerPayload() (configJSON, safetensors []byte, err error) {
+	if f == nil || f.file == nil {
+		return nil, nil, nil
+	}
+	return f.file.AudioTokenizerPayload()
+}
+
 func (f *File) QuantInfo() *mcf.QuantInfo {
 	if f == nil {
 		return nil
