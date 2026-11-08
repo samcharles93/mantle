@@ -32,7 +32,7 @@
   - [X] Improve inference on quantised models
   - [ ] investigate whether quant methods are reliable/safe
   - [ ] ensure MCF docs and spec is updated for quantisation
-  - [ ] GSQ/RCO/SLQ design: see pkg/mcf/quantization-design.md — P0 consume GSQ K-quant payloads (no format change), P1 `quantize --assignments` + budget verification + QuantInfo provenance, P2 `DTypeUQ*` non-uniform-codebook family under MCF v1.1 with CPU LUT kernels and CUDA dequant-mode support
+  - [ ] GSQ/RCO/SLQ design: see pkg/mcf/quantization-design.md — P0 DONE (GGUF reader + Q8_0→DTypeQ8 exact transcode + round-trip tests in pkg/mcf/gguf.go), P1 DONE (`quantize --assignments` + budget verification + QuantInfo provenance), P2 `DTypeUQ*` non-uniform-codebook family under MCF v1.1 with CPU LUT kernels and CUDA dequant-mode support
 
 - [ ] Architecture Support
   - [X] Gemma3 text support: verified against HF transformers (testdata/gemma3_reference.json, short + past-512 sliding-window prompts; TestGemma3ReferenceLogits with MANTLE_GEMMA3_MCF). Multimodal (vision) variant still open.

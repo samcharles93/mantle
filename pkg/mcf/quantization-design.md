@@ -25,17 +25,29 @@ MCF already stores a per-tensor `TensorDType` in the fixed 40-byte `TensorIndexE
 quant registry (0x10–0x33: int*/q*/k*), a `QuantInfo` section (method metadata), and the
 `FlagTensorDataAligned64` 64-byte sub-region alignment rule. That maps onto the three methods as:
 
-### 2.1 GSQ → no format change (P0)
+### 2.1 GSQ → no format change (P0) — IMPLEMENTED
 
 GSQ payloads are indices into a uniform symmetric grid plus per-group scales — exactly the
 shape of MCF's existing `DTypeK2..K6` / `DTypeQ4/Q8` payloads (block 32, super-block 256, f16
 scales). GSQ even refines existing GGUF K-quants *in-format*, so:
 
-- **Consume**: any GSQ/compressed-tensors checkpoint exported as K-quant payloads is loadable
-  by Mantle today (via the existing quant payload readers). Action: document the
-  GGUF→MCF import path for GSQ-refined checkpoints and add a round-trip test
-  (GGUF K-quant bytes → MCF tensor → decoded row equality).
+- **Consume**: GGUF tensor payloads are imported tensor-by-tensor through `pkg/mcf/gguf.go`:
+  `mcf.ParseGGUF(r, size)` parses the container (header, metadata, tensor index; offsets are
+  relative to the aligned data section), `GGUFFile.TensorPayload` reads a raw payload, and
+  `mcf.TranscodeGGUFQuant` converts it to an MCF quant payload. **Q8_0 → `DTypeQ8` is
+  value-exact** (GGUF block 32 = f16 scale + 32 int8; MCF stores the same values with scales
+  and data in separate regions). Round-trip tests: `pkg/mcf/gguf_test.go` (parse/transcode/
+  corruption) and `internal/backend/core/gguf_roundtrip_test.go` (GGUF bytes → MCF tensor →
+  `RowTo` equals GGUF dequantization; `MANTLE_GGUF_Q8_0=<file>` runs it against a real file,
+  verified on embeddinggemma-300M-Q8_0.gguf).
+  **Limitation**: GGUF K-quants (Q2_K..Q6_K) carry a per-superblock min term and Q4_K/Q5_K/Q2_K/Q3_K
+  use asymmetric sub-blocks, and Q6_K/Q8_K use int8/f32 scales — MCF's symmetric k*/q* family
+  cannot represent those byte-exactly, so K-quant tensors must be dequantized and re-encoded
+  (lossy) rather than transcoded. GSQ's own uniform-grid symmetric payloads transcode exactly
+  whenever their per-group scales fit the f16/6-bit grid.
 - **Decode kernels**: unchanged — existing `dotInt8Int16`/k-quant paths handle the grid.
+- Full GGUF→MCF *model* conversion (name mapping, config) is intentionally out of scope:
+  Mantle is an execution substrate, not a conversion pipeline.
 
 ### 2.2 RCO / SLQ assignments → per-tensor dtype + provenance (P1)
 
@@ -92,7 +104,7 @@ SLQ's learned codebooks are not uniform grids, so q*/k* payloads cannot represen
 
 ## 4. Phasing
 
-1. **P0** GSQ consumption docs + GGUF K-quant → MCF round-trip test. No format change.
+1. **P0** GSQ consumption docs + GGUF Q8_0 → MCF transcode and round-trip tests. No format change. DONE.
 2. **P1** `--assignments` + budget verification + QuantInfo provenance (rco/slq). No format change.
 3. **P2** `DTypeUQ*` registry reservation, v1.1 spec addition, payload codec + CPU LUT kernels +
    tests/benchmarks, CUDA dequant-mode support. Format change, versioned, spec updated in the
