@@ -28,6 +28,7 @@ type Ops struct {
 	fastPathErr             error
 	weights                 map[*model.Mat]deviceMat
 	qweights                map[*model.Mat]deviceQuantMat
+	batchQWeights           map[*model.Mat]deviceQuantMat
 	offloadedMats           map[*model.Mat]struct{} // weights intentionally kept on CPU
 	gpuLayers               int                     // -1 auto, 0 all layers on CPU, N first N layers on GPU
 	normWeights             map[uintptr]native.DeviceBuffer
@@ -277,6 +278,7 @@ func NewOps(stream native.Stream, blas native.BlasHandle) *Ops {
 		blas:                    blas,
 		weights:                 make(map[*model.Mat]deviceMat),
 		qweights:                make(map[*model.Mat]deviceQuantMat),
+		batchQWeights:           make(map[*model.Mat]deviceQuantMat),
 		offloadedMats:           make(map[*model.Mat]struct{}),
 		gpuLayers:               -1,
 		normWeights:             make(map[uintptr]native.DeviceBuffer),
@@ -1428,6 +1430,7 @@ func (o *Ops) Close() error {
 		}
 	}
 	o.qweights = make(map[*model.Mat]deviceQuantMat)
+	o.batchQWeights = make(map[*model.Mat]deviceQuantMat)
 
 	for _, buf := range o.normWeights {
 		if e := buf.Free(); e != nil && err == nil {
@@ -5015,6 +5018,82 @@ func useQuantKernel() bool {
 		return envEnabled("MANTLE_CUDA_QUANT_KERNEL")
 	}
 	return currentCUDAWeightMode() != cudaWeightModeDequant
+}
+
+// batchedQuantSupported reports whether a quantized weight can be executed by
+// the batched-prefill quant GEMM (cached-int8 layout: int8 data + f32 per-block
+// scales). uq* codebooks are excluded (no int8 dot path).
+func batchedQuantSupported(o *Ops, w *model.Mat) bool {
+	if w == nil || len(w.Raw) == 0 || !mcf.DTypeRequiresAligned64(w.DType) {
+		return false
+	}
+	if mcf.IsUQDType(w.DType) {
+		return false
+	}
+	if _, off := o.offloadedMats[w]; off {
+		return false
+	}
+	return useQuantKernel()
+}
+
+// ensureBatchQuantMat uploads a cached-int8 (int8 block data + f32 scales)
+// device copy of a quantized weight for the batched quant GEMM. Unlike
+// ensureQuantMat it always uses the BuildQuantCache layout, even for Q4/K4 raw
+// payloads, so one kernel serves every q*/k* dtype.
+func (o *Ops) ensureBatchQuantMat(w *model.Mat) (deviceQuantMat, error) {
+	if buf, ok := o.batchQWeights[w]; ok {
+		return buf, nil
+	}
+	// Reuse the per-token path's cached-int8 copy when it already exists (q8
+	// and friends upload it during preload); only Q4/K4 raw payloads need a
+	// separate cached-int8 build for the batched kernel.
+	if buf, ok := o.qweights[w]; ok && buf.format == quantMatFormatCachedInt8 {
+		return buf, nil
+	}
+	if w == nil || w.Raw == nil || !mcf.DTypeRequiresAligned64(w.DType) {
+		return deviceQuantMat{}, fmt.Errorf("not a quantized matrix")
+	}
+	if _, offloaded := o.offloadedMats[w]; offloaded {
+		return deviceQuantMat{}, fmt.Errorf("quant matrix offloaded to CPU")
+	}
+	qc, err := model.BuildQuantCache(w)
+	if err != nil {
+		return deviceQuantMat{}, fmt.Errorf("quant cache build failed for %s matrix [%d x %d]: %w", dtypeString(w.DType), w.R, w.C, err)
+	}
+	if qc.UQ || len(qc.Q) == 0 || len(qc.Scales) == 0 {
+		return deviceQuantMat{}, fmt.Errorf("quant cache not in cached-int8 form for %s", dtypeString(w.DType))
+	}
+	qBytes := int64(len(qc.Q))
+	scaleBytes := int64(len(qc.Scales)) * int64(unsafe.Sizeof(float32(0)))
+	qBuf, err := native.AllocDevice(qBytes)
+	if err != nil {
+		return deviceQuantMat{}, err
+	}
+	if err := native.MemcpyH2D(qBuf, unsafe.Pointer(&qc.Q[0]), qBytes); err != nil {
+		_ = qBuf.Free()
+		return deviceQuantMat{}, err
+	}
+	sBuf, err := native.AllocDevice(scaleBytes)
+	if err != nil {
+		_ = qBuf.Free()
+		return deviceQuantMat{}, err
+	}
+	if err := native.MemcpyH2D(sBuf, unsafe.Pointer(&qc.Scales[0]), scaleBytes); err != nil {
+		_ = qBuf.Free()
+		_ = sBuf.Free()
+		return deviceQuantMat{}, err
+	}
+	info := deviceQuantMat{
+		format:       quantMatFormatCachedInt8,
+		q:            qBuf,
+		scales:       sBuf,
+		rows:         w.R,
+		cols:         w.C,
+		blocksPerRow: qc.BlocksPerRow,
+	}
+	o.batchQWeights[w] = info
+	runtime.KeepAlive(w)
+	return info, nil
 }
 
 func useLegacyStreamSync() bool {

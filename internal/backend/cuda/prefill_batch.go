@@ -316,10 +316,14 @@ func batchedWeightDense(o *Ops, w *instance.Mat) bool {
 	if _, off := o.offloadedMats[w]; off {
 		return false
 	}
+	mode := currentCUDAWeightMode()
+	if mode != cudaWeightModeDequant && batchedQuantSupported(o, w) {
+		// Quantized weight executed by the batched quant GEMM kernel.
+		return true
+	}
 	if _, ok := o.qweights[w]; ok {
 		return false
 	}
-	mode := currentCUDAWeightMode()
 	if useQuantKernel() && (shouldPreferQuantWeights(w, mode) || (w.Quant != nil && w.Quant.ValidFor(w))) {
 		return false
 	}
@@ -487,6 +491,10 @@ type batchedPrefillPlan struct {
 
 	outNormDev native.DeviceBuffer
 	outWeight  deviceMat
+
+	// matByBuf maps a resolved device weight buffer back to its model matrix
+	// so gemmW can route quantized weights to the batched quant kernel.
+	matByBuf map[uintptr]*instance.Mat
 
 	// tapRows is the number of hidden-tap rows this forward captures (0 when tap
 	// capture is disabled or the buffer is too small). tapDev holds the compact
@@ -748,12 +756,14 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 		lp.window = l.AttnWindow
 		if lp.isRecurrent {
 			// Short-conv weights, kernel and the device-resident conv state.
-			if lp.convIn, err = o.deviceMat(l.ShortConvInProj); err != nil {
+			if lp.convIn, err = p.resolveWeight(l.ShortConvInProj); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d conv in_proj: %w", i, err))
 			}
-			if lp.convOut, err = o.deviceMat(l.ShortConvOutProj); err != nil {
+			p.track(lp.convIn, l.ShortConvInProj)
+			if lp.convOut, err = p.resolveWeight(l.ShortConvOutProj); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d conv out_proj: %w", i, err))
 			}
+			p.track(lp.convOut, l.ShortConvOutProj)
 			if lp.convW, err = o.ensureConvKernel(l.ShortConvKernel); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d conv kernel: %w", i, err))
 			}
@@ -773,18 +783,22 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 			o.convStateReady[l] = true
 			lp.convState = cs.buf
 		} else {
-			if lp.wq, err = o.deviceMat(l.Wq); err != nil {
+			if lp.wq, err = p.resolveWeight(l.Wq); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d Wq: %w", i, err))
 			}
-			if lp.wk, err = o.deviceMat(l.Wk); err != nil {
+			p.track(lp.wq, l.Wq)
+			if lp.wk, err = p.resolveWeight(l.Wk); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d Wk: %w", i, err))
 			}
-			if lp.wv, err = o.deviceMat(l.Wv); err != nil {
+			p.track(lp.wk, l.Wk)
+			if lp.wv, err = p.resolveWeight(l.Wv); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d Wv: %w", i, err))
 			}
-			if lp.wo, err = o.deviceMat(l.Wo); err != nil {
+			p.track(lp.wv, l.Wv)
+			if lp.wo, err = p.resolveWeight(l.Wo); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d Wo: %w", i, err))
 			}
+			p.track(lp.wo, l.Wo)
 
 			apply, invFreq, ropeScale := batchedLayerRoPE(m, l)
 			lp.applyRope = apply
@@ -815,15 +829,18 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 				lp.scale = float32(1.0 / math.Sqrt(float64(headDim)))
 			}
 		}
-		if lp.up, err = o.deviceMat(l.FfnUp); err != nil {
+		if lp.up, err = p.resolveWeight(l.FfnUp); err != nil {
 			return fail(fmt.Errorf("cuda batched prefill: layer %d FfnUp: %w", i, err))
 		}
-		if lp.gate, err = o.deviceMat(l.FfnGate); err != nil {
+		p.track(lp.up, l.FfnUp)
+		if lp.gate, err = p.resolveWeight(l.FfnGate); err != nil {
 			return fail(fmt.Errorf("cuda batched prefill: layer %d FfnGate: %w", i, err))
 		}
-		if lp.down, err = o.deviceMat(l.FfnDown); err != nil {
+		p.track(lp.gate, l.FfnGate)
+		if lp.down, err = p.resolveWeight(l.FfnDown); err != nil {
 			return fail(fmt.Errorf("cuda batched prefill: layer %d FfnDown: %w", i, err))
 		}
+		p.track(lp.down, l.FfnDown)
 		if lp.attnNormDev, err = o.deviceNormWeight(l.AttnNorm); err != nil {
 			return fail(fmt.Errorf("cuda batched prefill: layer %d AttnNorm: %w", i, err))
 		}
@@ -841,9 +858,10 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 			}
 		}
 		if l.AttnGate != nil {
-			if lp.attnGate, err = o.deviceMat(l.AttnGate); err != nil {
+			if lp.attnGate, err = p.resolveWeight(l.AttnGate); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d AttnGate: %w", i, err))
 			}
+			p.track(lp.attnGate, l.AttnGate)
 			lp.gateRows = l.AttnGate.R
 			lp.gatePerHead = l.AttnGate.R == m.HeadCount && m.HeadCount != qDim
 		}
@@ -885,11 +903,12 @@ func (gr *GraphRuntime) newBatchedPrefillPlan(tokens []int) (*batchedPrefillPlan
 		return fail(fmt.Errorf("cuda batched prefill: output norm: %w", err))
 	}
 	p.outNormDev = outNormDev
-	outWeight, err := o.deviceMat(m.Output)
+	outWeight, err := p.resolveWeight(m.Output)
 	if err != nil {
 		return fail(fmt.Errorf("cuda batched prefill: output weight: %w", err))
 	}
 	p.outWeight = outWeight
+	p.track(outWeight, m.Output)
 
 	return p, nil
 }
@@ -973,7 +992,7 @@ func (p *batchedPrefillPlan) run() ([]float32, error) {
 	if err := native.RMSNormF32(p.buf.lastN, p.buf.last, p.outNormDev, p.eps, p.hidden, o.stream); err != nil {
 		return nil, fmt.Errorf("cuda batched prefill: output norm kernel: %w", err)
 	}
-	if err := p.gemmLast(p.outWeight, p.buf.lastN, p.hidden, p.buf.logits, p.vocab); err != nil {
+	if err := p.gemmLastW(p.outWeight, p.buf.lastN, p.hidden, p.buf.logits, p.vocab); err != nil {
 		return nil, err
 	}
 	if err := native.MemcpyD2H(unsafe.Pointer(&p.hostLogits[0]), p.buf.logits, int64(p.vocab)*int64(unsafe.Sizeof(float32(0)))); err != nil {
@@ -1016,10 +1035,10 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 	if err := native.RMSNormBatchedF32(p.buf.normed, p.buf.x, lp.ffnNormDev, p.eps, p.hidden, p.n, stream); err != nil {
 		return fmt.Errorf("cuda batched prefill: ffn norm: %w", err)
 	}
-	if err := p.gemm(lp.up, p.buf.normed, p.hidden, p.buf.up, lp.interm); err != nil {
+	if err := p.gemmW(lp.up, p.buf.normed, p.hidden, p.buf.up, lp.interm); err != nil {
 		return err
 	}
-	if err := p.gemm(lp.gate, p.buf.normed, p.hidden, p.buf.gate, lp.interm); err != nil {
+	if err := p.gemmW(lp.gate, p.buf.normed, p.hidden, p.buf.gate, lp.interm); err != nil {
 		return err
 	}
 	if lp.useGelu {
@@ -1031,7 +1050,7 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 			return fmt.Errorf("cuda batched prefill: silu mul: %w", err)
 		}
 	}
-	if err := p.gemm(lp.down, p.buf.act, lp.interm, p.buf.down, p.hidden); err != nil {
+	if err := p.gemmW(lp.down, p.buf.act, lp.interm, p.buf.down, p.hidden); err != nil {
 		return err
 	}
 	if lp.postFfnNormDev.Ptr() != nil {
@@ -1082,7 +1101,7 @@ func (p *batchedPrefillPlan) runShortConvBlock(lp *batchedLayerPlan) error {
 	stream := o.stream
 	hidden := p.hidden
 	// in_proj: [N, hidden] -> [N, 3*hidden] (b|c|xg per row).
-	if err := p.gemm(lp.convIn, p.buf.normed, hidden, p.buf.scProj, 3*hidden); err != nil {
+	if err := p.gemmW(lp.convIn, p.buf.normed, hidden, p.buf.scProj, 3*hidden); err != nil {
 		return err
 	}
 	// Causal conv over the chunk; scBx receives the gated inputs for the
@@ -1101,7 +1120,7 @@ func (p *batchedPrefillPlan) runShortConvBlock(lp *batchedLayerPlan) error {
 		}
 	}
 	// out_proj: [N, hidden] -> [N, hidden] into proj.
-	if err := p.gemm(lp.convOut, p.buf.scOut, hidden, p.buf.proj, hidden); err != nil {
+	if err := p.gemmW(lp.convOut, p.buf.scOut, hidden, p.buf.proj, hidden); err != nil {
 		return err
 	}
 	return nil
@@ -1116,13 +1135,13 @@ func (p *batchedPrefillPlan) runAttentionBlock(lp *batchedLayerPlan) error {
 	stream := o.stream
 
 	// Q/K/V projections.
-	if err := p.gemm(lp.wq, p.buf.normed, p.hidden, p.buf.q, p.qDim); err != nil {
+	if err := p.gemmW(lp.wq, p.buf.normed, p.hidden, p.buf.q, p.qDim); err != nil {
 		return err
 	}
-	if err := p.gemm(lp.wk, p.buf.normed, p.hidden, p.buf.k, lp.kvStride); err != nil {
+	if err := p.gemmW(lp.wk, p.buf.normed, p.hidden, p.buf.k, lp.kvStride); err != nil {
 		return err
 	}
-	if err := p.gemm(lp.wv, p.buf.normed, p.hidden, p.buf.v, lp.kvStride); err != nil {
+	if err := p.gemmW(lp.wv, p.buf.normed, p.hidden, p.buf.v, lp.kvStride); err != nil {
 		return err
 	}
 	if lp.wqBiasDev.Ptr() != nil {
@@ -1251,7 +1270,7 @@ func (p *batchedPrefillPlan) runAttentionBlock(lp *batchedLayerPlan) error {
 	// Attention output gate (LFM3-style): gate projection over the normed
 	// input per row, sigmoid-scaled onto the attention output before Wo.
 	if lp.attnGate.buf.Ptr() != nil {
-		if err := p.gemm(lp.attnGate, p.buf.normed, p.hidden, p.buf.gateBuf, lp.gateRows); err != nil {
+		if err := p.gemmW(lp.attnGate, p.buf.normed, p.hidden, p.buf.gateBuf, lp.gateRows); err != nil {
 			return err
 		}
 		if err := native.AttnGateScaleF32(p.buf.attn, p.buf.gateBuf, p.n, p.qDim, p.nHead, p.headDim, lp.gatePerHead, stream); err != nil {
@@ -1260,7 +1279,7 @@ func (p *batchedPrefillPlan) runAttentionBlock(lp *batchedLayerPlan) error {
 	}
 
 	// Attention output projection (the residual add happens in runLayer).
-	if err := p.gemm(lp.wo, p.buf.attn, p.qDim, p.buf.proj, p.hidden); err != nil {
+	if err := p.gemmW(lp.wo, p.buf.attn, p.qDim, p.buf.proj, p.hidden); err != nil {
 		return err
 	}
 
@@ -1377,6 +1396,68 @@ func (p *batchedPrefillPlan) gemmLast(devW deviceMat, xF32 native.DeviceBuffer, 
 		return fmt.Errorf("cuda batched prefill: output gemm (m=%d k=%d): %w", rows, k, err)
 	}
 	return nil
+}
+
+// track records which model matrix a resolved device weight buffer came from.
+func (p *batchedPrefillPlan) track(devW deviceMat, w *instance.Mat) {
+	if p.matByBuf == nil {
+		p.matByBuf = make(map[uintptr]*instance.Mat)
+	}
+	if devW.buf.Ptr() != nil && w != nil {
+		p.matByBuf[uintptr(devW.buf.Ptr())] = w
+	}
+}
+
+// resolveWeight resolves a model weight for the batched plan: supported
+// quantized weights get their cached-int8 device copy (no dequant), dense
+// weights the usual deviceMat upload.
+func (p *batchedPrefillPlan) resolveWeight(w *instance.Mat) (deviceMat, error) {
+	if batchedQuantSupported(p.o, w) {
+		qw, err := p.o.ensureBatchQuantMat(w)
+		if err != nil {
+			return deviceMat{}, err
+		}
+		devW := deviceMat{buf: qw.q, dtype: native.BlasF32, rows: w.R, cols: w.C}
+		p.track(devW, w)
+		return devW, nil
+	}
+	devW, err := p.o.deviceMat(w)
+	if err != nil {
+		return deviceMat{}, err
+	}
+	p.track(devW, w)
+	return devW, nil
+}
+
+// gemmW runs the batched projection for a weight, using the quant GEMM kernel
+// when the source matrix is a supported quantized weight.
+func (p *batchedPrefillPlan) gemmW(devW deviceMat, xF32 native.DeviceBuffer, k int, dst native.DeviceBuffer, rows int) error {
+	if w, ok := p.matByBuf[uintptr(devW.buf.Ptr())]; ok && batchedQuantSupported(p.o, w) {
+		qw, err := p.o.ensureBatchQuantMat(w)
+		if err != nil {
+			return fmt.Errorf("cuda batched prefill: quant weight upload: %w", err)
+		}
+		if err := native.QuantMatVecCachedBatch(qw.q, qw.scales, xF32, dst, rows, p.n, k, qw.blocksPerRow, p.o.stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: quant batch gemm (m=%d n=%d k=%d): %w", rows, p.n, k, err)
+		}
+		return nil
+	}
+	return p.gemm(devW, xF32, k, dst, rows)
+}
+
+// gemmLastW is the n=1 output-head variant of gemmW.
+func (p *batchedPrefillPlan) gemmLastW(devW deviceMat, xF32 native.DeviceBuffer, k int, dst native.DeviceBuffer, rows int) error {
+	if w, ok := p.matByBuf[uintptr(devW.buf.Ptr())]; ok && batchedQuantSupported(p.o, w) {
+		qw, err := p.o.ensureBatchQuantMat(w)
+		if err != nil {
+			return fmt.Errorf("cuda batched prefill: quant output upload: %w", err)
+		}
+		if err := native.QuantMatVecCachedBatch(qw.q, qw.scales, xF32, dst, rows, 1, k, qw.blocksPerRow, p.o.stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: quant output gemm (m=%d k=%d): %w", rows, k, err)
+		}
+		return nil
+	}
+	return p.gemmLast(devW, xF32, k, dst, rows)
 }
 
 func devSub(buf native.DeviceBuffer, byteOffset int) native.DeviceBuffer {

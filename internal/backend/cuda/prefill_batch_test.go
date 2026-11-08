@@ -46,6 +46,9 @@ type batchTestDims struct {
 
 	q8Cache bool
 	bf16    bool
+	// q8 builds layer/output weights as DTypeQ8 quant mats so the batched
+	// quant GEMM path is exercised.
+	q8 bool
 
 	// hybrid builds an LFM3-shaped model: layer 0 a short-conv layer, layer 1
 	// sliding-window attention with a per-head output gate and sandwich norms,
@@ -94,6 +97,57 @@ func batchTestMat(r, c int, seed uint32, bf16 bool) *core.Mat {
 	return &core.Mat{R: r, C: c, Stride: c, DType: mcf.DTypeBF16, Raw: raw}
 }
 
+// batchTestMatQ8 builds a DTypeQ8 quant mat (f16 block scales, align64, int8
+// data) from the same deterministic pattern.
+func batchTestMatQ8(r, c int, seed uint32) *core.Mat {
+	data := make([]float32, r*c)
+	batchTestFill(data, seed)
+	bpr := (c + 31) / 32
+	totalBlocks := r * bpr
+	scales := make([]byte, totalBlocks*2)
+	quant := make([]byte, totalBlocks*32)
+	for b := 0; b < totalBlocks; b++ {
+		maxAbs := float32(0)
+		for i := 0; i < 32; i++ {
+			idx := b*32 + i
+			v := float32(0)
+			if idx < r*c {
+				v = data[idx]
+			}
+			if a := float32(math.Abs(float64(v))); a > maxAbs {
+				maxAbs = a
+			}
+		}
+		scale := float32(1e-9)
+		if maxAbs > 0 {
+			scale = maxAbs / 127
+		}
+		u := core.Float32ToFloat16(scale)
+		scales[b*2] = byte(u)
+		scales[b*2+1] = byte(u >> 8)
+		for i := 0; i < 32; i++ {
+			idx := b*32 + i
+			v := float32(0)
+			if idx < r*c {
+				v = data[idx]
+			}
+			q := int32(math.Round(float64(v / scale)))
+			if q > 127 {
+				q = 127
+			} else if q < -127 {
+				q = -127
+			}
+			quant[b*32+i] = byte(int8(q))
+		}
+	}
+	buf := append([]byte{}, scales...)
+	for len(buf)%64 != 0 {
+		buf = append(buf, 0)
+	}
+	buf = append(buf, quant...)
+	return &core.Mat{R: r, C: c, Stride: c, DType: mcf.DTypeQ8, Raw: buf}
+}
+
 // batchTestModel builds a plain dense transformer instance. RoPE is enabled
 // with an instance-level inverse-frequency table (the gate rejects NoRoPE).
 func batchTestModel(d batchTestDims) *core.Instance {
@@ -101,6 +155,10 @@ func batchTestModel(d batchTestDims) *core.Instance {
 	qDim := d.nHead * headDim
 	kvStride := d.kvHeads * headDim
 
+	wmatOut := batchTestMat(d.vocab, d.hidden, d.seed+1, d.bf16)
+	if d.q8 {
+		wmatOut = batchTestMatQ8(d.vocab, d.hidden, d.seed+1)
+	}
 	m := &core.Instance{
 		Config: &core.ModelConfig{
 			Config: core.Config{
@@ -118,7 +176,7 @@ func batchTestModel(d batchTestDims) *core.Instance {
 		},
 		Embeddings:  batchTestMat(d.vocab, d.hidden, d.seed, d.bf16),
 		OutputNorm:  make([]float32, d.hidden),
-		Output:      batchTestMat(d.vocab, d.hidden, d.seed+1, d.bf16),
+		Output:      wmatOut,
 		Layers:      make([]core.Layer, d.layers),
 		HeadDim:     headDim,
 		HeadCount:   d.nHead,
@@ -158,6 +216,12 @@ func batchTestModel(d batchTestDims) *core.Instance {
 		m.OutputNorm[i] = 1.0
 	}
 
+	wmat := func(r, c int, seed uint32) *core.Mat {
+		if d.q8 {
+			return batchTestMatQ8(r, c, seed)
+		}
+		return batchTestMat(r, c, seed, d.bf16)
+	}
 	for li := range m.Layers {
 		layer := &m.Layers[li]
 		s := d.seed + uint32(li+2)*7919
@@ -181,8 +245,8 @@ func batchTestModel(d batchTestDims) *core.Instance {
 			kernel := core.NewMat(d.hidden, klen)
 			batchTestFill(kernel.Data, s+20)
 			layer.ShortConvKernel = &kernel
-			layer.ShortConvInProj = batchTestMat(3*d.hidden, d.hidden, s+21, d.bf16)
-			layer.ShortConvOutProj = batchTestMat(d.hidden, d.hidden, s+22, d.bf16)
+			layer.ShortConvInProj = wmat(3*d.hidden, d.hidden, s+21)
+			layer.ShortConvOutProj = wmat(d.hidden, d.hidden, s+22)
 			layer.ShortConvState = core.ShortConvState{Buf: make([]float32, (klen-1)*d.hidden), KernelLen: klen}
 		} else if d.hybrid && li == 2 {
 			layer.AttnType = "sliding_attention"
@@ -197,7 +261,7 @@ func batchTestModel(d batchTestDims) *core.Instance {
 			}
 			layer.RopeInvFreq = zt
 			layer.RopeAttnScale = 1
-			gate := batchTestMat(d.nHead, d.hidden, s+23, d.bf16) // per-head gate
+			gate := wmat(d.nHead, d.hidden, s+23) // per-head gate
 			layer.AttnGate = gate
 			layer.PostAttnNorm = make([]float32, d.hidden)
 			layer.PostFfnNorm = make([]float32, d.hidden)
@@ -220,10 +284,10 @@ func batchTestModel(d batchTestDims) *core.Instance {
 		batchTestFill(layer.WkBias, s+8)
 		batchTestFill(layer.WvBias, s+9)
 		if !layer.IsRecurrent {
-			layer.Wq = batchTestMat(qDim, d.hidden, s, d.bf16)
-			layer.Wk = batchTestMat(kvStride, d.hidden, s+1, d.bf16)
-			layer.Wv = batchTestMat(kvStride, d.hidden, s+2, d.bf16)
-			layer.Wo = batchTestMat(d.hidden, qDim, s+3, d.bf16)
+			layer.Wq = wmat(qDim, d.hidden, s)
+			layer.Wk = wmat(kvStride, d.hidden, s+1)
+			layer.Wv = wmat(kvStride, d.hidden, s+2)
+			layer.Wo = wmat(d.hidden, qDim, s+3)
 			layer.AttnCache = core.AttnCache{
 				K:        make([]float32, 0),
 				V:        make([]float32, 0),
@@ -231,9 +295,9 @@ func batchTestModel(d batchTestDims) *core.Instance {
 				CacheLen: d.cacheLen,
 			}
 		}
-		layer.FfnUp = batchTestMat(d.ffnDim, d.hidden, s+4, d.bf16)
-		layer.FfnGate = batchTestMat(d.ffnDim, d.hidden, s+5, d.bf16)
-		layer.FfnDown = batchTestMat(d.hidden, d.ffnDim, s+6, d.bf16)
+		layer.FfnUp = wmat(d.ffnDim, d.hidden, s+4)
+		layer.FfnGate = wmat(d.ffnDim, d.hidden, s+5)
+		layer.FfnDown = wmat(d.hidden, d.ffnDim, s+6)
 		if d.q8Cache && !layer.IsRecurrent {
 			layer.AttnCache.KQ8 = make([]int8, 0)
 			layer.AttnCache.KQ8S = make([]float32, 0)
@@ -654,8 +718,8 @@ func TestBatchedPrefillGateQuantWeightsDequantMode(t *testing.T) {
 
 	t.Setenv("MANTLE_CUDA_WEIGHT_MODE", "auto")
 	o = newOps()
-	if batchedWeightDense(o, quantMat) {
-		t.Fatal("auto mode must keep quantized weights on the sequential quant-kernel path")
+	if !batchedWeightDense(o, quantMat) {
+		t.Fatal("auto mode must accept quantized weights (batched quant GEMM kernel)")
 	}
 	if !batchedWeightDense(o, denseMat) {
 		t.Fatal("dense bf16 weights must stay eligible in auto mode")
@@ -755,4 +819,57 @@ func batchArgmax(x []float32) int {
 		}
 	}
 	return best
+}
+
+// TestBatchedPrefillParityQ8 checks the batched quant GEMM path (DTypeQ8
+// weights in auto mode) against the sequential oracle, and that the public
+// PrefillTokens really selects the batched path for quantized weights.
+func TestBatchedPrefillParityQ8(t *testing.T) {
+	if !cudaAvailable(t) {
+		return
+	}
+	d := defaultBatchTestDims()
+	d.q8 = true
+	d.layers = 2
+	tokens := []int{1, 3, 7, 11, 2}
+
+	grBatched, cleanup := newBatchTestRuntime(t, batchTestModel(d))
+	defer cleanup()
+	if !grBatched.batchedPrefillEligible(tokens) {
+		t.Fatal("q8 model should be eligible for the batched quant path")
+	}
+	got, err := grBatched.PrefillTokens(tokens)
+	if err != nil {
+		t.Fatalf("batched PrefillTokens: %v", err)
+	}
+	got = append([]float32(nil), got...)
+
+	want := sequentialOracle(t, d, tokens)
+	// Quant kernels accumulate in a different order than the f32 oracle.
+	compareBatchLogits(t, "Q8", got, want, 2e-3, 2e-2)
+
+	// Decode continuity: greedy tokens from the batched instance vs a fresh
+	// sequential instance must agree.
+	seqRT, seqCleanup := newBatchTestRuntime(t, batchTestModel(d))
+	defer seqCleanup()
+	if _, err := seqRT.cudaRuntime.PrefillTokens(tokens); err != nil {
+		t.Fatalf("sequential prefill: %v", err)
+	}
+	tokG := batchArgmax(got)
+	tokW := tokG
+	for i := 0; i < 4; i++ {
+		lg, err := grBatched.ForwardToken(tokG)
+		if err != nil {
+			t.Fatalf("batched ForwardToken: %v", err)
+		}
+		lw, err := seqRT.ForwardToken(tokW)
+		if err != nil {
+			t.Fatalf("sequential ForwardToken: %v", err)
+		}
+		ng, nw := batchArgmax(lg), batchArgmax(lw)
+		if ng != nw {
+			t.Fatalf("Q8: greedy token %d differs: got %d want %d", i, ng, nw)
+		}
+		tokG, tokW = ng, nw
+	}
 }

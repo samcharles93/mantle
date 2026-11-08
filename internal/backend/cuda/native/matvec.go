@@ -27,6 +27,16 @@ extern int mantleCudaQuantMatVecQ4F32(
 	int blocksPerRow,
 	int cols,
 	cudaStream_t stream);
+extern int mantleCudaQuantMatVecCachedBatch(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream);
 extern int mantleCudaQuantMatVecK4F32(
 	const unsigned char* qData,
 	const unsigned short* superScalesF16,
@@ -83,6 +93,19 @@ static int mantleCudaQuantMatVecInt8BlocksF32Wrapper(
 	int cols,
 	cudaStream_t stream) {
 	return mantleCudaQuantMatVecInt8BlocksF32(q, scales, x, y, rows, blocksPerRow, cols, stream);
+}
+
+static int mantleCudaQuantMatVecCachedBatchWrapper(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecCachedBatch(q, scales, x, y, rows, n, cols, blocksPerRow, stream);
 }
 
 static int mantleCudaQuantMatVecQ4F32Wrapper(
@@ -179,6 +202,28 @@ func QuantMatVecInt8BlocksF32(q, scales, x, y DeviceBuffer, rows, blocksPerRow, 
 		C.int(rows),
 		C.int(blocksPerRow),
 		C.int(cols),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecCachedBatch computes y[n, rows] = x[n, cols] * W^T for the
+// cached-int8 quant layout (int8 block data + per-block f32 scales).
+func QuantMatVecCachedBatch(q, scales, x, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if q.ptr == nil || scales.ptr == nil || x.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("quant batch matvec buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("quant batch matvec dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecCachedBatchWrapper(
+		(*C.schar)(q.ptr),
+		(*C.float)(scales.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
 		stream.ptr,
 	))
 }

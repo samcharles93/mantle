@@ -104,6 +104,7 @@ KERNELS=(
 	deltanet_recurrent
 	moe_router
 	moe_accumulate
+	quant_batch
 )
 
 echo "Detected compute capability: sm_${DETECTED_CAP}"
