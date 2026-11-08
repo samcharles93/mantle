@@ -57,6 +57,11 @@ type Ops struct {
 
 	managedLayerBufs map[int][]managedLayerRange
 
+	// vision is the device-side vision tower + projector (multimodal models
+	// only), preloaded as F32 by PreloadModelWeights. Nil for text-only models
+	// or when the preload was skipped (host fallback stays active).
+	vision *visionEncoder
+
 	// Dynamic KV cache bounding: effective context length for allocation (0 = use layer max)
 	effectiveContextLen int
 
@@ -744,6 +749,21 @@ func (o *Ops) PreloadModelWeights(m *core.Instance) error {
 	}
 
 	var usedBytes int64
+
+	// Multimodal models: upload the vision tower + projector FIRST, as F32,
+	// so the device vision encoder is guaranteed residency and the text-layer
+	// budget below accounts for it. Skipped (host fallback stays active, and
+	// Encode logs the fallback) when free VRAM cannot hold the vision weights
+	// plus headroom for KV/scratch. Failure is non-fatal for model load.
+	if verr := o.preloadVisionWeights(m); verr != nil {
+		fmt.Fprintf(os.Stderr, "CUDA vision preload skipped, vision tower stays on host: %v\n", verr)
+	} else if o.vision != nil {
+		usedBytes += estimateVisionWeightBytesF32(m)
+		if cudaTraceEnabled() {
+			fmt.Fprintf(os.Stderr, "CUDA vision preload: %d MiB f32 on device\n", estimateVisionWeightBytesF32(m)/1024/1024)
+		}
+	}
+
 	if err := uploadMat("embeddings", m.Embeddings); err != nil {
 		return err
 	}
@@ -1472,6 +1492,10 @@ func (o *Ops) Close() error {
 	defer o.mu.Unlock()
 
 	var err error
+	if o.vision != nil {
+		o.vision.close()
+		o.vision = nil
+	}
 	for _, buf := range o.weights {
 		if e := buf.buf.Free(); e != nil && err == nil {
 			err = e
@@ -6143,6 +6167,7 @@ func estimateModelWeightBytes(m *model.Instance, mode cudaWeightMode) int64 {
 	addMat(m.Embeddings)
 	addMat(m.Output)
 	addNorm(m.OutputNorm)
+	total += estimateVisionWeightBytesF32(m)
 	for i := range m.Layers {
 		layer := &m.Layers[i]
 		addNorm(layer.AttnNorm)
