@@ -48,8 +48,33 @@ Readers must reject unsupported major versions and may ignore unknown minor vers
 - 0x0104: vocab.json
 - 0x0105: merges.txt
 - 0x0106: processor_config.json (optional; multimodal models only — image/video
-  preprocessing parameters. Absent for text-only models; readers MUST tolerate
-  its absence)
+  preprocessing parameters and, for audio models, the feature_extractor block.
+  Absent for text-only models; readers MUST tolerate its absence)
+- 0x0107: audio tokenizer codec directory (optional; audio models only, e.g.
+  LFM3-Omni's `audio_tokenizer/`). Absent for models without a speech codec;
+  readers MUST tolerate its absence and MUST reject unknown payload versions.
+
+### 0x0107 Audio Tokenizer payload (version 1)
+
+The payload packs the codec's `config.json` and `model.safetensors` (the two
+files of the HF `audio_tokenizer/` subfolder) into one blob. All numeric fields
+are little-endian; parsing must be bounds-checked and overflow-safe:
+
+```
+AudioTokenizerHeader (24 bytes)
+- u32 Magic          = 0x314B5441 ("ATK1")
+- u32 Version        = 1
+- u64 ConfigSize     (bytes of config.json)
+- u64 SafetensorsSize (bytes of model.safetensors)
+
+Body
+- ConfigSize bytes: audio_tokenizer/config.json
+- SafetensorsSize bytes: audio_tokenizer/model.safetensors (raw safetensors file)
+```
+
+The section's directory `Version` field equals the payload version (currently 1).
+Readers that only understand version 1 MUST reject any other payload version
+while continuing to read the rest of the container.
 
 ## Header Flags
 

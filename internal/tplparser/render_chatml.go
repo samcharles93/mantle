@@ -93,6 +93,11 @@ func renderChatML(opts RenderOptions) (string, bool, error) {
 					text += "<|vision_start|><|image|><|vision_end|>"
 				case "video":
 					text += "<|vision_start|><|video|><|vision_end|>"
+				case "audio", "audio_url", "input_audio":
+					// LFM3-Omni chat_template.jinja renders audio content as
+					// <|vision_start|><|audio|><|vision_end|>; the engine expands
+					// the single placeholder into one <|audio|> per audio token.
+					text += "<|vision_start|><|audio|><|vision_end|>"
 				case "text":
 					if t, ok := block["text"].(string); ok {
 						text += t

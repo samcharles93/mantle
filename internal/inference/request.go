@@ -7,6 +7,7 @@ type RequestOptions struct {
 	Tools    []any
 	Images   [][]byte
 	Videos   [][][]byte
+	Audio    [][]byte
 
 	Steps *int
 	Seed  *int64
@@ -32,6 +33,7 @@ func ResolveRequest(opts RequestOptions, defaults GenDefaults) Request {
 		Tools:           opts.Tools,
 		Images:          opts.Images,
 		Videos:          opts.Videos,
+		Audio:           opts.Audio,
 		Steps:           -1,
 		Seed:            -1,
 		Temperature:     0.8,

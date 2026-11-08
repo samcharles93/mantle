@@ -25,6 +25,11 @@ type LoadModelOptions struct {
 	SharedOutput     *Mat
 
 	// ProcessorConfigJSON optionally carries the packed processor_config.json
-	// section bytes for multimodal models (image preprocessing parameters).
+	// section bytes for multimodal models (image preprocessing parameters and,
+	// for audio models, the feature_extractor block).
 	ProcessorConfigJSON []byte
+
+	// AudioTokenizerConfigJSON optionally carries the config.json half of the
+	// packed section 0x0107 (audio_tokenizer/config.json) for audio models.
+	AudioTokenizerConfigJSON []byte
 }

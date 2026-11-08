@@ -96,6 +96,8 @@ type ModelConfig struct {
 	Tokenizer tokenizer.TokenizerConfig
 	// Vision is non-nil for multimodal (vision-language) models.
 	Vision *VisionConfig
+	// Audio is non-nil for audio-language models (e.g. LFM3-Omni).
+	Audio *AudioConfig
 }
 
 // MambaConfig captures the runtime parameters required to execute a Mamba

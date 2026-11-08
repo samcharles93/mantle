@@ -64,6 +64,11 @@ type PackOptions struct {
 	ProcessorConfigJSONPath  string
 	VocabJSONPath            string
 	MergesTXTPath            string
+	// AudioTokenizerDir optionally points at a speech codec directory
+	// (audio_tokenizer/) holding config.json and model.safetensors. If empty,
+	// defaults to InputDir/audio_tokenizer when that directory exists. Its
+	// files are packed into the optional section 0x0107 (SectionAudioTokenizer).
+	AudioTokenizerDir string
 }
 
 func Pack(opts PackOptions) error {
@@ -164,6 +169,9 @@ func Pack(opts PackOptions) error {
 			return err
 		}
 		if err := writeOptionalFileSection(w, SectionProcessorConfigJSON, resourceSectionVersion, opts.ProcessorConfigJSONPath); err != nil {
+			return err
+		}
+		if err := writeAudioTokenizerSection(w, opts.InputDir, opts.AudioTokenizerDir, logf); err != nil {
 			return err
 		}
 	}
@@ -396,6 +404,46 @@ func writeOptionalFileSection(w *Writer, typ SectionType, version uint32, path s
 
 	_, err = w.WriteSectionFromReader(typ, version, f)
 	return err
+}
+
+// writeAudioTokenizerSection packs the audio codec directory (config.json +
+// model.safetensors) into the optional section 0x0107. A missing directory is
+// skipped (text-only and vision-only models); a present directory must hold
+// both files — a partial codec directory is an explicit pack error rather
+// than a silently dropped codec.
+func writeAudioTokenizerSection(w *Writer, inputDir, dirOverride string, logf func(string, ...any)) error {
+	dir := dirOverride
+	if dir == "" {
+		dir = filepath.Join(inputDir, "audio_tokenizer")
+	}
+	st, err := os.Stat(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("mcf: pack: audio tokenizer path %s is not a directory", dir)
+	}
+	configPath := filepath.Join(dir, "config.json")
+	stPath := filepath.Join(dir, "model.safetensors")
+	configJSON, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("mcf: pack: audio_tokenizer: %w", err)
+	}
+	safetensors, err := os.ReadFile(stPath)
+	if err != nil {
+		return fmt.Errorf("mcf: pack: audio_tokenizer: %w", err)
+	}
+	blob := EncodeAudioTokenizerSection(configJSON, safetensors)
+	if err := w.WriteSection(SectionAudioTokenizer, AudioTokenizerSectionVersion, blob); err != nil {
+		return err
+	}
+	if logf != nil {
+		logf("pack: wrote audio_tokenizer section 0x0107 (config %d bytes, safetensors %d bytes)", len(configJSON), len(safetensors))
+	}
+	return nil
 }
 
 func readFileIfExists(path string) ([]byte, bool, error) {

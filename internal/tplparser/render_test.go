@@ -236,3 +236,51 @@ func TestRenderDisableThinking(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderChatMLLFM3OmniAudioBlock pins the lfm3_omni arch default renderer
+// and its audio content marker: an audio block renders as
+// <|vision_start|><|audio|><|vision_end|> (chat_template.jinja), leaving the
+// placeholder for the engine to expand into one <|audio|> per audio token.
+func TestRenderChatMLLFM3OmniAudioBlock(t *testing.T) {
+	t.Parallel()
+
+	out, ok, err := Render(RenderOptions{
+		Arch:                "lfm3_omni",
+		BOSToken:            "<|startoftext|>",
+		AddBOS:              false,
+		AddGenerationPrompt: true,
+		Messages: []Message{
+			{Role: "user", Content: []any{
+				map[string]any{"type": "audio"},
+				map[string]any{"type": "text", "text": "what do you hear?"},
+			}},
+		},
+	})
+	if err != nil || !ok {
+		t.Fatalf("render: ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(out, "<|im_start|>user\n<|vision_start|><|audio|><|vision_end|>what do you hear?<|im_end|>\n") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	if !strings.HasSuffix(out, "<|im_start|>assistant\n") {
+		t.Fatalf("expected generation prompt suffix: %q", out)
+	}
+
+	// input_audio alias renders the same marker
+	out2, ok2, err := Render(RenderOptions{
+		Arch:                "lfm3_omni",
+		AddGenerationPrompt: true,
+		Messages: []Message{
+			{Role: "user", Content: []any{
+				map[string]any{"type": "input_audio", "input_audio": map[string]any{"data": "AAAA", "format": "wav"}},
+				map[string]any{"type": "text", "text": "hi"},
+			}},
+		},
+	})
+	if err != nil || !ok2 {
+		t.Fatalf("render2: ok=%v err=%v", ok2, err)
+	}
+	if !strings.Contains(out2, "<|vision_start|><|audio|><|vision_end|>hi") {
+		t.Fatalf("input_audio marker missing: %q", out2)
+	}
+}

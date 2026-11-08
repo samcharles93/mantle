@@ -43,6 +43,11 @@ type Instance struct {
 	// models). It runs on the host even when the decoder runs on a device.
 	Vision VisionEncoder
 
+	// Audio is the audio encoder of an audio-language model (nil for models
+	// without an audio tower). Like Vision it runs on the host even when the
+	// decoder runs on a device.
+	Audio AudioEncoder
+
 	attnPoolOnce sync.Once
 	attnPool     *AttnPool
 

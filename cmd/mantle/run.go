@@ -46,6 +46,7 @@ func runCmd() *cli.Command {
 		hfConfigFile string
 		imagePaths   []string
 		videoPaths   []string
+		audioPaths   []string
 
 		// Streaming options
 		streamMode string
@@ -110,6 +111,12 @@ func runCmd() *cli.Command {
 			Category:    "Generation",
 			Usage:       "path to a directory of frame images (sorted by name) or a single image, attached as a video; repeatable (vision models only)",
 			Destination: &videoPaths,
+		},
+		&cli.StringSliceFlag{
+			Name:        "audio",
+			Category:    "Generation",
+			Usage:       "path to a WAV file (16 kHz mono/stereo 16-bit PCM or 32-bit float) to attach to the prompt; repeatable (audio models only)",
+			Destination: &audioPaths,
 		},
 		&cli.Int64Flag{
 			Name:        "steps",
@@ -729,6 +736,17 @@ func runCmd() *cli.Command {
 			if len(videos) > 0 {
 				log.Info("attached videos", "count", len(videos))
 			}
+			var audios [][]byte
+			for _, ap := range audioPaths {
+				b, err := os.ReadFile(ap)
+				if err != nil {
+					return cli.Exit(fmt.Sprintf("error: read audio %s: %v", ap, err), 1)
+				}
+				audios = append(audios, b)
+			}
+			if len(audios) > 0 {
+				log.Info("attached audio clips", "count", len(audios))
+			}
 			if toolsJSON != "" {
 				if !fileExists(toolsJSON) {
 					return cli.Exit(fmt.Sprintf("error: tools json not found: %s", toolsJSON), 1)
@@ -759,7 +777,7 @@ func runCmd() *cli.Command {
 					msgs = append(msgs, tokenizer.Message{Role: "system", Content: system})
 				}
 				if prompt != "" {
-					msgs = append(msgs, tokenizer.Message{Role: "user", Content: userContentWithMedia(prompt, images, videos)})
+					msgs = append(msgs, tokenizer.Message{Role: "user", Content: userContentWithMedia(prompt, images, videos, audios)})
 				} else {
 					interactive = true
 					log.Info("interactive mode enabled", "hint", "type /help for commands, /exit to quit")
@@ -910,6 +928,9 @@ func runCmd() *cli.Command {
 				if len(videos) > 0 {
 					opts.Videos = videos
 				}
+				if len(audios) > 0 {
+					opts.Audio = audios
+				}
 				opts.EchoPrompt = &echoPromptVal
 				req := inference.ResolveRequest(opts, genDefaults)
 
@@ -1014,19 +1035,23 @@ func joinInts(ids []int) string {
 }
 
 // userContentWithMedia builds a multimodal user message content: one block per
-// attached image/video followed by the text block, which the chat template
-// renders as <|vision_start|><|image|><|vision_end|> /
-// <|vision_start|><|video|><|vision_end|> markers.
-func userContentWithMedia(prompt string, images [][]byte, videos [][][]byte) any {
-	if len(images) == 0 && len(videos) == 0 {
+// attached image/video/audio clip followed by the text block, which the chat
+// template renders as <|vision_start|><|image|><|vision_end|> /
+// <|vision_start|><|video|><|vision_end|> /
+// <|vision_start|><|audio|><|vision_end|> markers.
+func userContentWithMedia(prompt string, images [][]byte, videos [][][]byte, audios [][]byte) any {
+	if len(images) == 0 && len(videos) == 0 && len(audios) == 0 {
 		return prompt
 	}
-	blocks := make([]any, 0, len(images)+len(videos)+1)
+	blocks := make([]any, 0, len(images)+len(videos)+len(audios)+1)
 	for range images {
 		blocks = append(blocks, map[string]any{"type": "image"})
 	}
 	for range videos {
 		blocks = append(blocks, map[string]any{"type": "video"})
+	}
+	for range audios {
+		blocks = append(blocks, map[string]any{"type": "audio"})
 	}
 	blocks = append(blocks, map[string]any{"type": "text", "text": prompt})
 	return blocks

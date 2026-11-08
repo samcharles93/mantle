@@ -99,6 +99,7 @@ func FilterFiles(info *ModelInfo) []string {
 	interesting := []string{
 		"config.json",
 		"generation_config.json",
+		"processor_config.json",
 		"tokenizer.json",
 		"tokenizer_config.json",
 		"vocab.json",
@@ -111,8 +112,12 @@ func FilterFiles(info *ModelInfo) []string {
 		lower := strings.ToLower(rpath)
 
 		isInteresting := slices.Contains(interesting, rpath)
+		// Speech codec directories of audio models (e.g. LFM3-Omni's
+		// audio_tokenizer/{config.json,model.safetensors}) must survive the
+		// pull so `mantle pack` can embed them in MCF section 0x0107.
+		isAudioTokenizer := strings.HasPrefix(rpath, "audio_tokenizer/")
 
-		if isInteresting || strings.HasSuffix(lower, ".safetensors") {
+		if isInteresting || isAudioTokenizer || strings.HasSuffix(lower, ".safetensors") {
 			files = append(files, rpath)
 		}
 	}
