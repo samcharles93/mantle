@@ -508,6 +508,21 @@ func (o *Ops) QKVAttentionProjection(
 		return false
 	}
 
+	// Standalone attention output gate (LFM3-style gate_proj): per-head when
+	// the gate has one row per head, per-element when it has qDim rows.
+	gateRows := 0
+	gatePerHead := false
+	if layer.AttnGate != nil {
+		gateRows = layer.AttnGate.R
+		if gateRows != nHead && gateRows != qDim {
+			return false
+		}
+		gatePerHead = gateRows == nHead && nHead != qDim
+		if _, off := o.offloadedMats[layer.AttnGate]; off {
+			return false
+		}
+	}
+
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -579,6 +594,18 @@ func (o *Ops) QKVAttentionProjection(
 	if err := o.projectInto(o.qProjDev, layer.Wq, xDev); err != nil {
 		o.recordFastPathErrorLocked(err)
 		return false
+	}
+	// Attention output gate projection (LFM3-style): runs from the same
+	// normed input as Q; applied to the attention output before Wo.
+	if layer.AttnGate != nil {
+		if err := o.ensureActTmp(gateRows * 4); err != nil {
+			o.recordFastPathErrorLocked(err)
+			return false
+		}
+		if err := o.projectInto(o.aDev, layer.AttnGate, xDev); err != nil {
+			o.recordFastPathErrorLocked(err)
+			return false
+		}
 	}
 	if !isConsumer {
 		if err := o.projectInto(o.kProjDev, layer.Wk, xDev); err != nil {
@@ -784,6 +811,15 @@ func (o *Ops) QKVAttentionProjection(
 			scale, softcap,
 			o.stream,
 		); err != nil {
+			o.recordFastPathErrorLocked(err)
+			return false
+		}
+	}
+
+	// Attention output gate: attnOut[i] *= sigmoid(gate[i]) (per head or per
+	// element), applied on device before the Wo projection.
+	if layer.AttnGate != nil {
+		if err := native.AttnGateScaleF32(o.yDev, o.aDev, 1, qDim, nHead, headDim, gatePerHead, o.stream); err != nil {
 			o.recordFastPathErrorLocked(err)
 			return false
 		}

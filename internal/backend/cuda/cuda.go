@@ -316,6 +316,7 @@ func (r *cudaRuntime) emitPerfSummary(graphStats GraphCacheStats, graphCacheLimi
 	fmt.Fprintf(os.Stderr, "EndToken:         %d calls, %.1f ms\n", decode.AttribEndTokenCalls, float64(decode.AttribEndTokenUS)/1000)
 	fmt.Fprintf(os.Stderr, "SyncHostState:    %d calls, %.1f ms\n", decode.AttribSyncHostStateCalls, float64(decode.AttribSyncHostStateUS)/1000)
 	fmt.Fprintf(os.Stderr, "SyncDeviceSlice:  %d calls, %.1f ms\n", decode.AttribSyncDeviceSliceCalls, float64(decode.AttribSyncDeviceSliceUS)/1000)
+	fmt.Fprintf(os.Stderr, "WaitForResult:    %d calls, %.1f ms, %d MB\n", decode.AttribWaitForResultCalls, float64(decode.AttribWaitForResultUS)/1000, decode.AttribWaitForResultBytes/1024/1024)
 	fmt.Fprintf(os.Stderr, "-- Host Counters --\n")
 	fmt.Fprintf(os.Stderr, "BF16 round calls: %d (%.1f elems/call)\n", host.BF16RoundCalls, float64(host.BF16RoundElems)/float64(max(host.BF16RoundCalls, 1)))
 	fmt.Fprintf(os.Stderr, "Weighted RMSNorm calls: %d (%.1f elems/call)\n", host.RMSNormWeightedCalls, float64(host.RMSNormWeightedElems)/float64(max(host.RMSNormWeightedCalls, 1)))

@@ -37,6 +37,9 @@ type PerfCounters struct {
 	AttribSyncHostStateUS      int64
 	AttribSyncDeviceSliceCalls int64
 	AttribSyncDeviceSliceUS    int64
+	AttribWaitForResultCalls   int64
+	AttribWaitForResultUS      int64
+	AttribWaitForResultBytes   int64
 }
 
 var (
@@ -72,6 +75,9 @@ func GetPerfCounters() PerfCounters {
 		AttribSyncHostStateUS:      globalPerfCounters.AttribSyncHostStateUS,
 		AttribSyncDeviceSliceCalls: globalPerfCounters.AttribSyncDeviceSliceCalls,
 		AttribSyncDeviceSliceUS:    globalPerfCounters.AttribSyncDeviceSliceUS,
+		AttribWaitForResultCalls:   globalPerfCounters.AttribWaitForResultCalls,
+		AttribWaitForResultUS:      globalPerfCounters.AttribWaitForResultUS,
+		AttribWaitForResultBytes:   globalPerfCounters.AttribWaitForResultBytes,
 	}
 }
 
@@ -233,6 +239,18 @@ func RecordAttribSyncHostState() func() {
 	start := time.Now()
 	return func() {
 		atomic.AddInt64(&globalPerfCounters.AttribSyncHostStateUS, time.Since(start).Microseconds())
+	}
+}
+
+func RecordAttribWaitForResult(bytes int64) func() {
+	atomic.AddInt64(&globalPerfCounters.AttribWaitForResultCalls, 1)
+	atomic.AddInt64(&globalPerfCounters.AttribWaitForResultBytes, bytes)
+	if !perfEnabled() {
+		return func() {}
+	}
+	start := time.Now()
+	return func() {
+		atomic.AddInt64(&globalPerfCounters.AttribWaitForResultUS, time.Since(start).Microseconds())
 	}
 }
 

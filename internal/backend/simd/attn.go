@@ -133,7 +133,9 @@ func Attention(m *Instance, layer *Layer, x []float32, pos int) []float32 {
 	// the per-layer Q/K/V D2H + host bias/norm/RoPE + H2D round-trip.
 	// Consumer layers (kvLayer != layer) are accepted; the fast path
 	// internally verifies the source's device cache is current.
-	if !layer.FusedQGate && layer.AttnGate == nil {
+	// Standalone output gates (layer.AttnGate, LFM3-style) are handled inside
+	// the fused path; FusedQGate (q+gate fused into Wq) still falls back.
+	if !layer.FusedQGate {
 		if fp, ok := ops.(attentionFullPipelineFastPath); ok {
 			applyRoPE := !layer.NoRoPE && (!m.RopeLocalOnly || layer.AttnType != "full_attention")
 			invFreq := layer.RopeInvFreq

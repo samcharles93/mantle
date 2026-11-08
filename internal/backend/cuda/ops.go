@@ -5081,6 +5081,8 @@ func shouldPreferQuantWeights(mat *model.Mat, mode cudaWeightMode) bool {
 }
 
 func (o *Ops) waitForResult(hostDst unsafe.Pointer, devSrc native.DeviceBuffer, bytes int64) error {
+	done := native.RecordAttribWaitForResult(bytes)
+	defer done()
 	if useLegacyStreamSync() {
 		if err := native.MemcpyD2HAsync(hostDst, devSrc, bytes, o.stream); err != nil {
 			return err
