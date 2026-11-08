@@ -27,6 +27,20 @@ extern int mantleCudaQuantMatVecQ4F32(
 	int blocksPerRow,
 	int cols,
 	cudaStream_t stream);
+extern int mantleCudaQuantMatVecCachedBatchDp4a(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream
+);
+
 extern int mantleCudaQuantMatVecCachedBatch(
 	const signed char* q,
 	const float* scales,
@@ -93,6 +107,22 @@ static int mantleCudaQuantMatVecInt8BlocksF32Wrapper(
 	int cols,
 	cudaStream_t stream) {
 	return mantleCudaQuantMatVecInt8BlocksF32(q, scales, x, y, rows, blocksPerRow, cols, stream);
+}
+
+static int mantleCudaQuantMatVecCachedBatchDp4aWrapper(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream
+) {
+	return mantleCudaQuantMatVecCachedBatchDp4a(q, scales, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
 }
 
 static int mantleCudaQuantMatVecCachedBatchWrapper(
@@ -202,6 +232,31 @@ func QuantMatVecInt8BlocksF32(q, scales, x, y DeviceBuffer, rows, blocksPerRow, 
 		C.int(rows),
 		C.int(blocksPerRow),
 		C.int(cols),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecCachedBatchDp4a is QuantMatVecCachedBatch with an int8 dp4a inner
+// product: x is quantized per 32-element block into xq/xsc (device scratch)
+// and the dot accumulates in int32 via __dp4a, scaled once per block in f32.
+func QuantMatVecCachedBatchDp4a(q, scales, x, xq, xsc, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if q.ptr == nil || scales.ptr == nil || x.ptr == nil || xq.ptr == nil || xsc.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("quant batch dp4a buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("quant batch dp4a dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecCachedBatchDp4aWrapper(
+		(*C.schar)(q.ptr),
+		(*C.float)(scales.ptr),
+		(*C.float)(x.ptr),
+		(*C.schar)(xq.ptr),
+		(*C.float)(xsc.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
 		stream.ptr,
 	))
 }

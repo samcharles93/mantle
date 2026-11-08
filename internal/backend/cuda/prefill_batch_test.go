@@ -845,8 +845,10 @@ func TestBatchedPrefillParityQ8(t *testing.T) {
 	got = append([]float32(nil), got...)
 
 	want := sequentialOracle(t, d, tokens)
-	// Quant kernels accumulate in a different order than the f32 oracle.
-	compareBatchLogits(t, "Q8", got, want, 2e-3, 2e-2)
+	// The dp4a quant GEMM also quantizes activations to int8 per 32-block
+	// (like llama.cpp Q8_0), adding ~0.4% activation noise on top of the
+	// different accumulation order, so allow a slightly wider absolute band.
+	compareBatchLogits(t, "Q8", got, want, 6e-3, 2e-2)
 
 	// Decode continuity: greedy tokens from the batched instance vs a fresh
 	// sequential instance must agree.

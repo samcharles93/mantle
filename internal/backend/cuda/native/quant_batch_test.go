@@ -76,3 +76,61 @@ func BenchmarkQuantMatVecCachedBatch(b *testing.B) {
 		b.Fatal(err)
 	}
 }
+
+// BenchmarkQuantMatVecCachedBatchDp4a measures the int8 dp4a variant of the
+// batched quant GEMM at the same shape as BenchmarkQuantMatVecCachedBatch.
+func BenchmarkQuantMatVecCachedBatchDp4a(b *testing.B) {
+	rows, cols, n := 2048, 2048, 610
+	bpr := cols / 32
+	q := make([]int8, rows*bpr*32)
+	for i := range q {
+		q[i] = int8(i%251 - 125)
+	}
+	scales := make([]float32, rows*bpr)
+	for i := range scales {
+		scales[i] = 0.001
+	}
+	x := make([]float32, n*cols)
+	for i := range x {
+		x[i] = float32(i%7) * 0.01
+	}
+	y := make([]float32, n*rows)
+	xq := make([]int8, n*cols)
+	xsc := make([]float32, n*bpr)
+	allocs := []DeviceBuffer{}
+	mk := func(bytes int64) DeviceBuffer {
+		buf, err := AllocDevice(bytes)
+		if err != nil {
+			b.Fatal(err)
+		}
+		allocs = append(allocs, buf)
+		return buf
+	}
+	defer func() {
+		for _, buf := range allocs {
+			buf.Free()
+		}
+	}()
+	qBuf, sBuf, xBuf, yBuf := mk(int64(len(q))), mk(int64(len(scales))*4), mk(int64(len(x))*4), mk(int64(len(y))*4)
+	xqBuf, xscBuf := mk(int64(len(xq))), mk(int64(len(xsc))*4)
+	stream, err := NewStream()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer stream.Destroy()
+	if err := MemcpyH2D(qBuf, unsafe.Pointer(&q[0]), int64(len(q))); err != nil {
+		b.Fatal(err)
+	}
+	if err := MemcpyH2D(sBuf, unsafe.Pointer(&scales[0]), int64(len(scales))*4); err != nil {
+		b.Fatal(err)
+	}
+	if err := MemcpyH2D(xBuf, unsafe.Pointer(&x[0]), int64(len(x))*4); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := QuantMatVecCachedBatchDp4a(qBuf, sBuf, xBuf, xqBuf, xscBuf, yBuf, rows, n, cols, bpr, stream); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

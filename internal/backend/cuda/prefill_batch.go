@@ -425,7 +425,11 @@ type batchedBuffers struct {
 	// Hybrid-layer scratch: short-conv in_proj output [N, 3*hidden], gated conv
 	// inputs [N, hidden], conv output [N, hidden], state-rotate staging
 	// [(maxKlen-1), hidden], and the attention gate projection [N, qDim].
-	scProj  native.DeviceBuffer
+	scProj native.DeviceBuffer
+	// int8 activation scratch for the dp4a quant GEMM: xq [N, maxK] int8,
+	// xsc [N, maxBlocksPerRow] f32 per-block scales
+	xq      native.DeviceBuffer
+	xsc     native.DeviceBuffer
 	scBx    native.DeviceBuffer
 	scOut   native.DeviceBuffer
 	scState native.DeviceBuffer
@@ -433,7 +437,7 @@ type batchedBuffers struct {
 }
 
 func (b *batchedBuffers) all() []native.DeviceBuffer {
-	return []native.DeviceBuffer{b.x, b.normed, b.proj, b.q, b.attn, b.k, b.v, b.up, b.gate, b.act, b.down, b.conv, b.last, b.lastN, b.logits, b.scProj, b.scBx, b.scOut, b.scState, b.gateBuf}
+	return []native.DeviceBuffer{b.x, b.normed, b.proj, b.q, b.attn, b.k, b.v, b.up, b.gate, b.act, b.down, b.conv, b.last, b.lastN, b.logits, b.scProj, b.scBx, b.scOut, b.scState, b.gateBuf, b.xq, b.xsc}
 }
 
 type batchedLayerPlan struct {
@@ -679,6 +683,17 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 		return nil
 	}
 	if err := allocInto(&p.buf.x, p.n*hidden, "x"); err != nil {
+		return fail(err)
+	}
+	// dp4a activation scratch sized for the widest projection (maxInterm)
+	maxK := p.maxInterm
+	if hidden > maxK {
+		maxK = hidden
+	}
+	if err := allocInto(&p.buf.xq, p.n*maxK, "xq"); err != nil {
+		return fail(err)
+	}
+	if err := allocInto(&p.buf.xsc, p.n*maxK/32, "xsc"); err != nil {
 		return fail(err)
 	}
 	if err := allocInto(&p.buf.normed, p.n*hidden, "normed"); err != nil {
@@ -1481,7 +1496,7 @@ func (p *batchedPrefillPlan) gemmW(devW deviceMat, xF32 native.DeviceBuffer, k i
 		if err != nil {
 			return fmt.Errorf("cuda batched prefill: quant weight upload: %w", err)
 		}
-		if err := native.QuantMatVecCachedBatch(qw.q, qw.scales, xF32, dst, rows, p.n, k, qw.blocksPerRow, p.o.stream); err != nil {
+		if err := native.QuantMatVecCachedBatchDp4a(qw.q, qw.scales, xF32, p.buf.xq, p.buf.xsc, dst, rows, p.n, k, qw.blocksPerRow, p.o.stream); err != nil {
 			return fmt.Errorf("cuda batched prefill: quant batch gemm (m=%d n=%d k=%d): %w", rows, p.n, k, err)
 		}
 		return nil
@@ -1496,7 +1511,7 @@ func (p *batchedPrefillPlan) gemmLastW(devW deviceMat, xF32 native.DeviceBuffer,
 		if err != nil {
 			return fmt.Errorf("cuda batched prefill: quant output upload: %w", err)
 		}
-		if err := native.QuantMatVecCachedBatch(qw.q, qw.scales, xF32, dst, rows, 1, k, qw.blocksPerRow, p.o.stream); err != nil {
+		if err := native.QuantMatVecCachedBatchDp4a(qw.q, qw.scales, xF32, p.buf.xq, p.buf.xsc, dst, rows, 1, k, qw.blocksPerRow, p.o.stream); err != nil {
 			return fmt.Errorf("cuda batched prefill: quant output gemm (m=%d k=%d): %w", rows, k, err)
 		}
 		return nil
