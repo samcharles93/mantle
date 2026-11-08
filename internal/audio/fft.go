@@ -16,7 +16,7 @@ func NewPlan(n int) *Plan {
 		panic("audio: FFT plan size must be >= 1")
 	}
 	p := &Plan{n: n, twiddles: make([]complex128, n)}
-	for k := 0; k < n; k++ {
+	for k := range n {
 		ang := -2 * math.Pi * float64(k) / float64(n)
 		p.twiddles[k] = complex(math.Cos(ang), math.Sin(ang))
 	}
@@ -83,10 +83,10 @@ func (p *Plan) fftRec(re, im []float64, inverse bool, twStep int) {
 	subsRe := make([][]float64, f)
 	subsIm := make([][]float64, f)
 	subStep := twStep * f
-	for j := 0; j < f; j++ {
+	for j := range f {
 		sr := make([]float64, n2)
 		si := make([]float64, n2)
-		for m := 0; m < n2; m++ {
+		for m := range n2 {
 			sr[m] = re[j+f*m]
 			si[m] = im[j+f*m]
 		}
@@ -97,10 +97,10 @@ func (p *Plan) fftRec(re, im []float64, inverse bool, twStep int) {
 	// combine: X[k] = sum_j W_n^(j*k) * X_j[k mod n2]
 	outRe := make([]float64, n)
 	outIm := make([]float64, n)
-	for k := 0; k < n; k++ {
+	for k := range n {
 		km := k % n2
 		var sr, si float64
-		for j := 0; j < f; j++ {
+		for j := range f {
 			idx := ((j * k) % n) * twStep
 			w := p.twiddles[idx]
 			if inverse {
@@ -133,9 +133,9 @@ func (p *Plan) dftNaive(re, im []float64, inverse bool, twStep int) {
 	n := len(re)
 	outRe := make([]float64, n)
 	outIm := make([]float64, n)
-	for k := 0; k < n; k++ {
+	for k := range n {
 		var sr, si float64
-		for t := 0; t < n; t++ {
+		for t := range n {
 			idx := ((k * t) % n) * twStep
 			w := p.twiddles[idx]
 			if inverse {

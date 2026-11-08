@@ -166,7 +166,7 @@ func TestFSQQuantizerEncodeDecode(t *testing.T) {
 		t.Fatalf("SetProjectOut: %v", err)
 	}
 	l := &lcg{state: 7}
-	for trial := 0; trial < 200; trial++ {
+	for trial := range 200 {
 		latents := make([]float32, QuantizerDim)
 		for i := range latents {
 			latents[i] = float32(l.next() * 4) // include values beyond [-1,1]
@@ -269,7 +269,7 @@ func BenchmarkFSQDecodePerSecondAudio(b *testing.B) {
 	frames := DefaultCodecConfig().NumCodecFrames(24000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for f := 0; f < frames; f++ {
+		for range frames {
 			_ = q.Decode(codes)
 		}
 	}

@@ -10,7 +10,7 @@ import "math"
 // (A symmetric window would divide by n-1; torch defaults to n.)
 func HannWindow(n int) []float64 {
 	w := make([]float64, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		w[i] = 0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/float64(n))
 	}
 	return w
@@ -45,7 +45,7 @@ func STFT(x []float64, nFFT, hop, winLength int, window []float64) [][]complex12
 	im := make([]float64, nFFT)
 	for t := 0; t < frames; t++ {
 		start := t * hop
-		for i := 0; i < nFFT; i++ {
+		for i := range nFFT {
 			re[i] = 0
 			im[i] = 0
 			wi := i - winOff
@@ -54,7 +54,7 @@ func STFT(x []float64, nFFT, hop, winLength int, window []float64) [][]complex12
 			}
 		}
 		plan.FFT(re, im)
-		for k := 0; k < bins; k++ {
+		for k := range bins {
 			spec[k][t] = complex(re[k], im[k])
 		}
 	}

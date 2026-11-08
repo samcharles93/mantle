@@ -184,7 +184,7 @@ func (q *FSQQuantizer) Decode(codes []int) []float32 {
 			panic(fmt.Sprintf("audio: FSQ code %d out of [0, %d]", code, q.MaxCode()))
 		}
 		idx := q.IndicesFromCode(code)
-		for k := 0; k < dim; k++ {
+		for k := range dim {
 			hw := float64(q.halfWidth[k])
 			eff[c*dim+k] = (float64(idx[k]) - hw) / hw
 		}
@@ -207,7 +207,7 @@ func (q *FSQQuantizer) projectIn(x []float32) []float64 {
 		return out
 	}
 	out := make([]float64, eff)
-	for o := 0; o < eff; o++ {
+	for o := range eff {
 		sum := float64(q.projectInB[o])
 		row := q.projectInW[o]
 		for i, v := range x {

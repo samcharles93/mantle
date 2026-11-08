@@ -11,9 +11,9 @@ func naiveDFT(re, im []float64) (ore, oim []float64) {
 	n := len(re)
 	ore = make([]float64, n)
 	oim = make([]float64, n)
-	for k := 0; k < n; k++ {
+	for k := range n {
 		var sr, si float64
-		for t := 0; t < n; t++ {
+		for t := range n {
 			ang := -2 * math.Pi * float64(k) * float64(t) / float64(n)
 			sr += re[t]*math.Cos(ang) - im[t]*math.Sin(ang)
 			si += re[t]*math.Sin(ang) + im[t]*math.Cos(ang)
@@ -81,7 +81,7 @@ func TestFFTKnownInputs(t *testing.T) {
 		im := make([]float64, n)
 		re[0] = 1
 		FFT(re, im)
-		for k := 0; k < n; k++ {
+		for k := range n {
 			if math.Abs(re[k]-1) > 1e-9 || math.Abs(im[k]) > 1e-9 {
 				t.Fatalf("n=%d impulse: bin %d = %v%+vi, want 1+0i", n, k, re[k], im[k])
 			}
@@ -124,13 +124,13 @@ func TestFFTMatchesNaiveDFTComplex(t *testing.T) {
 	n, f := 1280, 37
 	re := make([]float64, n)
 	im := make([]float64, n)
-	for tt := 0; tt < n; tt++ {
+	for tt := range n {
 		ang := 2 * math.Pi * float64(f) * float64(tt) / float64(n)
 		c := cmplx.Exp(complex(0, ang))
 		re[tt], im[tt] = real(c), imag(c)
 	}
 	FFT(re, im)
-	for k := 0; k < n; k++ {
+	for k := range n {
 		want := 0.0
 		if k == f {
 			want = float64(n)

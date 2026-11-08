@@ -278,7 +278,7 @@ func fixtureWave(n int) []float32 {
 	state := uint32(0x12345678)
 	x := make([]float32, n)
 	const sr = 16000
-	for i := 0; i < n; i++ {
+	for i := range n {
 		state = state*1664525 + 1013904223
 		u := float64(state>>8) / float64(1<<24)
 		noise := 2*u - 1

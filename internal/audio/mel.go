@@ -37,7 +37,7 @@ func MelToHz(m float64) float64 {
 func MelFrequencies(n int, fmin, fmax float64) []float64 {
 	lo, hi := HzToMel(fmin), HzToMel(fmax)
 	out := make([]float64, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[i] = MelToHz(lo + (hi-lo)*float64(i)/float64(n-1))
 	}
 	return out
@@ -48,7 +48,7 @@ func MelFrequencies(n int, fmin, fmax float64) []float64 {
 func FFTFrequencies(sr float64, nFFT int) []float64 {
 	bins := nFFT/2 + 1
 	out := make([]float64, bins)
-	for i := 0; i < bins; i++ {
+	for i := range bins {
 		out[i] = float64(i) * sr / float64(nFFT)
 	}
 	return out
@@ -74,9 +74,9 @@ func MelFilterBank(sr float64, nFFT, numMels int, fmin, fmax float64) [][]float6
 		fdiff[i] = melFreqs[i+1] - melFreqs[i]
 	}
 	W := make([][]float64, numMels)
-	for i := 0; i < numMels; i++ {
+	for i := range numMels {
 		row := make([]float64, numBins)
-		for j := 0; j < numBins; j++ {
+		for j := range numBins {
 			lower := (fftFreqs[j] - melFreqs[i]) / fdiff[i]
 			upper := (melFreqs[i+2] - fftFreqs[j]) / fdiff[i+1]
 			w := math.Min(lower, upper)
@@ -145,7 +145,7 @@ func (f *FeatureExtractor) LogMel(waveform []float32) [][]float64 {
 		filt := f.MelFilters[m]
 		for t := 0; t < frames; t++ {
 			var energy float64
-			for k := 0; k < bins; k++ {
+			for k := range bins {
 				c := spec[k][t]
 				power := real(c)*real(c) + imag(c)*imag(c)
 				energy += filt[k] * power

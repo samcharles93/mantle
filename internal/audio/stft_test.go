@@ -69,10 +69,10 @@ func TestSTFTMatchesNaiveDFT(t *testing.T) {
 	if frames != wantFrames {
 		t.Fatalf("frames = %d, want %d", frames, wantFrames)
 	}
-	for fr := 0; fr < frames; fr++ {
+	for fr := range frames {
 		frame := make([]float64, nFFT)
 		im := make([]float64, nFFT)
-		for i := 0; i < nFFT; i++ {
+		for i := range nFFT {
 			frame[i] = x[fr*hop+i] * w[i]
 		}
 		ore, oim := naiveDFT(frame, im)
