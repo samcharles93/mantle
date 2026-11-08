@@ -13,6 +13,7 @@ import (
 	"github.com/samcharles93/mantle/internal/hostcaps"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/mcfstore"
+	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
@@ -27,6 +28,15 @@ type Loader struct {
 	LoadOptions         core.LoadModelOptions
 	UseGraph            bool
 	TilingConfig        simd.TilingConfig
+
+	// DSpark speculative decoding. DraftModelPath is a draft MCF; when set,
+	// the target captures the draft's target_layer_ids as hidden taps, the
+	// CPU backend is forced, and the returned engine speculates. DraftTokens
+	// overrides the draft config's block_size (<= 0 uses the config value);
+	// DraftConfidence is the sampling-time acceptance threshold (0 disables).
+	DraftModelPath  string
+	DraftTokens     int
+	DraftConfidence float64
 }
 
 type LoadResult struct {
@@ -76,9 +86,33 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	if err != nil {
 		return nil, err
 	}
+	var draftFile *mcfstore.File
 	cleanup := func(err error) (*LoadResult, error) {
 		_ = mcfFile.Close()
+		if draftFile != nil {
+			_ = draftFile.Close()
+		}
 		return nil, err
+	}
+
+	// A DSpark draft fixes the target's hidden-tap layers before the target
+	// loads, so open and parse it first.
+	var draftCfgBytes []byte
+	if l.DraftModelPath != "" {
+		df, err := mcfstore.Open(l.DraftModelPath)
+		if err != nil {
+			return cleanup(fmt.Errorf("open draft model: %w", err))
+		}
+		draftFile = df
+		draftCfgBytes = df.SectionData(mcf.SectionHFConfigJSON)
+		if len(draftCfgBytes) == 0 {
+			return cleanup(fmt.Errorf("draft MCF %q has no hf config.json", l.DraftModelPath))
+		}
+		dcfg, err := model.ParseDSparkConfig(draftCfgBytes)
+		if err != nil {
+			return cleanup(err)
+		}
+		opts.HiddenTapLayers = dcfg.TargetLayerIDs
 	}
 
 	cfgBytes := mcfFile.SectionData(mcf.SectionHFConfigJSON)
@@ -105,6 +139,15 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	backendName, err := backend.Normalize(l.Backend)
 	if err != nil {
 		return cleanup(err)
+	}
+	if draftFile != nil {
+		switch backendName {
+		case backend.CUDA:
+			return cleanup(fmt.Errorf("dspark speculation is cpu-only: --draft-model cannot be combined with --backend cuda"))
+		case backend.Auto:
+			backendName = backend.CPU
+			log.Info("draft model requested; forcing cpu backend for speculation")
+		}
 	}
 
 	var runtime backend.Backend
@@ -143,6 +186,15 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	}
 	if modelRuntime == nil {
 		return cleanup(fmt.Errorf("backend %q returned nil model runtime", runtime.Name()))
+	}
+
+	var speculator *Speculator
+	if draftFile != nil {
+		spec, err := loadDSparkSpeculator(modelRuntime, draftFile, draftCfgBytes, maxContext, opts, l.DraftTokens, l.DraftConfidence)
+		if err != nil {
+			return cleanup(err)
+		}
+		speculator = spec
 	}
 	modelConfig := modelRuntime.ModelConfig()
 	if modelConfig == nil {
@@ -190,6 +242,8 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 		chatTemplatePath: l.ChatTemplatePath,
 		stopTokens:       stopTokens,
 		mcfFile:          mcfFile,
+		draftFile:        draftFile,
+		speculator:       speculator,
 		useGraph:         l.UseGraph,
 	}
 
@@ -202,6 +256,38 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 		GenerationDefaults: genDefaults,
 		Arch:               modelConfig.Arch,
 	}, nil
+}
+
+// loadDSparkSpeculator pairs a loaded CPU target with its DSpark draft MCF and
+// returns the Speculator the engine will drive. The target must already have
+// captured the draft's target layers as hidden taps (set from the draft config
+// before the target load).
+func loadDSparkSpeculator(modelRuntime core.Runtime, draftFile *mcfstore.File, draftCfgBytes []byte, maxContext int, opts core.LoadModelOptions, draftTokens int, draftConfidence float64) (*Speculator, error) {
+	si, ok := modelRuntime.(*simd.Instance)
+	if !ok {
+		return nil, fmt.Errorf("dspark speculation requires the simd cpu backend, got %T", modelRuntime)
+	}
+	if !si.CanBatchForward(model.DSparkMaxBlockSize + 1) {
+		return nil, fmt.Errorf("target model cannot run batched verification blocks of %d tokens", model.DSparkMaxBlockSize+1)
+	}
+	draftOpts := opts
+	draftOpts.HiddenTapLayers = nil
+	draftOpts.GpuLayers = 0
+	draft, err := simd.LoadDSparkDraftMCF(draftFile, draftCfgBytes, (*core.Instance)(si), maxContext, draftOpts)
+	if err != nil {
+		return nil, fmt.Errorf("load dspark draft: %w", err)
+	}
+	tokens := draftTokens
+	if tokens <= 0 {
+		tokens = draft.Config.BlockSize
+	}
+	if tokens > draft.Config.BlockSize {
+		tokens = draft.Config.BlockSize
+	}
+	if tokens < 2 {
+		return nil, fmt.Errorf("dspark draft block_size %d is below the minimum draft length 2", draft.Config.BlockSize)
+	}
+	return &Speculator{Draft: draft, Tokens: tokens, Confidence: draftConfidence}, nil
 }
 
 func (l Loader) loadTokenizerBytes(mcfFile *mcfstore.File) ([]byte, []byte, error) {

@@ -24,6 +24,8 @@ type EngineImpl struct {
 	chatTemplatePath string
 	stopTokens       []int
 	mcfFile          *mcfstore.File
+	draftFile        *mcfstore.File // DSpark draft MCF, kept open while the engine lives
+	speculator       *Speculator
 
 	useGraph bool // experimental: use graph-based execution
 
@@ -49,6 +51,12 @@ func (e *EngineImpl) Close() error {
 			errs = append(errs, err)
 		}
 		e.mcfFile = nil
+	}
+	if e.draftFile != nil {
+		if err := e.draftFile.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		e.draftFile = nil
 	}
 	return errors.Join(errs...)
 }
@@ -161,12 +169,14 @@ func (e *EngineImpl) Generate(ctx context.Context, req *Request, stream StreamFu
 			Tokenizer:     e.tokenizer,
 			StopTokens:    append([]int(nil), e.stopTokens...),
 			ContextTokens: make([]int, 0, len(ids)),
+			Speculator:    e.speculator,
 		}
 		if e.useGraph {
 			e.setupGraphExecution(e.generator)
 		}
 	} else {
 		e.generator.Sampler = sampler
+		e.generator.Speculator = e.speculator
 	}
 
 	gen := e.generator

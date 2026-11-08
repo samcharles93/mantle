@@ -60,7 +60,11 @@ type Generator struct {
 	// Graph-based execution path (experimental, activated via --use-graph).
 	useGraph    bool
 	engineGraph *graph.Graph
-	gr          graphRunner // non-nil when useGraph is true
+	gr          graphRunner
+
+	// Speculator, when non-nil, enables speculative decoding rounds instead
+	// of the per-token loop (CPU draft models only; ignored with --use-graph).
+	Speculator *Speculator // non-nil when useGraph is true
 
 	tokenCache    []string
 	tokenCacheOK  []bool
@@ -93,6 +97,9 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 
 	if mismatch {
 		g.Model.Reset()
+		if g.Speculator != nil {
+			g.Speculator.Reset()
+		}
 		g.ContextTokens = g.ContextTokens[:0]
 	}
 
@@ -246,9 +253,6 @@ func (g *Generator) RunWithContext(ctx context.Context, allTokens []int, steps i
 
 afterPrompt:
 	toks := append([]int(nil), g.ContextTokens...)
-	type greedyStepper interface {
-		ForwardTokenGreedy(id int) (next int, err error)
-	}
 	gs, canDeviceGreedy := g.Model.(greedyStepper)
 	canDeviceGreedy = canDeviceGreedy && g.Sampler.CanUseDeviceGreedy()
 
@@ -261,111 +265,26 @@ afterPrompt:
 		return g.ContextTokens, stats, nil
 	}
 
-	const (
-		streamMaxTokens  = 32
-		streamMaxChars   = 128
-		streamMinChars   = 16
-		streamMaxLatency = 40 * time.Millisecond
-	)
-	var (
-		pending       []int
-		pendingChars  int
-		lastFlushTime = time.Now()
-	)
-	flush := func() {
-		if stream == nil || len(pending) == 0 {
-			pending = pending[:0]
-			pendingChars = 0
-			return
-		}
-		s, _ := g.decodeTokens(pending)
-		if s != "" {
-			stream(s)
-		}
-		pending = pending[:0]
-		pendingChars = 0
-		lastFlushTime = time.Now()
-	}
-
+	sb := newStreamBuffer(g, stream)
 	genStart := time.Now()
-	var streamingOverhead time.Duration
-	next, sampleErr := safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
-	logGenerationSampleDebug(next, g.StopTokens, logitsVec)
-	if sampleErr != nil {
-		flush()
-		return g.ContextTokens, stats, sampleErr
+	var genErr error
+	if g.Speculator != nil && !g.useGraph {
+		var stopped bool
+		logitsVec, stopped, genErr = g.generateSpeculative(ctx, sb, logitsVec, toks, limit, &stats, gs, canDeviceGreedy)
+		if genErr == nil && !stopped && stats.TokensGenerated < limit {
+			// Context edge: the draft block no longer fits; finish per-token.
+			genErr = g.generatePlain(ctx, sb, logitsVec, toks, limit, &stats, gs, canDeviceGreedy)
+		}
+	} else {
+		genErr = g.generatePlain(ctx, sb, logitsVec, toks, limit, &stats, gs, canDeviceGreedy)
 	}
-	for range limit {
-		if err := ctx.Err(); err != nil {
-			return g.ContextTokens, stats, err
-		}
-
-		stop := g.isStopToken(next)
-		if stop {
-			break
-		}
-
-		toks = append(toks, next)
-		g.ContextTokens = append(g.ContextTokens, next)
-
-		if stream != nil {
-			pending = append(pending, next)
-			if tokStr, err := g.decodeToken(next); err == nil {
-				pendingChars += len(tokStr)
-			}
-			age := time.Since(lastFlushTime)
-			if len(pending) >= streamMaxTokens ||
-				pendingChars >= streamMaxChars ||
-				(age >= streamMaxLatency && pendingChars >= streamMinChars) {
-				callbackStart := time.Now()
-				flush()
-				streamingOverhead += time.Since(callbackStart)
-			}
-		}
-
-		if g.useGraph {
-			// Graph path: Compute → sample; no device-greedy shortcut.
-			computeCtx := &graph.ComputeContext{
-				Token: next,
-				Pos:   len(g.ContextTokens) - 1,
-				KVLen: len(g.ContextTokens) - 1,
-			}
-			logitsVec, err = g.gr.Compute(computeCtx, g.engineGraph)
-			if err != nil {
-				flush()
-				return g.ContextTokens, stats, err
-			}
-			next, sampleErr = safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
-			logGenerationSampleDebug(next, g.StopTokens, logitsVec)
-			if sampleErr != nil {
-				flush()
-				return g.ContextTokens, stats, sampleErr
-			}
-		} else if canDeviceGreedy {
-			next, err = safeForwardTokenGreedy(gs, next)
-			logGenerationSampleDebug(next, g.StopTokens, nil)
-			if err != nil {
-				flush()
-				return g.ContextTokens, stats, err
-			}
-		} else {
-			logitsVec, err = safeForwardToken(g.Model, next)
-			if err != nil {
-				flush()
-				return g.ContextTokens, stats, err
-			}
-			next, sampleErr = safeSample(g.Sampler, logitsVec, toks, g.StopTokens)
-			logGenerationSampleDebug(next, g.StopTokens, logitsVec)
-			if sampleErr != nil {
-				flush()
-				return g.ContextTokens, stats, sampleErr
-			}
-		}
-		stats.TokensGenerated++
+	if genErr != nil {
+		sb.flush()
+		return g.ContextTokens, stats, genErr
 	}
 
 	totalDuration := time.Since(genStart)
-	stats.GenerationDuration = totalDuration - streamingOverhead
+	stats.GenerationDuration = totalDuration - sb.overhead
 	if stats.GenerationDuration.Seconds() > 0 {
 		stats.GenerationTPS = float64(stats.TokensGenerated) / stats.GenerationDuration.Seconds()
 	}
@@ -376,8 +295,64 @@ afterPrompt:
 		stats.TPS = float64(stats.TokensGenerated) / stats.Duration.Seconds()
 	}
 
-	flush()
+	sb.flush()
 	return g.ContextTokens, stats, nil
+}
+
+const (
+	streamMaxTokens  = 32
+	streamMaxChars   = 128
+	streamMinChars   = 16
+	streamMaxLatency = 40 * time.Millisecond
+)
+
+// streamBuffer batches generated tokens into stream callbacks, throttled by
+// count, decoded length and latency, and accounts for the callback overhead in
+// the generation stats.
+type streamBuffer struct {
+	gen          *Generator
+	stream       func(string)
+	pending      []int
+	pendingChars int
+	lastFlush    time.Time
+	overhead     time.Duration
+}
+
+func newStreamBuffer(g *Generator, stream func(string)) *streamBuffer {
+	return &streamBuffer{gen: g, stream: stream, lastFlush: time.Now()}
+}
+
+func (s *streamBuffer) add(tok int) {
+	if s.stream == nil {
+		return
+	}
+	s.pending = append(s.pending, tok)
+	if tokStr, err := s.gen.decodeToken(tok); err == nil {
+		s.pendingChars += len(tokStr)
+	}
+	age := time.Since(s.lastFlush)
+	if len(s.pending) >= streamMaxTokens ||
+		s.pendingChars >= streamMaxChars ||
+		(age >= streamMaxLatency && s.pendingChars >= streamMinChars) {
+		s.flush()
+	}
+}
+
+func (s *streamBuffer) flush() {
+	if s.stream == nil || len(s.pending) == 0 {
+		s.pending = s.pending[:0]
+		s.pendingChars = 0
+		return
+	}
+	str, _ := s.gen.decodeTokens(s.pending)
+	callbackStart := time.Now()
+	if str != "" {
+		s.stream(str)
+	}
+	s.overhead += time.Since(callbackStart)
+	s.pending = s.pending[:0]
+	s.pendingChars = 0
+	s.lastFlush = time.Now()
 }
 
 func safeForwardToken(m core.Model, id int) (logits []float32, err error) {

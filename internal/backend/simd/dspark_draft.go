@@ -129,6 +129,15 @@ func checkDSparkTarget(cfg *model.DSparkConfig, target *core.Instance) error {
 	case !slices.Equal(target.HiddenTaps.Layers, cfg.TargetLayerIDs):
 		return fmt.Errorf("dspark: target taps %v must equal draft target_layer_ids %v", target.HiddenTaps.Layers, cfg.TargetLayerIDs)
 	}
+	// Speculative verification rolls the target's KV cache back on rejection;
+	// recurrent layers keep conv state outside the KV cache, which a rollback
+	// cannot restore, so those targets are rejected up front.
+	for i := range target.Layers {
+		l := &target.Layers[i]
+		if l.IsRecurrent || l.DeltaNet != nil || l.ShortConvKernel != nil {
+			return fmt.Errorf("dspark: target layer %d is recurrent; speculative rollback is unsupported", i)
+		}
+	}
 	return nil
 }
 

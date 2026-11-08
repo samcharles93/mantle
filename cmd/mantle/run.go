@@ -51,13 +51,16 @@ func runCmd() *cli.Command {
 		streamMode string
 
 		// Debug flags
-		showConfig     bool
-		showTokens     bool
-		rawOutput      bool
-		noSWA          bool
-		cudaWeightMode string
-		gpuLayers      int64
-		captureTaps    string
+		showConfig      bool
+		showTokens      bool
+		rawOutput       bool
+		noSWA           bool
+		cudaWeightMode  string
+		gpuLayers       int64
+		captureTaps     string
+		draftModel      string
+		draftTokens     int
+		draftConfidence float64
 		// Tiling configuration
 		tileM int64
 		tileN int64
@@ -321,6 +324,27 @@ func runCmd() *cli.Command {
 			Sources:     cli.EnvVars("MANTLE_CAPTURE_TAP_LAYERS"),
 			Destination: &captureTaps,
 		},
+		&cli.StringFlag{
+			Name:        "draft-model",
+			Category:    "Speculation",
+			Usage:       "path to a DSpark draft MCF; enables speculative decoding against it (forces the cpu backend)",
+			Sources:     cli.EnvVars("MANTLE_DRAFT_MODEL"),
+			Destination: &draftModel,
+		},
+		&cli.IntFlag{
+			Name:        "draft-tokens",
+			Category:    "Speculation",
+			Usage:       "draft block length for speculative decoding (default: the draft config's block_size)",
+			Value:       0,
+			Destination: &draftTokens,
+		},
+		&cli.Float64Flag{
+			Name:        "draft-confidence",
+			Category:    "Speculation",
+			Usage:       "confidence-head threshold for accepting a drafted token the target sample rejects (0 = disabled, exact rejection sampling)",
+			Value:       0,
+			Destination: &draftConfidence,
+		},
 		// Tiling configuration
 		&cli.Int64Flag{
 			Name:        "tile-m",
@@ -484,7 +508,14 @@ func runCmd() *cli.Command {
 			if err != nil {
 				return cli.Exit("error: "+err.Error(), 1)
 			}
-			loader.LoadOptions.HiddenTapLayers = tapLayers
+			if draftModel == "" {
+				// With a draft model the loader derives the tap layers from
+				// the draft config instead.
+				loader.LoadOptions.HiddenTapLayers = tapLayers
+			}
+			loader.DraftModelPath = draftModel
+			loader.DraftTokens = draftTokens
+			loader.DraftConfidence = draftConfidence
 			loadResult, err := loader.Load(ctx, modelPath, int(maxContext))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)
