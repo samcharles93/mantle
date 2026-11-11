@@ -74,6 +74,21 @@ extern int mantleCudaQuantMatVecCachedBatchDp4a(
 	cudaStream_t stream
 );
 
+extern int mantleCudaQuantMatVecCachedBatchMMA(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream
+);
+extern int mantleCudaQuantBatchMMASupported(void);
+
 extern int mantleCudaQuantMatVecCachedBatch(
 	const signed char* q,
 	const float* scales,
@@ -200,6 +215,26 @@ static int mantleCudaQuantMatVecCachedBatchDp4aWrapper(
 	cudaStream_t stream
 ) {
 	return mantleCudaQuantMatVecCachedBatchDp4a(q, scales, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantMatVecCachedBatchMMAWrapper(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream
+) {
+	return mantleCudaQuantMatVecCachedBatchMMA(q, scales, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantBatchMMASupportedWrapper(void) {
+	return mantleCudaQuantBatchMMASupported();
 }
 
 static int mantleCudaQuantMatVecCachedBatchWrapper(
@@ -405,6 +440,44 @@ func QuantMatVecInt8BlocksF32Multi(segs []QuantMatVecSegment, xUp, xGate DeviceB
 // QuantMatVecCachedBatchDp4a is QuantMatVecCachedBatch with an int8 dp4a inner
 // product: x is quantized per 32-element block into xq/xsc (device scratch)
 // and the dot accumulates in int32 via __dp4a, scaled once per block in f32.
+// QuantBatchMMASupported reports whether the current device can run the
+// tensor-core quant GEMM (compute capability 8.0 or later).
+func QuantBatchMMASupported() bool {
+	return C.mantleCudaQuantBatchMMASupportedWrapper() != 0
+}
+
+// QuantMatVecCachedBatchMMA is QuantMatVecCachedBatchDp4a on tensor cores, with
+// bit-identical output. It needs cols == blocksPerRow*32, 16-byte aligned q and
+// xq, and a device for which QuantBatchMMASupported is true; callers check those
+// first, since the kernel refuses anything else.
+func QuantMatVecCachedBatchMMA(q, scales, x, xq, xsc, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if q.ptr == nil || scales.ptr == nil || x.ptr == nil || xq.ptr == nil || xsc.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("quant batch mma buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("quant batch mma dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecCachedBatchMMAWrapper(
+		(*C.schar)(q.ptr),
+		(*C.float)(scales.ptr),
+		(*C.float)(x.ptr),
+		(*C.schar)(xq.ptr),
+		(*C.float)(xsc.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
+		stream.ptr,
+	))
+}
+
+// QuantBatchMMAAligned reports whether q and xq meet the tensor-core kernel's
+// 16-byte alignment requirement.
+func QuantBatchMMAAligned(q, xq DeviceBuffer) bool {
+	return (uintptr(q.ptr)|uintptr(xq.ptr))&15 == 0
+}
+
 func QuantMatVecCachedBatchDp4a(q, scales, x, xq, xsc, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
 	if q.ptr == nil || scales.ptr == nil || x.ptr == nil || xq.ptr == nil || xsc.ptr == nil || y.ptr == nil {
 		return fmt.Errorf("quant batch dp4a buffer is nil")

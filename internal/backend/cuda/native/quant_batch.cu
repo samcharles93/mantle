@@ -269,3 +269,224 @@ __host__ int mantleCudaQuantMatVecCachedBatch(
 }
 
 } // extern "C"
+
+// Tensor-core form of quant_matvec_cached_batch_dp4a_kernel above:
+// the same cached-int8 weights with one f32 scale per 32-element block, the
+// same per-block int8 activations from quantize_x_blocks_kernel, and the same
+// per-output sum over blocks in order of fmaf(wScale*xScale, dot, acc). Only
+// the int32 block dot moves from __dp4a to mma.sync m16n8k32, whose K of 32 is
+// exactly one quant block, so the two kernels agree bit for bit.
+//
+// Each 128-thread block computes a 64 (weight rows) x 64 (tokens) tile. K is
+// staged 128 bytes (four quant blocks) at a time through double-buffered
+// shared memory filled by cp.async; each warp owns a 32x32 sub-tile, i.e. two
+// m16 by four n8 MMAs per quant block.
+
+#define MMA_BM 64
+#define MMA_BN 64
+#define MMA_BK 128
+#define MMA_KB (MMA_BK / 32)
+#define MMA_LDS (MMA_BK + 16) // 144-byte rows: fragment loads hit 32 distinct banks
+#define MMA_THREADS 128
+
+__device__ __forceinline__ void mma_cp_async16(void* smem, const void* gmem, bool valid) {
+    unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem));
+    int size = valid ? 16 : 0;
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(gmem), "r"(size));
+}
+
+__device__ __forceinline__ void mma_cp_async4(void* smem, const void* gmem, bool valid) {
+    unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem));
+    int size = valid ? 4 : 0;
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n" ::"r"(s), "l"(gmem), "r"(size));
+}
+
+__global__ void __launch_bounds__(MMA_THREADS) quant_matmul_cached_mma_kernel(
+    const int8_t* __restrict__ q,
+    const float* __restrict__ scales,
+    const int8_t* __restrict__ xq,
+    const float* __restrict__ xsc,
+    float* __restrict__ y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow
+) {
+#if __CUDA_ARCH__ >= 800
+    __shared__ __align__(16) int8_t ws[2][MMA_BM][MMA_LDS];
+    __shared__ __align__(16) int8_t xs[2][MMA_BN][MMA_LDS];
+    __shared__ float wsc[2][MMA_BM][MMA_KB];
+    __shared__ float xss[2][MMA_BN][MMA_KB];
+
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int g = lane >> 2;
+    const int t = lane & 3;
+    const int warpM = (warp >> 1) * 32;
+    const int warpN = (warp & 1) * 32;
+    const int mBase = blockIdx.x * MMA_BM;
+    const int nBase = blockIdx.y * MMA_BN;
+    const int nTiles = (blocksPerRow + MMA_KB - 1) / MMA_KB;
+    const size_t wRowBytes = (size_t)blocksPerRow * 32;
+
+    auto loadStage = [&](int stage, int kt) {
+        const int kb0 = kt * MMA_KB;
+        const int kByte = kb0 * 32;
+        // 64 rows x 8 sixteen-byte chunks, four chunks per thread, per operand.
+        for (int c = tid; c < MMA_BM * (MMA_BK / 16); c += MMA_THREADS) {
+            const int r = c >> 3;
+            const int off = (c & 7) * 16;
+            const bool inK = kByte + off < cols;
+            const int gr = mBase + r;
+            const bool wv = inK && gr < rows;
+            mma_cp_async16(&ws[stage][r][off], wv ? q + (size_t)gr * wRowBytes + kByte + off : q, wv);
+            const int gn = nBase + r;
+            const bool xv = inK && gn < n;
+            mma_cp_async16(&xs[stage][r][off], xv ? xq + (size_t)gn * cols + kByte + off : xq, xv);
+        }
+        for (int c = tid; c < MMA_BM * MMA_KB; c += MMA_THREADS) {
+            const int r = c / MMA_KB;
+            const int j = c % MMA_KB;
+            const bool inK = kb0 + j < blocksPerRow;
+            const int gr = mBase + r;
+            const bool wv = inK && gr < rows;
+            mma_cp_async4(&wsc[stage][r][j], wv ? scales + (size_t)gr * blocksPerRow + kb0 + j : scales, wv);
+            const int gn = nBase + r;
+            const bool xv = inK && gn < n;
+            mma_cp_async4(&xss[stage][r][j], xv ? xsc + (size_t)gn * blocksPerRow + kb0 + j : xsc, xv);
+        }
+        asm volatile("cp.async.commit_group;\n" ::);
+    };
+
+    float acc[2][4][4];
+#pragma unroll
+    for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+        for (int ni = 0; ni < 4; ni++)
+#pragma unroll
+            for (int e = 0; e < 4; e++) acc[mi][ni][e] = 0.0f;
+
+    loadStage(0, 0);
+    for (int kt = 0; kt < nTiles; kt++) {
+        const int s = kt & 1;
+        if (kt + 1 < nTiles) {
+            loadStage(s ^ 1, kt + 1);
+            asm volatile("cp.async.wait_group 1;\n" ::);
+        } else {
+            asm volatile("cp.async.wait_group 0;\n" ::);
+        }
+        __syncthreads();
+
+        const int kbValid = min(MMA_KB, blocksPerRow - kt * MMA_KB);
+        for (int j = 0; j < kbValid; j++) {
+            const int koff = j * 32 + t * 4;
+            unsigned a[2][4], b[4][2];
+            float wsv[2][2], xsv[4][2];
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++) {
+                const int r0 = warpM + mi * 16 + g;
+                a[mi][0] = *reinterpret_cast<const unsigned*>(&ws[s][r0][koff]);
+                a[mi][1] = *reinterpret_cast<const unsigned*>(&ws[s][r0 + 8][koff]);
+                a[mi][2] = *reinterpret_cast<const unsigned*>(&ws[s][r0][koff + 16]);
+                a[mi][3] = *reinterpret_cast<const unsigned*>(&ws[s][r0 + 8][koff + 16]);
+                wsv[mi][0] = wsc[s][r0][j];
+                wsv[mi][1] = wsc[s][r0 + 8][j];
+            }
+#pragma unroll
+            for (int ni = 0; ni < 4; ni++) {
+                const int n0 = warpN + ni * 8;
+                b[ni][0] = *reinterpret_cast<const unsigned*>(&xs[s][n0 + g][koff]);
+                b[ni][1] = *reinterpret_cast<const unsigned*>(&xs[s][n0 + g][koff + 16]);
+                xsv[ni][0] = xss[s][n0 + t * 2][j];
+                xsv[ni][1] = xss[s][n0 + t * 2 + 1][j];
+            }
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++) {
+#pragma unroll
+                for (int ni = 0; ni < 4; ni++) {
+                    int c0, c1, c2, c3;
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%10,%10,%10};\n"
+                        : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
+                        : "r"(a[mi][0]), "r"(a[mi][1]), "r"(a[mi][2]), "r"(a[mi][3]),
+                          "r"(b[ni][0]), "r"(b[ni][1]), "r"(0));
+                    acc[mi][ni][0] = fmaf(wsv[mi][0] * xsv[ni][0], (float)c0, acc[mi][ni][0]);
+                    acc[mi][ni][1] = fmaf(wsv[mi][0] * xsv[ni][1], (float)c1, acc[mi][ni][1]);
+                    acc[mi][ni][2] = fmaf(wsv[mi][1] * xsv[ni][0], (float)c2, acc[mi][ni][2]);
+                    acc[mi][ni][3] = fmaf(wsv[mi][1] * xsv[ni][1], (float)c3, acc[mi][ni][3]);
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+#pragma unroll
+    for (int mi = 0; mi < 2; mi++) {
+#pragma unroll
+        for (int ni = 0; ni < 4; ni++) {
+#pragma unroll
+            for (int e = 0; e < 4; e++) {
+                const int m = mBase + warpM + mi * 16 + g + (e >> 1) * 8;
+                const int nn = nBase + warpN + ni * 8 + t * 2 + (e & 1);
+                if (m < rows && nn < n) {
+                    y[(size_t)nn * rows + m] = acc[mi][ni][e];
+                }
+            }
+        }
+    }
+#else
+    __trap();
+#endif
+}
+
+extern "C" {
+
+// mantleCudaQuantBatchMMASupported reports whether the current device runs the
+// tensor-core kernel (compute capability 8.0 or later).
+__host__ int mantleCudaQuantBatchMMASupported(void) {
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) return 0;
+    int major = 0;
+    if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) return 0;
+    return major >= 8 ? 1 : 0;
+}
+
+// mantleCudaQuantMatVecCachedBatchMMA has the contract of
+// mantleCudaQuantMatVecCachedBatchDp4a, restricted to the shapes the
+// tensor-core kernel takes: cols a whole number of quant blocks
+// (cols == blocksPerRow*32) and 16-byte aligned q and xq. It returns
+// cudaErrorNotSupported otherwise, or on a pre-sm_80 device.
+__host__ int mantleCudaQuantMatVecCachedBatchMMA(
+    const int8_t* q,
+    const float* scales,
+    const float* x,
+    int8_t* xq,
+    float* xsc,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!q || !scales || !x || !xq || !xsc || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    if (cols != blocksPerRow * 32 || ((reinterpret_cast<uintptr_t>(q) | reinterpret_cast<uintptr_t>(xq)) & 15) != 0 ||
+        !mantleCudaQuantBatchMMASupported()) {
+        return cudaErrorNotSupported;
+    }
+    const int total = n * blocksPerRow;
+    const int qThreads = 256;
+    quantize_x_blocks_kernel<<<(total + qThreads - 1) / qThreads, qThreads, 0, stream>>>(x, xq, xsc, n, cols, blocksPerRow);
+    cudaError_t qe = cudaGetLastError();
+    if (qe != cudaSuccess) return qe;
+
+    dim3 grid((rows + MMA_BM - 1) / MMA_BM, (n + MMA_BN - 1) / MMA_BN);
+    quant_matmul_cached_mma_kernel<<<grid, MMA_THREADS, 0, stream>>>(q, scales, xq, xsc, y, rows, n, cols, blocksPerRow);
+    return cudaGetLastError();
+}
+
+} // extern "C"
