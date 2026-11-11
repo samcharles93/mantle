@@ -426,11 +426,6 @@ type batchPrefillChunk struct {
 	// embedding of positions whose entry is non-nil (multimodal image tokens).
 	rowEmbeds [][]float32
 
-	// tapBase is the tap row of this chunk's first position. Hidden-tap capture
-	// writes row tapBase+r; a prompt longer than the tap buffer's capacity
-	// therefore leaves HiddenTaps.Rows short of the prompt length.
-	tapBase int
-
 	// nonCausal makes every row attend to all n rows of the chunk instead of
 	// only the rows at or before its own position. The chunk must not wrap the
 	// cache ring, since all rows are stored before any row attends.
@@ -476,10 +471,6 @@ func (m *Instance) forEachBatchLogitsEmbeds(tokens []int, embeds [][]float32, em
 		}
 	}
 
-	// Taps describe the forward just performed, so the row counter restarts
-	// here; HiddenTaps.Rows ends up holding this prompt's captured row count.
-	m.beginForwardCapture()
-
 	// Pre-flight, before any chunk can store a KV row: EnsurePos only allocates
 	// backing storage and never writes cache contents. Recurrent (short-conv)
 	// layers carry no KV cache (CacheLen 0) and are skipped.
@@ -495,6 +486,11 @@ func (m *Instance) forEachBatchLogitsEmbeds(tokens []int, embeds [][]float32, em
 
 	for start := 0; start < n; start += m.MaxBatch {
 		end := min(start+m.MaxBatch, n)
+		// Taps describe the forward just performed, so the row counter restarts
+		// per chunk: a consumer draining each chunk gets a self-contained
+		// capture and never needs more than one chunk of rows, however long the
+		// prompt is.
+		m.beginForwardCapture()
 		// Each chunk plans against its own start position, so the ring-wrap
 		// store/attend interleaving is decided per chunk by the same rule the
 		// single-chunk path uses.
@@ -502,12 +498,14 @@ func (m *Instance) forEachBatchLogitsEmbeds(tokens []int, embeds [][]float32, em
 		if embeds != nil {
 			chunk.rowEmbeds = embeds[start:end]
 		}
-		chunk.tapBase = start
 		chunkEmit := emit
 		if emit == emitLastRow && end < n {
 			chunkEmit = emitNoRows
 		}
 		chunk.forEachRow(chunkEmit, keep)
+		if err := m.drainTaps(startPos + start); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -619,7 +617,7 @@ func (p *batchPrefillChunk) forEachRow(emit logitEmit, keep func(logits []float3
 
 	// Hidden taps: the embedding output (layer -1) then each layer's post-FFN
 	// residual, written row-by-row for the whole chunk. Both are read-only.
-	p.m.captureTapBatch(-1, p.tapBase, n, p.x)
+	p.m.captureTapBatch(-1, 0, n, p.x)
 
 	for i := range m.Layers {
 		layer := &m.Layers[i]
@@ -638,7 +636,7 @@ func (p *batchPrefillChunk) forEachRow(emit logitEmit, keep func(logits []float3
 		}
 		p.ffnBlock(layer)
 		p.addBlockResidual(layer.PostFfnNorm)
-		p.m.captureTapBatch(i, p.tapBase, n, p.x)
+		p.m.captureTapBatch(i, 0, n, p.x)
 	}
 
 	switch emit {

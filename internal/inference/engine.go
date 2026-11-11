@@ -63,8 +63,8 @@ type Generator struct {
 	gr          graphRunner
 
 	// Speculator, when non-nil, enables speculative decoding rounds instead
-	// of the per-token loop (CPU draft models only; ignored with --use-graph).
-	Speculator *Speculator // non-nil when useGraph is true
+	// of the per-token loop. The loader refuses to pair it with --use-graph.
+	Speculator *Speculator
 
 	tokenCache    []string
 	tokenCacheOK  []bool
@@ -270,9 +270,10 @@ afterPrompt:
 	var genErr error
 	if g.Speculator != nil && !g.useGraph {
 		var stopped bool
-		logitsVec, stopped, genErr = g.generateSpeculative(ctx, sb, logitsVec, toks, limit, &stats, gs, canDeviceGreedy)
+		toks, logitsVec, stopped, genErr = g.generateSpeculative(ctx, sb, logitsVec, toks, limit, &stats)
 		if genErr == nil && !stopped && stats.TokensGenerated < limit {
-			// Context edge: the draft block no longer fits; finish per-token.
+			// Context edge: the draft block no longer fits; finish per-token
+			// from the token window the speculative loop left behind.
 			genErr = g.generatePlain(ctx, sb, logitsVec, toks, limit, &stats, gs, canDeviceGreedy)
 		}
 	} else {

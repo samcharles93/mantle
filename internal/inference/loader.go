@@ -148,6 +148,15 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 			backendName = backend.CPU
 			log.Info("draft model requested; forcing cpu backend for speculation")
 		}
+		if l.UseGraph {
+			return cleanup(fmt.Errorf("dspark speculation runs the per-token loop: --draft-model cannot be combined with --use-graph"))
+		}
+		if l.DraftConfidence < 0 || l.DraftConfidence > 1 {
+			return cleanup(fmt.Errorf("--draft-confidence %g outside [0,1]", l.DraftConfidence))
+		}
+		if l.DraftConfidence > 0 {
+			log.Info("draft confidence override active: a drafted token the target rejects is still accepted when the draft is confident, so output no longer follows the target distribution", "threshold", l.DraftConfidence)
+		}
 	}
 
 	var runtime backend.Backend
@@ -285,7 +294,7 @@ func loadDSparkSpeculator(modelRuntime core.Runtime, draftFile *mcfstore.File, d
 		tokens = draft.Config.BlockSize
 	}
 	if tokens < 2 {
-		return nil, fmt.Errorf("dspark draft block_size %d is below the minimum draft length 2", draft.Config.BlockSize)
+		return nil, fmt.Errorf("dspark draft length %d is below the minimum 2", tokens)
 	}
 	return &Speculator{Draft: draft, Tokens: tokens, Confidence: draftConfidence}, nil
 }

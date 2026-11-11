@@ -86,18 +86,12 @@ func TestDSparkDraftAcceptance(t *testing.T) {
 	// sentence.<|im_end|>\n<|im_start|>assistant\n", tokenized by MiniCPM5.
 	prompt := []int{0, 130072, 8448, 220, 2928, 357, 285, 4894, 304, 6918, 52, 10893, 310, 678, 9622, 35, 130073, 220, 130072, 130071, 220}
 
-	var logits []float32
-	for start := 0; start < len(prompt); start += target.HiddenTaps.Capacity {
-		end := min(start+target.HiddenTaps.Capacity, len(prompt))
-		if logits, err = target.PrefillTokens(prompt[start:end]); err != nil {
-			t.Fatalf("prefill: %v", err)
-		}
-		if target.HiddenTaps.Rows != end-start {
-			t.Fatalf("captured %d tap rows for %d prompt tokens", target.HiddenTaps.Rows, end-start)
-		}
-		if err := draft.Inject(start, end-start); err != nil {
-			t.Fatalf("inject: %v", err)
-		}
+	logits, err := target.PrefillTokens(prompt)
+	if err != nil {
+		t.Fatalf("prefill: %v", err)
+	}
+	if target.Pos != len(prompt) || draft.ContextLen() != target.Pos {
+		t.Fatalf("after prefill: target holds %d positions, draft holds %d, want %d", target.Pos, draft.ContextLen(), len(prompt))
 	}
 	anchor := argmaxHost(logits)
 
@@ -108,8 +102,8 @@ func TestDSparkDraftAcceptance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("draft: %v", err)
 		}
-		// Step the target greedily from the anchor, injecting each new
-		// position, to obtain its own continuation.
+		// Step the target greedily from the anchor; each forward drains its
+		// taps into the draft cache.
 		want := make([]int, len(drafted))
 		tok := anchor
 		for i := range want {
@@ -118,8 +112,8 @@ func TestDSparkDraftAcceptance(t *testing.T) {
 			if err != nil {
 				t.Fatalf("target step: %v", err)
 			}
-			if err := draft.Inject(pos, 1); err != nil {
-				t.Fatalf("inject step: %v", err)
+			if target.Pos != pos+1 || draft.ContextLen() != target.Pos {
+				t.Fatalf("round %d step %d: target holds %d positions, draft holds %d, want %d", round, i, target.Pos, draft.ContextLen(), pos+1)
 			}
 			want[i] = argmaxHost(l)
 			tok = want[i]

@@ -57,3 +57,15 @@ func (m *Instance) captureTapBatch(layerIdx, rowBase, rows int, x []float32) {
 		t.StoreRow(slot, rowBase+r, x[r*t.Hidden:(r+1)*t.Hidden])
 	}
 }
+
+// drainTaps hands the rows of the forward that just finished to a consumer, so
+// a capture smaller than the input (a prompt prefilled in several chunks) can
+// still be consumed in full. pos is the target position of row 0. It is a no-op
+// unless a consumer registered itself.
+func (m *Instance) drainTaps(pos int) error {
+	t := &m.HiddenTaps
+	if t.Drain == nil || t.Rows == 0 {
+		return nil
+	}
+	return t.Drain(pos)
+}

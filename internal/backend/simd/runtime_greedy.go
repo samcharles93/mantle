@@ -23,6 +23,9 @@ func (m *Instance) ForwardTokenGreedy(tok int) (int, error) {
 	if err := runDecoderLayers(m, rt); err != nil {
 		return 0, err
 	}
+	if err := m.drainTaps(m.Pos); err != nil {
+		return 0, err
+	}
 
 	type greedyHeadOps interface {
 		DeviceMatVecNoCopy(w *instance.Mat, x []float32) bool

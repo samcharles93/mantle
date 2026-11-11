@@ -519,6 +519,8 @@ func runCmd() *cli.Command {
 				// With a draft model the loader derives the tap layers from
 				// the draft config instead.
 				loader.LoadOptions.HiddenTapLayers = tapLayers
+			} else if len(tapLayers) > 0 {
+				return cli.Exit("error: --draft-model derives its tap layers from the draft config; drop --capture-tap-layers", 1)
 			}
 			loader.DraftModelPath = draftModel
 			loader.DraftTokens = draftTokens

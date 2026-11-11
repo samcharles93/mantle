@@ -110,7 +110,19 @@ func LoadDSparkDraftMCF(mf *mcfstore.File, configJSON []byte, target *core.Insta
 	d.embd = make([]float32, h)
 	d.bias = make([]float32, cfg.VocabSize)
 	d.markov = make([]float32, cfg.MarkovRank)
+	// Pairing is when the draft starts tracking the target: from here on every
+	// target forward publishes its rows and the draft appends them, so the two
+	// position counts stay equal without the caller injecting anything.
+	target.HiddenTaps.Drain = d.drainTarget
 	return d, nil
+}
+
+// drainTarget is the target's HiddenTaps.Drain. It appends the rows of the
+// forward that just finished to the draft cache, which is the only way to see a
+// prompt longer than one tap buffer: the prefill hands its rows over chunk by
+// chunk instead of keeping them.
+func (d *DSparkDraft) drainTarget(pos int) error {
+	return d.Inject(pos, d.target.HiddenTaps.Rows)
 }
 
 func checkDSparkTarget(cfg *model.DSparkConfig, target *core.Instance) error {
@@ -166,16 +178,17 @@ func loadSizedVec(src tensorSource, name string, n int) ([]float32, error) {
 // ContextLen is the number of target positions injected so far.
 func (d *DSparkDraft) ContextLen() int { return d.inst.Pos }
 
-// Truncate discards injected positions at and after pos, so a rejected
-// speculative suffix can be re-injected from the target's accepted state.
+// Truncate discards injected positions at and after pos. Only the position
+// count moves: the cache rows past it stay in place and the next store at those
+// positions replaces them, which is how a verification block the target partly
+// rejected is rolled back.
 func (d *DSparkDraft) Truncate(pos int) {
 	d.inst.Pos = max(0, min(pos, d.inst.Pos))
 }
 
-// Inject projects the first rows of the target's most recent hidden-tap
-// capture into the draft cache as target positions [pos, pos+rows). pos must
-// equal ContextLen, so the cache always extends contiguously. rows may be
-// fewer than were captured, e.g. only the accepted prefix of a verification.
+// Inject projects the first rows of the target's most recent hidden-tap capture
+// into the draft cache as target positions [pos, pos+rows). pos must equal
+// ContextLen, so the cache always extends contiguously.
 func (d *DSparkDraft) Inject(pos, rows int) error {
 	taps := &d.target.HiddenTaps
 	m := d.inst

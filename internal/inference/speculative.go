@@ -16,9 +16,6 @@ type greedyStepper interface {
 // SpeculativeDraft is the draft half of a speculative decoding pair. The
 // simd DSpark draft implements it; tests may substitute fakes.
 type SpeculativeDraft interface {
-	// ContextLen is the number of target positions injected into the draft
-	// cache so far; it must equal the target's position count.
-	ContextLen() int
 	// Room is how many drafted tokens a verification batch can still hold.
 	Room() int
 	// Truncate discards injected positions at and after pos (0 resets).
@@ -48,24 +45,24 @@ func (s *Speculator) Reset() {
 }
 
 // generateSpeculative runs the generation loop with speculative decoding. It
-// returns the target distribution for the next uncommitted position and
-// whether generation stopped on a stop token; when the context can no longer
-// hold a full draft block it returns early so the caller can finish with the
-// plain per-token loop.
-func (g *Generator) generateSpeculative(ctx context.Context, sb *streamBuffer, logitsVec []float32, toks []int, limit int, stats *Stats, gs greedyStepper, canDeviceGreedy bool) ([]float32, bool, error) {
+// returns the token window, the target distribution for the next uncommitted
+// position and whether generation stopped on a stop token; when the context can
+// no longer hold a full draft block it returns early so the caller can finish
+// with the plain per-token loop from the returned window.
+func (g *Generator) generateSpeculative(ctx context.Context, sb *streamBuffer, logitsVec []float32, toks []int, limit int, stats *Stats) ([]int, []float32, bool, error) {
 	spec := g.Speculator
 	q := logitsVec
 	for stats.TokensGenerated < limit {
 		if err := ctx.Err(); err != nil {
-			return q, false, err
+			return toks, q, false, err
 		}
 		anchor, sampleErr := safeSample(g.Sampler, q, toks, g.StopTokens)
 		logGenerationSampleDebug(anchor, g.StopTokens, q)
 		if sampleErr != nil {
-			return q, false, sampleErr
+			return toks, q, false, sampleErr
 		}
 		if g.isStopToken(anchor) {
-			return q, true, nil
+			return toks, q, true, nil
 		}
 		g.commitGenerated(anchor, sb, &toks, stats)
 
@@ -81,9 +78,9 @@ func (g *Generator) generateSpeculative(ctx context.Context, sb *streamBuffer, l
 			// finish the tail.
 			next, err := safeForwardToken(g.Model, anchor)
 			if err != nil {
-				return q, false, err
+				return toks, q, false, err
 			}
-			return next, false, nil
+			return toks, next, false, nil
 		}
 
 		// The penalty window for row i must include the round's accepted
@@ -104,10 +101,10 @@ func (g *Generator) generateSpeculative(ctx context.Context, sb *streamBuffer, l
 		}
 		accepted, nextQ, err := spec.Draft.Speculate(anchor, n, disagree)
 		if err != nil {
-			return q, false, fmt.Errorf("speculate: %w", err)
+			return toks, q, false, fmt.Errorf("speculate: %w", err)
 		}
 		if len(accepted) < 1 || accepted[0] != anchor {
-			return q, false, fmt.Errorf("speculate: accepted block %v does not start with anchor %d", accepted, anchor)
+			return toks, q, false, fmt.Errorf("speculate: accepted block %v does not start with anchor %d", accepted, anchor)
 		}
 		q = nextQ
 		stopped := false
@@ -121,10 +118,10 @@ func (g *Generator) generateSpeculative(ctx context.Context, sb *streamBuffer, l
 			}
 		}
 		if stopped {
-			return q, true, nil
+			return toks, q, true, nil
 		}
 	}
-	return q, false, nil
+	return toks, q, false, nil
 }
 
 // generatePlain is the per-token generation loop (graph, device-greedy and

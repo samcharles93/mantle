@@ -434,6 +434,12 @@ type HiddenTaps struct {
 	// an incomplete capture — for example a prompt that fell back to the
 	// single-token path, which captures one row per step.
 	Rows int
+	// Drain, when set, is called at the end of every forward with the target
+	// position of row 0, so an incremental consumer can copy the rows out
+	// before the next forward overwrites the buffer. Rows says how many exist.
+	// It is the only way to consume a prompt longer than Capacity: the rows are
+	// handed over one forward at a time instead of being kept.
+	Drain func(pos int) error
 }
 
 // Enabled reports whether hidden-tap capture is configured.

@@ -34,10 +34,9 @@ func (d *DSparkDraft) Room() int {
 //
 // accepted always starts with anchor and holds the committed tokens for
 // positions Pos..Pos+len(accepted)-1; nextLogits is the target's distribution
-// for the position right after them. The target's KV cache is rolled back to
-// the accepted prefix (later positions are overwritten by the next batch) and
-// the accepted prefix's hidden taps are injected into the draft cache, so both
-// stay in lockstep at Pos+len(accepted).
+// for the position right after them. The verification forward publishes all
+// n+1 rows to both caches. Their position counts are rolled back to the accepted
+// prefix; the next store at a rejected position replaces its cache row.
 func (d *DSparkDraft) Speculate(anchor, n int, disagree func(rowLogits []float32, drafted int, conf float32) bool) ([]int, []float32, error) {
 	ti := d.targetInstance()
 	c := d.Config
@@ -56,18 +55,6 @@ func (d *DSparkDraft) Speculate(anchor, n int, disagree func(rowLogits []float32
 		return nil, nil, fmt.Errorf("dspark: context has room for %d more position(s)", n+1)
 	}
 	pos := ti.Pos
-	if d.inst.Pos < pos {
-		// The target prefilled (or generated) positions the draft has not seen
-		// yet — e.g. the prompt. The last forward's tap rows cover exactly
-		// positions [pos-taps.Rows, pos), so inject them to catch up.
-		missing := pos - d.inst.Pos
-		if ti.HiddenTaps.Rows != missing {
-			return nil, nil, fmt.Errorf("dspark: cannot sync draft: target captured %d tap rows for %d missing positions", ti.HiddenTaps.Rows, missing)
-		}
-		if err := d.Inject(pos-missing, missing); err != nil {
-			return nil, nil, err
-		}
-	}
 	if d.inst.Pos != pos {
 		return nil, nil, fmt.Errorf("dspark: draft holds %d positions, target %d", d.inst.Pos, pos)
 	}
@@ -99,12 +86,10 @@ func (d *DSparkDraft) Speculate(anchor, n int, disagree func(rowLogits []float32
 		}
 		k++
 	}
-	// Roll back to the accepted prefix; the rejected suffix stays in the cache
-	// but is past Pos, so the next forward overwrites it.
+	// The verification forward already published all n+1 rows to both caches.
+	// Roll both back to the accepted prefix.
 	ti.Pos = pos + k + 1
-	if err := d.Inject(pos, k+1); err != nil {
-		return nil, nil, err
-	}
+	d.Truncate(ti.Pos)
 	// Return a copy of the next distribution: samplers apply the repetition
 	// penalty in place, and the caller samples this row again next round, so
 	// sharing the row would penalize it twice.

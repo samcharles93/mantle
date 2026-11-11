@@ -4,6 +4,8 @@ import (
 	"context"
 	"slices"
 	"testing"
+
+	"github.com/samcharles93/mantle/internal/logits"
 )
 
 // specFakeModel is a deterministic toy target: the greedy continuation of any
@@ -14,12 +16,21 @@ type specFakeModel struct {
 	batchCalls   int
 	prefillCalls int
 	seq          []int
+	// penaltyAware replaces the one-hot head with a fixed row where token 3
+	// outscores token 4 by less than a repetition penalty, so the sampler's
+	// window changes the answer. It is how the repeat-penalty handoff is
+	// observable: same logits, different window, different token.
+	penaltyAware bool
 }
 
 func specNext(vocab, t int) int { return (t*3 + 1) % vocab }
 
 func (m *specFakeModel) oneHot(t int) []float32 {
 	l := make([]float32, m.vocab)
+	if m.penaltyAware {
+		l[3], l[4] = 10, 9
+		return l
+	}
 	l[t] = 10
 	return l
 }
@@ -60,8 +71,7 @@ type specFakeDraft struct {
 	calls   int
 }
 
-func (d *specFakeDraft) ContextLen() int { return d.pos }
-func (d *specFakeDraft) Room() int       { return 1000 }
+func (d *specFakeDraft) Room() int { return 1000 }
 func (d *specFakeDraft) Truncate(pos int) {
 	if pos < d.pos {
 		d.pos = pos
@@ -149,6 +159,46 @@ func TestSpeculativeMatchesPlainGreedy(t *testing.T) {
 	}
 	if !slices.Equal(brokenToks, plainToks) {
 		t.Fatalf("broken-draft tokens %v != plain %v", brokenToks, plainToks)
+	}
+}
+
+// TestSpeculativeFallbackKeepsPenaltyWindow pins the handoff of the token
+// window into the plain loop. The model's head makes token 3 and token 4 a
+// near tie that a repetition penalty flips, so the tail token is only right if
+// the plain loop sees every token the speculative rounds already committed.
+// Handing it the pre-generation window instead silently drops the penalty for
+// exactly the tokens the user just watched appear.
+func TestSpeculativeFallbackKeepsPenaltyWindow(t *testing.T) {
+	t.Parallel()
+
+	newSampler := func() *logits.Sampler {
+		return logits.NewSampler(logits.SamplerConfig{
+			Seed: 1, Temperature: 0, TopK: 5, TopP: 1, RepeatPenalty: 2, RepeatLastN: 1,
+		})
+	}
+	run := func(model *specFakeModel, draft SpeculativeDraft) []int {
+		t.Helper()
+		g := &Generator{Model: model, Sampler: newSampler()}
+		if draft != nil {
+			g.Speculator = &Speculator{Draft: draft, Tokens: 4}
+		}
+		toks, _, err := g.RunWithContext(context.Background(), []int{1, 2}, 6, nil)
+		if err != nil {
+			t.Fatalf("RunWithContext: %v", err)
+		}
+		return toks
+	}
+
+	want := run(&specFakeModel{vocab: 16, penaltyAware: true}, nil)
+	// A draft the target always rejects accepts only the anchor per round, so
+	// the 6-token limit lands on the single-token fallback.
+	specModel := &specFakeModel{vocab: 16, penaltyAware: true}
+	got := run(specModel, &specFakeDraft{model: specModel, perfect: false})
+	if !slices.Equal(got, want) {
+		t.Fatalf("speculative tokens %v != plain %v", got, want)
+	}
+	if specModel.forwardCalls == 0 {
+		t.Fatal("expected the plain loop to finish the tail")
 	}
 }
 

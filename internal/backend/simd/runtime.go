@@ -73,6 +73,9 @@ func (m *Instance) forwardTokenState(rt *tokenRuntimeState) ([]float32, error) {
 	if err := runDecoderLayers(m, rt); err != nil {
 		return nil, err
 	}
+	if err := m.drainTaps(m.Pos); err != nil {
+		return nil, err
+	}
 
 	// Output norm + projection:
 	// 1) prefer device-only RMSNorm + MatVec when available

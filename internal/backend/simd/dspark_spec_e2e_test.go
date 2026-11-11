@@ -81,9 +81,11 @@ func TestDSparkSpeculateRealPairGreedy(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: prefill: %v", name, err)
 			}
+			// The target's prefill already handed every prompt row to the
+			// draft through its tap drain.
 			promptLogits := append([]float32(nil), prefillLogits...)
-			if err := draft.Inject(0, len(prompt)); err != nil {
-				t.Fatalf("%s: inject: %v", name, err)
+			if got := draft.ContextLen(); got != len(prompt) {
+				t.Fatalf("%s: draft holds %d positions after a %d-token prompt", name, got, len(prompt))
 			}
 			refPrefill, err := ref.PrefillTokens(prompt)
 			if err != nil {
