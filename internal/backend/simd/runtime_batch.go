@@ -200,8 +200,8 @@ func (m *Instance) batchIneligibleReasonMode(tokens []int, nonCausal bool) strin
 	if m.Output == nil || m.Output.C != hidden || m.Output.R != cfg.VocabSize {
 		return "output projection is not [vocab,hidden]"
 	}
-	if !supportedGemmWeight(m.Output) {
-		return "output projection is quantised"
+	if !batchProjectable(m.Output) {
+		return "output projection dtype is not supported"
 	}
 	for _, tok := range tokens {
 		if tok < 0 || tok >= cfg.VocabSize {
@@ -318,8 +318,8 @@ func (m *Instance) batchLayerIneligible(i, ffnWidth int) string {
 		return why + "ffn down projection shape differs"
 	}
 	for _, w := range []*Mat{layer.FfnUp, layer.FfnGate, layer.FfnDown} {
-		if !supportedGemmWeight(w) {
-			return why + "quantised FFN weight"
+		if !batchProjectable(w) {
+			return why + "unsupported FFN weight dtype"
 		}
 	}
 
@@ -355,8 +355,8 @@ func (m *Instance) batchLayerIneligible(i, ffnWidth int) string {
 		return why + "output projection is not [hidden,qDim]"
 	}
 	for _, w := range []*Mat{layer.Wq, layer.Wk, layer.Wv, layer.Wo, layer.AttnGate} {
-		if w != nil && !supportedGemmWeight(w) {
-			return why + "quantised projection weight"
+		if w != nil && !batchProjectable(w) {
+			return why + "unsupported projection weight dtype"
 		}
 	}
 	return ""
@@ -383,8 +383,8 @@ func (m *Instance) batchShortConvIneligible(layer *Layer, why string, hidden int
 		return why + "batch short-conv state scratch is too small"
 	}
 	for _, w := range []*Mat{layer.ShortConvInProj, layer.ShortConvOutProj} {
-		if !supportedGemmWeight(w) {
-			return why + "quantised short-conv projection weight"
+		if !batchProjectable(w) {
+			return why + "unsupported short-conv projection weight dtype"
 		}
 	}
 	return ""
@@ -465,7 +465,7 @@ func (m *Instance) forEachBatchLogitsEmbeds(tokens []int, embeds [][]float32, em
 
 	startPos := m.Pos
 	n := len(tokens)
-	if emit == emitAllRows && useSmallBatchBF16(m.Output, min(n, m.MaxBatch)) {
+	if emit == emitAllRows && batchHeadRows(m.Output, min(n, m.MaxBatch)) {
 		if need := min(n, m.MaxBatch) * m.Output.R; len(m.Scratch.BatchLogits) < need {
 			m.Scratch.BatchLogits = make([]float32, need)
 		}
@@ -559,12 +559,14 @@ func (p *batchPrefillChunk) gemmRows(dst, src []float32, w *Mat) {
 }
 
 // projectRows computes dst[n, w.R] = src[n, w.C] * wᵀ for contiguous row
-// blocks, picking the small-batch BF16 kernel, the packed GEMM, or one matvec
-// per row for weights the GEMM does not take.
+// blocks, picking the small-batch BF16 kernel, the cached int8 quant kernel,
+// the packed GEMM, or one matvec per row for weights none of those take.
 func projectRows(dst []float32, w *Mat, src []float32, n int) {
 	switch {
 	case useSmallBatchBF16(w, n):
 		MatMatBF16(dst, w, src, n)
+	case useBatchQuant(w, n):
+		MatMatQuant(dst, w, src, n)
 	case n > 1 && supportedGemmWeight(w):
 		rows := Mat{R: n, C: w.R, Stride: w.R, DType: mcf.DTypeF32, Data: dst[:n*w.R]}
 		block := Mat{R: n, C: w.C, Stride: w.C, DType: mcf.DTypeF32, Data: src[:n*w.C]}
@@ -574,6 +576,19 @@ func projectRows(dst []float32, w *Mat, src []float32, n int) {
 			MatVec(dst[r*w.R:(r+1)*w.R], w, src[r*w.C:(r+1)*w.C])
 		}
 	}
+}
+
+// batchProjectable reports whether projectRows accepts w: anything the GEMM
+// takes, plus quantised weights, which run through MatMatQuant or fall back to
+// one MatVec per row.
+func batchProjectable(w *Mat) bool {
+	return supportedGemmWeight(w) || (w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType))
+}
+
+// batchHeadRows reports whether an all-rows output head for n rows should be
+// computed as one block into BatchLogits rather than one fused matvec per row.
+func batchHeadRows(w *Mat, n int) bool {
+	return useSmallBatchBF16(w, n) || useBatchQuant(w, n)
 }
 
 // logitEmit selects which rows of a batched forward get logits.
@@ -653,12 +668,12 @@ func (p *batchPrefillChunk) forEachRow(emit logitEmit, keep func(logits []float3
 	}
 
 	vocab := m.Output.R
-	if useSmallBatchBF16(m.Output, n) && len(m.Scratch.BatchLogits) >= n*vocab {
+	if batchHeadRows(m.Output, n) && len(m.Scratch.BatchLogits) >= n*vocab {
 		for r := range n {
 			p.ops.RMSNorm(p.norm[r*hidden:(r+1)*hidden], p.x[r*hidden:(r+1)*hidden], m.OutputNorm, m.RMSEpsilon)
 		}
 		block := m.Scratch.BatchLogits[:n*vocab]
-		MatMatBF16(block, m.Output, p.norm[:n*hidden], n)
+		projectRows(block, m.Output, p.norm[:n*hidden], n)
 		for r := range n {
 			row := block[r*vocab : (r+1)*vocab]
 			p.finishLogits(row)
@@ -715,7 +730,7 @@ func (m *Instance) ForwardBlockNonCausal(tokens []int, keep func(row int, logits
 	if why := m.batchIneligibleReasonMode(tokens, true); why != "" {
 		return fmt.Errorf("non-causal block: %s", why)
 	}
-	if useSmallBatchBF16(m.Output, n) {
+	if batchHeadRows(m.Output, n) {
 		if need := n * m.Output.R; len(m.Scratch.BatchLogits) < need {
 			m.Scratch.BatchLogits = make([]float32, need)
 		}

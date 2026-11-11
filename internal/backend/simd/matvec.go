@@ -20,12 +20,16 @@ type matVecTask struct {
 	// x packed by packActivationGroups.
 	n  int
 	xp []float32
+	// qj, when set, selects MatMatQuant: the worker claims weight-row
+	// tiles from the shared job until none remain.
+	qj *quantJob
 }
 
 type matVecWorker struct {
 	tasks  chan matVecTask
 	qbuf   []int8
 	scales []float32
+	quant  quantKernelScratch // MatMatQuant buffers
 	mu     sync.Mutex
 }
 
@@ -121,7 +125,9 @@ func newMatVecPool() *matVecPool {
 		p.workers[i] = worker
 		go func(w *matVecWorker) {
 			for task := range w.tasks {
-				if task.n > 0 {
+				if task.qj != nil {
+					task.qj.run(w)
+				} else if task.n > 0 {
 					matMatRangeBF16(task.dst, task.w, task.x, task.xp, task.n, task.rs, task.re)
 				} else {
 					matVecRangeWithWorker(task.dst, task.w, task.x, task.rs, task.re, task.qx, w)
