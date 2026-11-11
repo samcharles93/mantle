@@ -21,6 +21,15 @@ type EngineProviderConfig struct {
 	ModelsPath       string
 	MaxContext       int
 	Loader           inference.Loader
+
+	// MaxLoaded bounds how many model engines stay resident. When a load
+	// exceeds the bound, the least recently used engine with no request in
+	// flight is closed. A value <= 0 leaves the cache unbounded.
+	MaxLoaded int
+
+	// LoadFunc overrides Loader.Load. Tests use it to supply fake engines;
+	// production leaves it nil.
+	LoadFunc func(ctx context.Context, path string, maxContext int) (*inference.LoadResult, error)
 }
 
 type CachedEngineProvider struct {
@@ -28,6 +37,7 @@ type CachedEngineProvider struct {
 	mu      sync.Mutex
 	cache   map[string]*engineEntry
 	loading map[string]*loadGate
+	seq     int64
 }
 
 type loadGate struct {
@@ -41,6 +51,12 @@ type engineEntry struct {
 	engine   inference.Engine
 	defaults inference.GenDefaults
 	mu       sync.Mutex
+
+	// users and lastUsed are guarded by CachedEngineProvider.mu. An entry may
+	// only be evicted while users is zero, so no request can be handed an
+	// engine that has been closed.
+	users    int
+	lastUsed int64
 }
 
 const envMantleModelsDir = "MANTLE_MODELS_DIR"
@@ -58,10 +74,11 @@ func (p *CachedEngineProvider) WithEngine(ctx context.Context, modelID string, f
 	if err != nil {
 		return err
 	}
-	entry, err := p.getOrLoad(ctx, path)
+	entry, err := p.acquire(ctx, path)
 	if err != nil {
 		return err
 	}
+	defer p.release(entry)
 
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
@@ -71,14 +88,18 @@ func (p *CachedEngineProvider) WithEngine(ctx context.Context, modelID string, f
 	return fn(entry.engine, entry.defaults)
 }
 
-func (p *CachedEngineProvider) getOrLoad(ctx context.Context, path string) (*engineEntry, error) {
+// acquire returns the cached engine for path, loading it on a miss, and pins
+// it so eviction cannot close it under the caller. The caller must release it.
+func (p *CachedEngineProvider) acquire(ctx context.Context, path string) (*engineEntry, error) {
+	// The cache check and the gate registration share one critical section so a
+	// request that misses cannot start a second load for a model another
+	// request is caching at the same moment.
 	p.mu.Lock()
-	entry, ok := p.cache[path]
-	if ok {
+	if entry, ok := p.cache[path]; ok {
+		p.pinLocked(entry)
 		p.mu.Unlock()
 		return entry, nil
 	}
-
 	gate, loading := p.loading[path]
 	if !loading {
 		gate = &loadGate{}
@@ -87,38 +108,94 @@ func (p *CachedEngineProvider) getOrLoad(ctx context.Context, path string) (*eng
 	p.mu.Unlock()
 
 	gate.mu.Lock()
-	defer gate.mu.Unlock()
-
-	if gate.done {
-		if gate.err != nil {
-			return nil, gate.err
+	if !gate.done {
+		load := p.cfg.LoadFunc
+		if load == nil {
+			load = p.cfg.Loader.Load
 		}
-		return gate.entry, nil
-	}
-
-	result, err := p.cfg.Loader.Load(ctx, path, p.cfg.MaxContext)
-	if err != nil {
-		gate.err = err
+		result, err := load(ctx, path, p.cfg.MaxContext)
+		if err != nil {
+			gate.err = err
+		} else {
+			gate.entry = &engineEntry{
+				engine:   result.Engine,
+				defaults: result.GenerationDefaults,
+			}
+		}
 		gate.done = true
-		p.mu.Lock()
-		delete(p.loading, path)
-		p.mu.Unlock()
-		return nil, err
 	}
-
-	newEntry := &engineEntry{
-		engine:   result.Engine,
-		defaults: result.GenerationDefaults,
-	}
-	gate.entry = newEntry
-	gate.done = true
+	gate.mu.Unlock()
 
 	p.mu.Lock()
-	p.cache[path] = newEntry
+	if gate.err != nil {
+		delete(p.loading, path)
+		p.mu.Unlock()
+		return nil, gate.err
+	}
+	entry := gate.entry
+	p.cache[path] = entry
 	delete(p.loading, path)
+	p.pinLocked(entry)
+	victims := p.evictLocked(path)
 	p.mu.Unlock()
 
-	return newEntry, nil
+	closeEntries(victims)
+	return entry, nil
+}
+
+// pinLocked marks entry as in use. p.mu must be held.
+func (p *CachedEngineProvider) pinLocked(entry *engineEntry) {
+	entry.users++
+	p.seq++
+	entry.lastUsed = p.seq
+}
+
+func (p *CachedEngineProvider) release(entry *engineEntry) {
+	p.mu.Lock()
+	entry.users--
+	p.mu.Unlock()
+}
+
+// evictLocked removes least recently used entries beyond MaxLoaded, skipping
+// the entry a request is currently acquiring and any engine still in use.
+// p.mu must be held; the returned entries are closed by the caller because
+// closing touches files and must not hold the provider lock.
+func (p *CachedEngineProvider) evictLocked(keep string) []*engineEntry {
+	limit := p.cfg.MaxLoaded
+	if limit <= 0 {
+		return nil
+	}
+	var victims []*engineEntry
+	for len(p.cache) > limit {
+		victimPath := ""
+		var oldest *engineEntry
+		for path, entry := range p.cache {
+			if path == keep || entry.users > 0 {
+				continue
+			}
+			if oldest == nil || entry.lastUsed < oldest.lastUsed {
+				oldest, victimPath = entry, path
+			}
+		}
+		if oldest == nil {
+			// Every other engine is busy; keep them rather than block the load.
+			break
+		}
+		delete(p.cache, victimPath)
+		victims = append(victims, oldest)
+	}
+	return victims
+}
+
+func closeEntries(entries []*engineEntry) {
+	for _, entry := range entries {
+		if entry.engine == nil {
+			continue
+		}
+		entry.mu.Lock()
+		_ = entry.engine.Close() // a failed close only leaks until process exit
+		entry.mu.Unlock()
+	}
 }
 
 func (p *CachedEngineProvider) resolveModelPath(modelID string) (string, error) {
