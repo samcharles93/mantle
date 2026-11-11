@@ -34,7 +34,9 @@ func Dot(a, b []float32) float32 {
 }
 
 func DotF16(a []float32, b []uint16) float32 {
-	// F16 dot currently uses scalar conversion.
+	if cpu.HasAVX2 && cpu.HasFMA {
+		return dotF16SIMD(a, b)
+	}
 	return dotScalarF16(a, b)
 }
 

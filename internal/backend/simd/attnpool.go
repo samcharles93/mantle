@@ -32,6 +32,8 @@ func RunAttnHeads(ctx *AttnContext, scoresBuf []float32, rs, re int) {
 	cacheLen := ctx.CacheLen
 	useRing := cacheLen > 0 && cacheLen < ctx.Pos+1
 	scores := scoresBuf[:winLen]
+	vectorV := cpu.HasAVX2 && ctx.HeadDim%8 == 0
+	f16k := newF16Consts()
 	for h := rs; h < re; h++ {
 		kvHead := h * ctx.KvHeads / ctx.NHead
 		qh := ctx.Q[h*ctx.HeadDim : (h+1)*ctx.HeadDim]
@@ -61,6 +63,25 @@ func RunAttnHeads(ctx *AttnContext, scoresBuf []float32, rs, re int) {
 			Softmax(scores)
 		}
 		out := ctx.AttnOut[h*ctx.HeadDim : (h+1)*ctx.HeadDim]
+		if vectorV && ctx.CacheVQ8 == nil {
+			// Position-outer accumulation: every out[d] still sums its terms
+			// in t order with one multiply and one add each, so the result
+			// matches the d-outer loop below bit for bit.
+			clear(out)
+			for t := ctx.Start; t <= ctx.Pos; t++ {
+				cachePos := t
+				if useRing {
+					cachePos = t % cacheLen
+				}
+				voff := cachePos*ctx.KvStride + kvHead*ctx.HeadDim
+				if ctx.CacheV16 != nil {
+					accumulateScaledF16(out, scores[t-ctx.Start], ctx.CacheV16[voff:voff+ctx.HeadDim], &f16k)
+				} else {
+					accumulateScaledF32(out, scores[t-ctx.Start], ctx.CacheV[voff:voff+ctx.HeadDim])
+				}
+			}
+			continue
+		}
 		for d := range ctx.HeadDim {
 			var sum float32
 			if ctx.CacheVQ8 != nil {
