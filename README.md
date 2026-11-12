@@ -112,6 +112,21 @@ Use the `--dedup` to deduplicate tensors or `--cast` to cast the tensors to anot
 mantle pack --in /path/to/model --out /work/models/MyModel.mcf
 ```
 
+### Serve (OpenAI-compatible API)
+
+```bash
+mantle serve --model /models/mcf/Qwen3-0.6B.k4.mcf --addr 127.0.0.1:8080
+```
+
+`/v1/*` is unauthenticated by default (local use). Set `--api-key` (or
+`MANTLE_API_KEY`) to require `Authorization: Bearer <key>` or `X-API-Key: <key>`;
+the embedded web UI keeps loading without it. Request bodies are capped at
+`--max-body-bytes` (32 MiB) and at `--max-concurrent` in-flight `/v1` requests
+(8; excess requests get 503 with `Retry-After`). Only `--max-loaded-models`
+model engines (1) stay resident; the least recently used is closed when a
+different model is requested. `--write-timeout` defaults to 0 so streaming
+responses are not cut off.
+
 The flags will likely evolve, the `run` command will eventually be implied, the serve command will serve an OpenAI API endpoint. 
 I plan to add `inspect` and `serve` only if the project continues, or, you're welcome to submit a PR.
 

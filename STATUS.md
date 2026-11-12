@@ -86,6 +86,28 @@ End to end on CPU: `mantle run --draft-model <draft.mcf> [--draft-tokens N] [--d
 
 Verified: hermetic synthetic tests (spec output == plain greedy, KV rollback, lockstep, guards) plus an env-gated real-pair test (`TestDSparkSpeculateRealPairGreedy`, `MANTLE_DSPARK_TARGET`/`MANTLE_DSPARK_DRAFT`): spec == plain greedy for 48 tokens on two prompts, with and without repeat penalty 1.1. CLI: identical 48-token output with and without `--draft-model`. Acceptance on the real pair is 5.1/7 tokens per block (`TestDSparkDraftAcceptance`). Two real bugs were caught by these tests: the sampler's in-place penalty was applied twice to the returned next-logits row (Speculate now hands disagree a copy and returns a raw copy), and the penalty window initially missed the current round's accepted prefix. Throughput on this 8-core CPU (bf16 MiniCPM5-2B): verify batch ~68 ms/token vs 165 ms/token single, DraftBlock(7) ~100 ms/round, so a round costs ~540 ms — net ~1.3x faster than plain on high-acceptance prompts (france, 4.4 accepted/round), break-even to slower on low-acceptance ones (sky, 2.2/round; dt=7 2.8 tok/s vs plain 5.7). The CUDA draft path (verify batch on device) is where the real win is; still open.
 
+## Server hardening (2026-11-11)
+
+`mantle serve` now has the operator controls it was missing. `--api-key` (`MANTLE_API_KEY`)
+requires the key as `Authorization: Bearer <key>` or `X-API-Key` on every `/v1` request, compared
+in constant time; the embedded web UI and static assets stay reachable. An empty key (the default)
+keeps local use unauthenticated. `--max-body-bytes` (32 MiB) rejects oversized bodies before they
+are read, `--max-concurrent` (8) answers excess `/v1` requests with 503 and `Retry-After` instead of
+queueing them behind a busy model, and `--max-loaded-models` (1) bounds the resident engine cache:
+the least recently used engine is closed when a different model is requested. `--write-timeout`
+defaults to 0 so streaming responses are not cut off, `--idle-timeout` to 120 s, and the existing
+`--read-timeout` now sets the read header timeout.
+
+The cache is reference counted, so an engine is only closed when no request holds it: switching
+models cannot kill an in-flight generation, and a request for an evicted model reloads it
+(`LoadFunc` keeps the loader injectable for tests).
+
+Verified: live 401 without a key, 200 with the header or `MANTLE_API_KEY`, 413 on a 40 MB body, and
+200 generations after the change; unit tests cover LRU close and reload, retention of a busy engine
+(a regressed eviction fails after 5 s instead of hanging), and one load per model under 8 concurrent
+requests. Both behaviours were mutation-checked by reverting the guard. Server timeouts and the
+authentication path are exercised only on CPU here.
+
 ## Open work
 
 1. DSpark on CUDA: the draft machinery is simd-only; the target verify batch and draft block need device paths (then `--draft-model` can stop forcing cpu).

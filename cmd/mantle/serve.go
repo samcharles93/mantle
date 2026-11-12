@@ -20,6 +20,12 @@ func serveCmd() *cli.Command {
 	var (
 		addr           string
 		readTimeout    time.Duration
+		writeTimeout   time.Duration
+		idleTimeout    time.Duration
+		apiKey         string
+		maxBodyBytes   int64
+		maxConcurrent  int
+		maxLoaded      int
 		noWebUI        bool
 		cudaWeightMode string
 		reasoningFmt   string
@@ -38,9 +44,48 @@ func serveCmd() *cli.Command {
 			},
 			&cli.DurationFlag{
 				Name:        "read-timeout",
-				Usage:       "read timeout",
+				Usage:       "read header timeout",
 				Value:       30 * time.Second,
 				Destination: &readTimeout,
+			},
+			&cli.DurationFlag{
+				Name:        "write-timeout",
+				Usage:       "write timeout (0 leaves streaming responses unbounded)",
+				Value:       0,
+				Destination: &writeTimeout,
+			},
+			&cli.DurationFlag{
+				Name:        "idle-timeout",
+				Usage:       "keep-alive idle timeout",
+				Value:       120 * time.Second,
+				Destination: &idleTimeout,
+			},
+			&cli.StringFlag{
+				Name:        "api-key",
+				Usage:       "require this key on /v1 requests (Authorization: Bearer or X-API-Key); empty disables authentication",
+				Sources:     cli.EnvVars("MANTLE_API_KEY"),
+				Destination: &apiKey,
+			},
+			&cli.Int64Flag{
+				Name:        "max-body-bytes",
+				Usage:       "largest accepted request body in bytes; base64 images, audio and video frames make bodies large (0 = unlimited)",
+				Value:       32 << 20,
+				Sources:     cli.EnvVars("MANTLE_MAX_BODY_BYTES"),
+				Destination: &maxBodyBytes,
+			},
+			&cli.IntFlag{
+				Name:        "max-concurrent",
+				Usage:       "maximum concurrent /v1 requests; further requests get 503 (0 = unlimited)",
+				Value:       8,
+				Sources:     cli.EnvVars("MANTLE_MAX_CONCURRENT"),
+				Destination: &maxConcurrent,
+			},
+			&cli.IntFlag{
+				Name:        "max-loaded-models",
+				Usage:       "maximum model engines kept resident; the least recently used is closed when exceeded (0 = unlimited)",
+				Value:       1,
+				Sources:     cli.EnvVars("MANTLE_MAX_LOADED_MODELS"),
+				Destination: &maxLoaded,
 			},
 			&cli.BoolFlag{
 				Name:        "no-webui",
@@ -116,6 +161,7 @@ func serveCmd() *cli.Command {
 				ModelsPath:       modelsPath,
 				MaxContext:       int(maxContext),
 				Loader:           loader,
+				MaxLoaded:        maxLoaded,
 			})
 			service := api.NewInferenceService(provider)
 			service.SetReasoningDefaults(reasoningFmt, int(reasoningBgt))
@@ -125,6 +171,16 @@ func serveCmd() *cli.Command {
 			e := echo.New()
 			e.Use(middleware.RequestLogger())
 			e.Use(middleware.Recover())
+			if auth := api.APIKeyAuth(apiKey); auth != nil {
+				e.Use(auth)
+				log.Info("API key required on /v1 requests")
+			}
+			if maxBodyBytes > 0 {
+				e.Use(middleware.BodyLimit(maxBodyBytes))
+			}
+			if limit := api.MaxConcurrent(maxConcurrent); limit != nil {
+				e.Use(limit)
+			}
 			server.Register(e)
 
 			// Serve embedded web UI unless disabled
@@ -181,6 +237,8 @@ func serveCmd() *cli.Command {
 				Address: addr,
 				BeforeServeFunc: func(srv *http.Server) error {
 					srv.ReadHeaderTimeout = readTimeout
+					srv.WriteTimeout = writeTimeout
+					srv.IdleTimeout = idleTimeout
 					return nil
 				},
 			}
