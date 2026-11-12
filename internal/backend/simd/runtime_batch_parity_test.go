@@ -27,7 +27,14 @@ const (
 // a KV cache of cacheLen slots, and the batch scratch).
 func newBatchParityInstance(tb testing.TB, cacheLen int, dtype mcf.TensorDType) *Instance {
 	tb.Helper()
-	m := newTestInstance(batchParityVocab, 8, 2)
+	return newBatchParityInstanceDim(tb, cacheLen, 8, dtype)
+}
+
+// newBatchParityInstanceDim is newBatchParityInstance with a chosen hidden
+// width, for weight formats that need whole 32-column blocks.
+func newBatchParityInstanceDim(tb testing.TB, cacheLen, embd int, dtype mcf.TensorDType) *Instance {
+	tb.Helper()
+	m := newTestInstance(batchParityVocab, embd, 2)
 	m.BindDefaultOps()
 	m.MaxContext = batchParityContext
 	m.MaxQDim = m.HeadCount * m.HeadDim
@@ -322,8 +329,8 @@ func TestBatchPrefillGateRejects(t *testing.T) {
 		{name: "attention gate shape", mutate: func(m *Instance) {
 			m.Layers[0].AttnGate = &core.Mat{R: 3, C: 8, Stride: 8, DType: mcf.DTypeF32, Data: make([]float32, 24)}
 		}},
-		{name: "attention gate quantised", mutate: func(m *Instance) {
-			m.Layers[0].AttnGate = &core.Mat{R: 8, C: 8, Stride: 8, DType: mcf.DTypeQ8, Raw: make([]byte, 64)}
+		{name: "attention gate unsupported dtype", mutate: func(m *Instance) {
+			m.Layers[0].AttnGate = &core.Mat{R: 8, C: 8, Stride: 8, DType: mcf.DTypeInt8, Raw: make([]byte, 64)}
 		}},
 		{name: "value from key", mutate: func(m *Instance) { m.Layers[0].ValueFromKey = true }},
 		{name: "value norm", mutate: func(m *Instance) { m.Layers[0].ApplyVNorm = true }},
@@ -345,11 +352,11 @@ func TestBatchPrefillGateRejects(t *testing.T) {
 		{name: "head dim", mutate: func(m *Instance) { m.Layers[0].HeadDim = 8 }},
 		{name: "attention norm width", mutate: func(m *Instance) { m.Layers[0].AttnNorm = make([]float32, 4) }},
 		{name: "ffn width", mutate: func(m *Instance) { m.Layers[1].FfnUp = &core.Mat{R: 13, C: 8, Stride: 8} }},
-		{name: "quantised projection", mutate: func(m *Instance) {
-			m.Layers[0].Wk = &core.Mat{R: kvStride, C: 8, Stride: 8, DType: mcf.DTypeQ8, Raw: make([]byte, kvStride*8)}
+		{name: "unsupported projection dtype", mutate: func(m *Instance) {
+			m.Layers[0].Wk = &core.Mat{R: kvStride, C: 8, Stride: 8, DType: mcf.DTypeInt8, Raw: make([]byte, kvStride*8)}
 		}},
-		{name: "quantised output", mutate: func(m *Instance) {
-			m.Output = &core.Mat{R: batchParityVocab, C: 8, Stride: 8, DType: mcf.DTypeQ8, Raw: make([]byte, batchParityVocab*8)}
+		{name: "unsupported output dtype", mutate: func(m *Instance) {
+			m.Output = &core.Mat{R: batchParityVocab, C: 8, Stride: 8, DType: mcf.DTypeInt8, Raw: make([]byte, batchParityVocab*8)}
 		}},
 	}
 
