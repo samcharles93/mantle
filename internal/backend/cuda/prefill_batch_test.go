@@ -503,6 +503,35 @@ func TestBatchedPrefillParityBF16(t *testing.T) {
 	compareBatchLogits(t, "bf16", got, want, 2e-3, 2e-2)
 }
 
+// TestBatchedPrefillGateRejectsQuantWeightsByDefault pins the opt-in contract:
+// a model with a quantized payload must not take the batched prefill unless
+// MANTLE_CUDA_BATCHED_PREFILL_QUANT is set. The batched quant GEMM quantizes
+// activations to int8 per block and the per-token path does not, so enabling it
+// by default changes logits by up to 0.5 and can flip a greedy token.
+func TestBatchedPrefillGateRejectsQuantWeightsByDefault(t *testing.T) {
+	if !cudaAvailable(t) {
+		return
+	}
+	d := defaultBatchTestDims()
+	tokens := []int{1, 4}
+
+	inst := batchTestModel(d)
+	// Only the dtype and payload length matter to the gate.
+	inst.Layers[0].FfnUp.DType = mcf.DTypeQ8
+	inst.Layers[0].FfnUp.Raw = make([]byte, 64)
+
+	gr, cleanup := newBatchTestRuntime(t, inst)
+	defer cleanup()
+	if gr.batchedPrefillEligible(tokens) {
+		t.Fatalf("quantized weights must not be eligible without %s", quantBatchedPrefillEnv)
+	}
+
+	t.Setenv(quantBatchedPrefillEnv, "1")
+	if !gr.batchedPrefillEligible(tokens) {
+		t.Fatal("opt-in must make a quantized model eligible again")
+	}
+}
+
 // TestBatchedPrefillSingleTokenFallback verifies a single-token prompt is
 // rejected by the gate (it falls back to the sequential path) and still
 // produces correct logits.
@@ -835,8 +864,16 @@ func TestBatchedPrefillParityQ8(t *testing.T) {
 
 	grBatched, cleanup := newBatchTestRuntime(t, batchTestModel(d))
 	defer cleanup()
+	// Quantized weights are opt-in (quantBatchedPrefillEnv): the batched quant
+	// GEMM quantizes activations and the per-token path does not, and on a real
+	// 24-layer model that difference compounds to 0.3-0.5 logits and can flip a
+	// greedy token. The synthetic model below pins the opt-in path itself.
+	if grBatched.batchedPrefillEligible(tokens) {
+		t.Fatalf("q8 model must not be eligible without %s", quantBatchedPrefillEnv)
+	}
+	t.Setenv(quantBatchedPrefillEnv, "1")
 	if !grBatched.batchedPrefillEligible(tokens) {
-		t.Fatal("q8 model should be eligible for the batched quant path")
+		t.Fatal("q8 model should be eligible for the batched quant path once opted in")
 	}
 	got, err := grBatched.PrefillTokens(tokens)
 	if err != nil {
