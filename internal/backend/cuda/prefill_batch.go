@@ -123,12 +123,6 @@ func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
 	if o.blas == (native.BlasHandle{}) || o.stream == (native.Stream{}) {
 		return false
 	}
-	// Quantized weights are opted in only: the batched quant GEMM quantizes
-	// activations to int8 per block while the per-token path keeps them in f32,
-	// so the two produce different logits. See quantBatchedPrefillEnv.
-	if !envEnabled(quantBatchedPrefillEnv) && gr.hasQuantWeights() {
-		return false
-	}
 	// Note: models that set FinalLogitSoftcap or LMHeadMultiplier are eligible.
 	// The sequential oracle applies both (simd/runtime.go ForwardToken forces
 	// the pending device result to host before postprocessing), and the batched
@@ -193,38 +187,12 @@ func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
 	return true
 }
 
-// quantBatchedPrefillEnv opts a quantized model into the batched prefill. The
-// batched quant GEMM quantizes activations to int8 per 32-element block, while
-// the per-token path keeps them in f32, so the two do not produce the same
-// logits: on LFM3-1.7B q8 and k4 the difference reaches 0.3 to 0.5 and can flip
-// a greedy token. Quantized models therefore stay on the per-token path unless
-// this is set.
-const quantBatchedPrefillEnv = "MANTLE_CUDA_BATCHED_PREFILL_QUANT"
-
-// hasQuantWeights reports whether any matrix the batched plan would run is a
-// quantized payload handled by the batched quant GEMM. Embeddings are included
-// because the plan can run the output head through it too.
-func (gr *GraphRuntime) hasQuantWeights() bool {
-	m := gr.inst
-	if quantBatchedPayload(m.Embeddings) || quantBatchedPayload(m.Output) {
-		return true
-	}
-	for i := range m.Layers {
-		l := &m.Layers[i]
-		for _, w := range []*instance.Mat{l.Wq, l.Wk, l.Wv, l.Wo, l.FfnUp, l.FfnGate, l.FfnDown} {
-			if quantBatchedPayload(w) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// quantBatchedPayload is the weight shape batchedQuantSupported runs as an
-// int8-dot GEMM. uq* codebooks have no int8 dot path and stay excluded.
-func quantBatchedPayload(w *instance.Mat) bool {
-	return w != nil && len(w.Raw) > 0 && mcf.DTypeRequiresAligned64(w.DType) && !mcf.IsUQDType(w.DType)
-}
+// quantBatchedPrefillInt8Env opts into the int8-activation quant GEMM. It
+// quantizes activations per 32-element block and runs dp4a or tensor cores,
+// which is about 13x faster than the f32-activation default but returns
+// different logits: on LFM3-1.7B q8/k4 the difference reaches 0.3 to 0.5 and
+// can flip a greedy token.
+const quantBatchedPrefillInt8Env = "MANTLE_CUDA_BATCHED_PREFILL_QUANT"
 
 func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 	m := gr.inst
@@ -1621,9 +1589,21 @@ const quantMMAMinRows = 16
 var quantMMASupported = sync.OnceValue(native.QuantBatchMMASupported)
 
 // quantGemm computes dst[n, rows] = x[n, k] * qwᵀ for a cached-int8 quant
-// weight, on tensor cores when the device and shape allow it and with the
-// dp4a kernel otherwise. Both produce the same bits.
+// weight.
+//
+// The default keeps the activations in f32, which matches the per-token
+// matvec's precision: a batched prefill therefore produces the same greedy
+// tokens as the per-token path, only faster because each weight row is read
+// once per token tile instead of once per token.
+//
+// MANTLE_CUDA_BATCHED_PREFILL_QUANT=1 instead quantizes the activations to int8
+// per 32-element block and runs the dp4a or tensor-core kernel. That is about
+// 13x faster on prefill but changes the logits (0.3 to 0.5 on LFM3-1.7B q8/k4)
+// because the activations lose precision, so it is opt-in.
 func (p *batchedPrefillPlan) quantGemm(qw deviceQuantMat, x, dst native.DeviceBuffer, rows, n, k int) error {
+	if !envEnabled(quantBatchedPrefillInt8Env) {
+		return native.QuantMatVecCachedBatch(qw.q, qw.scales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+	}
 	if n >= quantMMAMinRows && k == qw.blocksPerRow*32 && quantMMASupported() &&
 		native.QuantBatchMMAAligned(qw.q, p.buf.xq) {
 		return native.QuantMatVecCachedBatchMMA(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)

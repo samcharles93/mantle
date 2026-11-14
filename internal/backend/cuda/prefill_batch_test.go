@@ -503,35 +503,6 @@ func TestBatchedPrefillParityBF16(t *testing.T) {
 	compareBatchLogits(t, "bf16", got, want, 2e-3, 2e-2)
 }
 
-// TestBatchedPrefillGateRejectsQuantWeightsByDefault pins the opt-in contract:
-// a model with a quantized payload must not take the batched prefill unless
-// MANTLE_CUDA_BATCHED_PREFILL_QUANT is set. The batched quant GEMM quantizes
-// activations to int8 per block and the per-token path does not, so enabling it
-// by default changes logits by up to 0.5 and can flip a greedy token.
-func TestBatchedPrefillGateRejectsQuantWeightsByDefault(t *testing.T) {
-	if !cudaAvailable(t) {
-		return
-	}
-	d := defaultBatchTestDims()
-	tokens := []int{1, 4}
-
-	inst := batchTestModel(d)
-	// Only the dtype and payload length matter to the gate.
-	inst.Layers[0].FfnUp.DType = mcf.DTypeQ8
-	inst.Layers[0].FfnUp.Raw = make([]byte, 64)
-
-	gr, cleanup := newBatchTestRuntime(t, inst)
-	defer cleanup()
-	if gr.batchedPrefillEligible(tokens) {
-		t.Fatalf("quantized weights must not be eligible without %s", quantBatchedPrefillEnv)
-	}
-
-	t.Setenv(quantBatchedPrefillEnv, "1")
-	if !gr.batchedPrefillEligible(tokens) {
-		t.Fatal("opt-in must make a quantized model eligible again")
-	}
-}
-
 // TestBatchedPrefillSingleTokenFallback verifies a single-token prompt is
 // rejected by the gate (it falls back to the sequential path) and still
 // produces correct logits.
@@ -864,16 +835,8 @@ func TestBatchedPrefillParityQ8(t *testing.T) {
 
 	grBatched, cleanup := newBatchTestRuntime(t, batchTestModel(d))
 	defer cleanup()
-	// Quantized weights are opt-in (quantBatchedPrefillEnv): the batched quant
-	// GEMM quantizes activations and the per-token path does not, and on a real
-	// 24-layer model that difference compounds to 0.3-0.5 logits and can flip a
-	// greedy token. The synthetic model below pins the opt-in path itself.
-	if grBatched.batchedPrefillEligible(tokens) {
-		t.Fatalf("q8 model must not be eligible without %s", quantBatchedPrefillEnv)
-	}
-	t.Setenv(quantBatchedPrefillEnv, "1")
 	if !grBatched.batchedPrefillEligible(tokens) {
-		t.Fatal("q8 model should be eligible for the batched quant path once opted in")
+		t.Fatal("q8 model should be eligible for the batched quant path")
 	}
 	got, err := grBatched.PrefillTokens(tokens)
 	if err != nil {
@@ -882,10 +845,9 @@ func TestBatchedPrefillParityQ8(t *testing.T) {
 	got = append([]float32(nil), got...)
 
 	want := sequentialOracle(t, d, tokens)
-	// The dp4a quant GEMM also quantizes activations to int8 per 32-block
-	// (like llama.cpp Q8_0), adding ~0.4% activation noise on top of the
-	// different accumulation order, so allow a slightly wider absolute band.
-	compareBatchLogits(t, "Q8", got, want, 6e-3, 2e-2)
+	// The default batched quant GEMM keeps activations in f32, so it differs
+	// from the per-token oracle only by f32 reassociation.
+	compareBatchLogits(t, "Q8", got, want, 1e-4, 1e-3)
 
 	// Decode continuity: greedy tokens from the batched instance vs a fresh
 	// sequential instance must agree.
@@ -911,4 +873,31 @@ func TestBatchedPrefillParityQ8(t *testing.T) {
 		}
 		tokG, tokW = ng, nw
 	}
+}
+
+// TestBatchedPrefillParityQ8Int8OptIn covers the fast approximation: with
+// MANTLE_CUDA_BATCHED_PREFILL_QUANT=1 the activations are quantized to int8 per
+// 32-block and the tensor-core GEMM runs, which stays close to the per-token
+// result but not as close as the f32-activation default. It is opt-in for that
+// reason, and this test keeps the path runnable.
+func TestBatchedPrefillParityQ8Int8OptIn(t *testing.T) {
+	if !cudaAvailable(t) {
+		return
+	}
+	d := defaultBatchTestDims()
+	d.q8 = true
+	d.layers = 2
+	tokens := []int{1, 3, 7, 11, 2}
+
+	want := sequentialOracle(t, d, tokens)
+
+	t.Setenv(quantBatchedPrefillInt8Env, "1")
+	gr, cleanup := newBatchTestRuntime(t, batchTestModel(d))
+	defer cleanup()
+	got, err := gr.PrefillTokens(tokens)
+	if err != nil {
+		t.Fatalf("int8 opt-in PrefillTokens: %v", err)
+	}
+	got = append([]float32(nil), got...)
+	compareBatchLogits(t, "Q8-int8", got, want, 6e-3, 2e-2)
 }
