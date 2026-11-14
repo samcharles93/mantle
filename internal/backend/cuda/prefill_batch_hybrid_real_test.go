@@ -40,16 +40,6 @@ func TestBatchedPrefillRealHybridMCF(t *testing.T) {
 		return rt.(*GraphRuntime)
 	}
 	batched := load()
-	// Quantized models are opt-in (quantBatchedPrefillEnv): the batched quant
-	// GEMM quantizes activations and the per-token path does not, so their
-	// logits differ. Assert the gate here, on a real container, then skip the
-	// parity comparison that only has a defined answer for dense weights.
-	if batched.hasQuantWeights() && !envEnabled(quantBatchedPrefillEnv) {
-		if batched.batchedPrefillEligible(tokens) {
-			t.Fatalf("quantized model must not be eligible without %s", quantBatchedPrefillEnv)
-		}
-		t.Skipf("quantized model: batched prefill is opt-in via %s", quantBatchedPrefillEnv)
-	}
 	if !batched.batchedPrefillEligible(tokens) {
 		t.Fatal("not eligible")
 	}
