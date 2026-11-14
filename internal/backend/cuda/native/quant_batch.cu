@@ -13,7 +13,7 @@ extern "C" {
 // slices through double-buffered shared memory (next slice loads while the
 // current one computes), so each weight row is read from VRAM once per
 // TILE_N-wide n tile.
-#define TILE_R 16
+#define TILE_R 32
 #define TILE_N 16
 #define CHUNK 256
 #define CHUNKS_PER_BLOCK (CHUNK / 32)
@@ -28,9 +28,9 @@ __global__ void quant_matvec_cached_batch_kernel(
     int cols,
     int blocksPerRow
 ) {
-    __shared__ int8_t wsh[TILE_R][CHUNK + 1];
+    __shared__ int8_t wsh[TILE_R][CHUNK + 16];
     __shared__ float wsc[TILE_R][CHUNKS_PER_BLOCK + 1];
-    __shared__ float xsh[TILE_N][CHUNK + 1];
+    __shared__ float xsh[TILE_N][CHUNK + 4];
 
     const int tid = threadIdx.x;
     const int r = blockIdx.x * TILE_R + (tid / TILE_N);
@@ -40,7 +40,10 @@ __global__ void quant_matvec_cached_batch_kernel(
     const int nl = tid % TILE_N;
 
     const int nChunks = (cols + CHUNK - 1) / CHUNK;
-    float acc0 = 0.0f, acc1 = 0.0f;
+    // Eight accumulators break the fma dependency chain; the inner loop walks
+    // one 32-element quant block per iteration so the block scale stays in a
+    // register.
+    float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     for (int ch = 0; ch < nChunks; ch++) {
         const int cBase = ch * CHUNK;
         const int cLen = min(CHUNK, cols - cBase);
@@ -66,19 +69,45 @@ __global__ void quant_matvec_cached_batch_kernel(
         }
         __syncthreads();
         if (active) {
-            int c = 0;
-            for (; c + 1 < cLen; c += 2) {
-                acc0 += wsc[rl][c / 32] * (float)wsh[rl][c] * xsh[nl][c];
-                acc1 += wsc[rl][(c + 1) / 32] * (float)wsh[rl][c + 1] * xsh[nl][c + 1];
-            }
-            for (; c < cLen; c++) {
-                acc0 += wsc[rl][c / 32] * (float)wsh[rl][c] * xsh[nl][c];
+            const int8_t *wrow = wsh[rl];
+            const float *xrow = xsh[nl];
+            // One dot per 32-element quant block, then a single scale multiply:
+            // the per-element cost is a convert and an fma, not a convert, a
+            // multiply and an fma.
+            for (int b = 0; b < CHUNKS_PER_BLOCK; b++) {
+                const int c = b * 32;
+                if (c >= cLen) break;
+                const float s = wsc[rl][b];
+                if (s == 0.0f) continue;
+                const int len = min(32, cLen - c);
+                float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
+                float d4 = 0.0f, d5 = 0.0f, d6 = 0.0f, d7 = 0.0f;
+                int i = 0;
+                for (; i + 8 <= len; i += 8) {
+                    const char4 w0 = *reinterpret_cast<const char4 *>(wrow + c + i);
+                    const char4 w1 = *reinterpret_cast<const char4 *>(wrow + c + i + 4);
+                    const float4 x0 = *reinterpret_cast<const float4 *>(xrow + c + i);
+                    const float4 x1 = *reinterpret_cast<const float4 *>(xrow + c + i + 4);
+                    d0 = fmaf((float)w0.x, x0.x, d0);
+                    d1 = fmaf((float)w0.y, x0.y, d1);
+                    d2 = fmaf((float)w0.z, x0.z, d2);
+                    d3 = fmaf((float)w0.w, x0.w, d3);
+                    d4 = fmaf((float)w1.x, x1.x, d4);
+                    d5 = fmaf((float)w1.y, x1.y, d5);
+                    d6 = fmaf((float)w1.z, x1.z, d6);
+                    d7 = fmaf((float)w1.w, x1.w, d7);
+                }
+                float dot = ((d0 + d1) + (d2 + d3)) + ((d4 + d5) + (d6 + d7));
+                for (; i < len; i++) {
+                    dot = fmaf((float)wrow[c + i], xrow[c + i], dot);
+                }
+                acc[0] = fmaf(s, dot, acc[0]);
             }
         }
         __syncthreads();
     }
     if (active) {
-        y[(size_t)ni * rows + r] = acc0 + acc1;
+        y[(size_t)ni * rows + r] = ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
     }
 }
 
