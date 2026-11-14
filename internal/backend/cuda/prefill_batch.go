@@ -123,6 +123,12 @@ func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
 	if o.blas == (native.BlasHandle{}) || o.stream == (native.Stream{}) {
 		return false
 	}
+	// Quantized weights are opted in only: the batched quant GEMM quantizes
+	// activations to int8 per block while the per-token path keeps them in f32,
+	// so the two produce different logits. See quantBatchedPrefillEnv.
+	if !envEnabled(quantBatchedPrefillEnv) && gr.hasQuantWeights() {
+		return false
+	}
 	// Note: models that set FinalLogitSoftcap or LMHeadMultiplier are eligible.
 	// The sequential oracle applies both (simd/runtime.go ForwardToken forces
 	// the pending device result to host before postprocessing), and the batched
@@ -185,6 +191,39 @@ func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
 		}
 	}
 	return true
+}
+
+// quantBatchedPrefillEnv opts a quantized model into the batched prefill. The
+// batched quant GEMM quantizes activations to int8 per 32-element block, while
+// the per-token path keeps them in f32, so the two do not produce the same
+// logits: on LFM3-1.7B q8 and k4 the difference reaches 0.3 to 0.5 and can flip
+// a greedy token. Quantized models therefore stay on the per-token path unless
+// this is set.
+const quantBatchedPrefillEnv = "MANTLE_CUDA_BATCHED_PREFILL_QUANT"
+
+// hasQuantWeights reports whether any matrix the batched plan would run is a
+// quantized payload handled by the batched quant GEMM. Embeddings are included
+// because the plan can run the output head through it too.
+func (gr *GraphRuntime) hasQuantWeights() bool {
+	m := gr.inst
+	if quantBatchedPayload(m.Embeddings) || quantBatchedPayload(m.Output) {
+		return true
+	}
+	for i := range m.Layers {
+		l := &m.Layers[i]
+		for _, w := range []*instance.Mat{l.Wq, l.Wk, l.Wv, l.Wo, l.FfnUp, l.FfnGate, l.FfnDown} {
+			if quantBatchedPayload(w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// quantBatchedPayload is the weight shape batchedQuantSupported runs as an
+// int8-dot GEMM. uq* codebooks have no int8 dot path and stay excluded.
+func quantBatchedPayload(w *instance.Mat) bool {
+	return w != nil && len(w.Raw) > 0 && mcf.DTypeRequiresAligned64(w.DType) && !mcf.IsUQDType(w.DType)
 }
 
 func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
