@@ -36,13 +36,19 @@ type ChatCompletionRequest struct {
 	Tools               []ChatTool          `json:"tools,omitempty"`
 	ToolChoice          any                 `json:"tool_choice,omitempty"`
 	ResponseFormat      *ChatResponseFormat `json:"response_format,omitempty"`
+	ReasoningFormat     string              `json:"reasoning_format,omitempty"`
+	ReasoningBudget     *int                `json:"reasoning_budget,omitempty"`
 }
 
 type ChatMessage struct {
-	Role       string `json:"role"`
-	Content    any    `json:"content"`
-	Name       string `json:"name,omitempty"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+	// ReasoningContent carries the model's thinking for thinking models, the
+	// same channel /v1/responses exposes separately. It is empty for models
+	// that do not emit any.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Name             string `json:"name,omitempty"`
+	ToolCallID       string `json:"tool_call_id,omitempty"`
 }
 
 type ChatTool struct {
@@ -167,23 +173,27 @@ func (s *Server) handleChatCompletions(c *echo.Context) error {
 
 func (s *Server) handleChatCompletionsSync(c *echo.Context, req ChatCompletionRequest, msgs []tokenizer.Message, completionID string, created int64, model string) error {
 	var resultText string
+	var resultReasoning string
 	var resultStats inference.Stats
+	var resultSteps int
 
 	err := s.service.provider.WithEngine(c.Request().Context(), req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
-		inferReq := chatToInferenceRequest(&req, msgs, defaults)
+		inferReq := chatToInferenceRequest(&req, msgs, defaults, s.service.defaultReasoningFormat, s.service.defaultReasoningBudget)
 		result, err := engine.Generate(c.Request().Context(), &inferReq, nil)
 		if err != nil {
 			return err
 		}
 		resultText = result.Text
+		resultReasoning = result.ReasoningText
 		resultStats = result.Stats
+		resultSteps = inferReq.Steps
 		return nil
 	})
 	if err != nil {
 		return writeError(c, http.StatusInternalServerError, "server_error", err.Error(), "", "")
 	}
 
-	finishReason := "stop"
+	finishReason := chatFinishReason(resultSteps, resultStats.TokensGenerated)
 	resp := ChatCompletionResponse{
 		ID:      completionID,
 		Object:  "chat.completion",
@@ -193,8 +203,9 @@ func (s *Server) handleChatCompletionsSync(c *echo.Context, req ChatCompletionRe
 			{
 				Index: 0,
 				Message: &ChatMessage{
-					Role:    "assistant",
-					Content: resultText,
+					Role:             "assistant",
+					Content:          resultText,
+					ReasoningContent: resultReasoning,
 				},
 				FinishReason: &finishReason,
 			},
@@ -207,6 +218,16 @@ func (s *Server) handleChatCompletionsSync(c *echo.Context, req ChatCompletionRe
 	}
 
 	return c.JSON(http.StatusOK, resp)
+}
+
+// chatFinishReason maps the engine's stop condition to an OpenAI finish_reason.
+// Generation ends on a stop token or on the caller's step budget, and only the
+// budget case is a truncation.
+func chatFinishReason(steps, tokensGenerated int) string {
+	if steps > 0 && tokensGenerated >= steps {
+		return "length"
+	}
+	return "stop"
 }
 
 func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletionRequest, msgs []tokenizer.Message, completionID string, created int64, model string) error {
@@ -238,28 +259,41 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 	}
 	flusher.Flush()
 
-	err := s.service.provider.WithEngine(c.Request().Context(), req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
-		inferReq := chatToInferenceRequest(&req, msgs, defaults)
-		_, err := engine.Generate(c.Request().Context(), &inferReq, func(streamChunk inference.StreamChunk) {
-			if streamChunk.Type != inference.StreamChunkTextDelta && streamChunk.Type != inference.StreamChunkPromptEcho {
-				return
-			}
-			sseChunk := ChatCompletionChunk{
-				ID:      completionID,
-				Object:  "chat.completion.chunk",
-				Created: created,
-				Model:   model,
-				Choices: []ChatChoice{
-					{
-						Index: 0,
-						Delta: &ChatMessage{Content: streamChunk.Delta},
-					},
+	sendDelta := func(delta ChatMessage) {
+		if delta.Content == nil && delta.ReasoningContent == "" {
+			return
+		}
+		sseChunk := ChatCompletionChunk{
+			ID:      completionID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   model,
+			Choices: []ChatChoice{
+				{
+					Index: 0,
+					Delta: &delta,
 				},
+			},
+		}
+		_ = sendSSEChunk(res, sseChunk)
+		flusher.Flush()
+	}
+
+	var result *inference.Result
+	var resultSteps int
+	err := s.service.provider.WithEngine(c.Request().Context(), req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
+		inferReq := chatToInferenceRequest(&req, msgs, defaults, s.service.defaultReasoningFormat, s.service.defaultReasoningBudget)
+		resultSteps = inferReq.Steps
+		var genErr error
+		result, genErr = engine.Generate(c.Request().Context(), &inferReq, func(streamChunk inference.StreamChunk) {
+			switch streamChunk.Type {
+			case inference.StreamChunkTextDelta, inference.StreamChunkPromptEcho:
+				sendDelta(ChatMessage{Content: streamChunk.Delta})
+			case inference.StreamChunkReasoningDelta:
+				sendDelta(ChatMessage{ReasoningContent: streamChunk.Delta})
 			}
-			_ = sendSSEChunk(res, sseChunk)
-			flusher.Flush()
 		})
-		return err
+		return genErr
 	})
 	if err != nil {
 		// Best effort error chunk
@@ -269,6 +303,9 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 
 	// Send final chunk with finish_reason
 	finishReason := "stop"
+	if result != nil {
+		finishReason = chatFinishReason(resultSteps, result.Stats.TokensGenerated)
+	}
 	finalChunk := ChatCompletionChunk{
 		ID:      completionID,
 		Object:  "chat.completion.chunk",
@@ -328,7 +365,7 @@ func chatMessagesToTokenizerMessages(msgs []ChatMessage) ([]tokenizer.Message, e
 	return out, nil
 }
 
-func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message, defaults inference.GenDefaults) inference.Request {
+func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message, defaults inference.GenDefaults, defaultReasoningFormat string, defaultReasoningBudget int) inference.Request {
 	var opts inference.RequestOptions
 	opts.Messages = msgs
 	if images, err := extractMessageImages(msgs); err == nil && len(images) > 0 {
@@ -361,6 +398,19 @@ func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message
 	if req.RepeatPenalty != nil {
 		opts.RepeatPenalty = req.RepeatPenalty
 	}
+
+	// Same knobs as /v1/responses: "none" disables thinking separation, and a
+	// budget of 0 asks the template to disable thinking entirely.
+	reasoningFormat := defaultReasoningFormat
+	if req.ReasoningFormat != "" {
+		reasoningFormat = req.ReasoningFormat
+	}
+	reasoningBudget := defaultReasoningBudget
+	if req.ReasoningBudget != nil {
+		reasoningBudget = *req.ReasoningBudget
+	}
+	opts.ReasoningFormat = &reasoningFormat
+	opts.ReasoningBudget = &reasoningBudget
 
 	if len(req.Tools) > 0 {
 		tools := make([]any, 0, len(req.Tools))
