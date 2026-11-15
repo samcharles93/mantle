@@ -83,7 +83,10 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 			cache.KQ8, cache.VQ8, cache.KQ8S, cache.VQ8S,
 			p.k[r*kvStride:(r+1)*kvStride], p.v[r*kvStride:(r+1)*kvStride])
 	}
-	attendRow := func(r int) {
+	// attnCtxFor builds one row's attention context. It does not touch the
+	// cache, so callers may build every row up front and then run them
+	// concurrently.
+	attnCtxFor := func(r int) AttnContext {
 		pos := p.startPos + r
 		start := 0
 		if p.nonCausal {
@@ -91,8 +94,7 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 		} else if layer.AttnWindow > 0 {
 			start = max(pos-layer.AttnWindow+1, 0)
 		}
-		cache.EnsurePos(pos % cacheLen)
-		ctx := AttnContext{
+		return AttnContext{
 			Q:         p.q[r*qDim : (r+1)*qDim],
 			CacheK:    cache.K,
 			CacheV:    cache.V,
@@ -114,6 +116,11 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 			Softcap:   softcap,
 			CacheLen:  cacheLen,
 		}
+	}
+
+	attendRow := func(r int) {
+		ctx := attnCtxFor(r)
+		cache.EnsurePos(ctx.Pos % cacheLen)
 		RunAttnHeads(&ctx, m.Scratch.Scores, 0, nHead)
 	}
 
@@ -131,8 +138,19 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 		for r := range n {
 			storeRow(r)
 		}
+		// The ring does not wrap here, so every store is complete and the
+		// cache only needs to be grown once for the highest position. Rows
+		// then write disjoint slices of p.attn and read only the cache, so
+		// they run concurrently.
+		cache.EnsurePos((p.startPos + n - 1) % cacheLen)
 		for r := range n {
-			attendRow(r)
+			p.attnCtx[r] = attnCtxFor(r)
+		}
+		if !attendRows(p.attnCtx[:n]) {
+			for r := range n {
+				ctx := &p.attnCtx[r]
+				RunAttnHeads(ctx, m.Scratch.Scores, 0, nHead)
+			}
 		}
 	}
 
