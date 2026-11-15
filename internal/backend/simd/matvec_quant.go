@@ -103,6 +103,10 @@ func matVecRangeQuantWithWorker(dst []float32, w *Mat, x []float32, rs, re int, 
 		matVecRangeQuantCached(dst, w, x, rs, re, qx)
 		return true
 	}
+	if mcf.IsGQDType(w.DType) {
+		matVecRangeRowDecode(dst, w, x, rs, re)
+		return true
+	}
 	switch w.DType {
 	case mcf.DTypeQ8:
 		matVecRangeQWithWorker(dst, w, x, rs, re, 8, qx, worker)
@@ -695,5 +699,19 @@ func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, sca
 			qx[base+i] = int8(q)
 			qx16[base+i] = int16(int8(q))
 		}
+	}
+}
+
+// matVecRangeRowDecode is the uncached path for quant dtypes without a raw
+// kernel: it decodes each row to f32 and takes its dot product with x.
+func matVecRangeRowDecode(dst []float32, w *Mat, x []float32, rs, re int) {
+	row := make([]float32, w.C)
+	for r := rs; r < re; r++ {
+		w.RowTo(row, r)
+		var sum float32
+		for c, v := range row {
+			sum += v * x[c]
+		}
+		dst[r] = sum
 	}
 }

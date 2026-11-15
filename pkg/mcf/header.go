@@ -11,7 +11,7 @@ const (
 	CurrentMajor uint16 = 1
 
 	// Current Minor Version
-	CurrentMinor uint16 = 1
+	CurrentMinor uint16 = 2
 
 	// FlagTensorDataAligned64: REQUIRED for all files using DTypeQ* or DTypeK*
 	// This ensures the SoA payload is 64-byte aligned for AVX-512.

@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unsafe"
 )
@@ -204,6 +205,27 @@ func Pack(opts PackOptions) error {
 		_ = w.AddFlags(FlagTensorDataAligned64)
 	}
 
+	configPath := opts.ConfigJSONPath
+	if configPath == "" {
+		configPath = filepath.Join(opts.InputDir, "config.json")
+	}
+	var ctScheme *CompressedTensorsScheme
+	if cfgBytes, ok, err := readFileIfExists(configPath); err != nil {
+		return err
+	} else if ok {
+		if ctScheme, err = ParseCompressedTensorsScheme(cfgBytes); err != nil {
+			return err
+		}
+	}
+	if ctScheme != nil {
+		if align != 64 {
+			return errors.New("mcf: pack: compressed-tensors import needs 64-byte tensor alignment")
+		}
+		logf("pack: compressed-tensors checkpoint, importing pack-quantized weights as gq* (bits %v)", sortedBits(ctScheme.Bits))
+	}
+	var quantNames []string
+	quantRecs := map[string]QuantRecord{}
+
 	copyBuf := make([]byte, 1<<20)
 	outBuf := make([]byte, len(copyBuf))
 
@@ -225,6 +247,45 @@ func Pack(opts PackOptions) error {
 
 	for _, name := range names {
 		processed++
+		if ctScheme != nil {
+			if module, packed, ok := CompressedTensorsModule(name); ok {
+				if strings.HasSuffix(name, ctZeroSuffix) || strings.HasSuffix(name, ctGIdxSuffix) {
+					return fmt.Errorf("mcf: pack: %s: asymmetric or act-order compressed-tensors weights are unsupported", name)
+				}
+				if !packed {
+					continue
+				}
+				outName := module + ".weight"
+				if _, dup := st.Tensor(outName); dup {
+					return fmt.Errorf("mcf: pack: %s exists alongside %s", outName, name)
+				}
+				dt, payload, rows, cols, err := transcodeCompressedTensorsModule(st, module, ctScheme)
+				if err != nil {
+					return fmt.Errorf("mcf: pack: %s: %w", module, err)
+				}
+				if err := td.Align(64); err != nil {
+					return err
+				}
+				off, err := td.CurrentAbsOffset()
+				if err != nil {
+					return err
+				}
+				if _, err := td.Write(payload); err != nil {
+					return err
+				}
+				recs = append(recs, TensorIndexRecord{
+					Name:     outName,
+					DType:    dt,
+					Shape:    []uint64{uint64(rows), uint64(cols)},
+					DataOff:  off,
+					DataSize: uint64(len(payload)),
+				})
+				_, group, _ := GQParams(dt)
+				quantNames = append(quantNames, outName)
+				quantRecs[outName] = QuantRecord{Method: uint8(dt), Domain: uint8(DomainWeights), BlockSize: uint16(group)}
+				continue
+			}
+		}
 		ref, ok := st.Tensor(name)
 		if !ok {
 			return fmt.Errorf("mcf: safetensors tensor disappeared: %s", name)
@@ -381,12 +442,108 @@ func Pack(opts PackOptions) error {
 		return err
 	}
 
+	if len(quantNames) > 0 {
+		order := make([]string, len(recs))
+		for i, r := range recs {
+			order[i] = r.Name
+		}
+		sort.Strings(order)
+		index := make(map[string]uint32, len(order))
+		for i, n := range order {
+			index[n] = uint32(i)
+		}
+		sort.Strings(quantNames)
+		qrecs := make([]QuantRecord, 0, len(quantNames))
+		for _, n := range quantNames {
+			r := quantRecs[n]
+			r.TensorIndex = index[n]
+			qrecs = append(qrecs, r)
+		}
+		qBytes, err := EncodeQuantInfoSection(qrecs)
+		if err != nil {
+			return err
+		}
+		if err := w.WriteSection(SectionQuantInfo, QuantInfoVersion, qBytes); err != nil {
+			return err
+		}
+		logf("pack: imported %d pack-quantized tensors", len(qrecs))
+	}
+
 	if dedupCount > 0 {
 		logf("pack: deduped %d tensors, saved %.2f MiB", dedupCount, float64(dedupSavedByte)/(1<<20))
 	}
 	logf("pack: wrote tensor index with %d records", len(recs))
 
 	return w.Finalise()
+}
+
+// transcodeCompressedTensorsModule reads a module's pack-quantized parts and
+// converts them to a gq* payload.
+func transcodeCompressedTensorsModule(st *SafetensorsModel, module string, scheme *CompressedTensorsScheme) (TensorDType, []byte, int, int, error) {
+	read := func(suffix string) ([]byte, SafetensorsTensorRef, error) {
+		r, ref, err := st.TensorReader(module + suffix)
+		if err != nil {
+			return nil, ref, err
+		}
+		b, err := io.ReadAll(r)
+		return b, ref, err
+	}
+	packed, pref, err := read(ctPackedSuffix)
+	if err != nil {
+		return 0, nil, 0, 0, err
+	}
+	scale, sref, err := read(ctScaleSuffix)
+	if err != nil {
+		return 0, nil, 0, 0, err
+	}
+	shapeRaw, shref, err := read(ctShapeSuffix)
+	if err != nil {
+		return 0, nil, 0, 0, err
+	}
+	if strings.ToUpper(pref.Info.DType) != "I32" || len(pref.Info.Shape) != 2 {
+		return 0, nil, 0, 0, errors.New("weight_packed must be a rank-2 I32 tensor")
+	}
+	if len(sref.Info.Shape) != 2 {
+		return 0, nil, 0, 0, errors.New("weight_scale must be rank-2")
+	}
+	var rows, cols int64
+	switch strings.ToUpper(shref.Info.DType) {
+	case "I64":
+		if len(shapeRaw) != 16 {
+			return 0, nil, 0, 0, errors.New("weight_shape must hold two values")
+		}
+		rows, cols = int64(binary.LittleEndian.Uint64(shapeRaw)), int64(binary.LittleEndian.Uint64(shapeRaw[8:]))
+	case "I32":
+		if len(shapeRaw) != 8 {
+			return 0, nil, 0, 0, errors.New("weight_shape must hold two values")
+		}
+		rows, cols = int64(int32(binary.LittleEndian.Uint32(shapeRaw))), int64(int32(binary.LittleEndian.Uint32(shapeRaw[4:])))
+	default:
+		return 0, nil, 0, 0, fmt.Errorf("weight_shape dtype %s unsupported", shref.Info.DType)
+	}
+	if rows <= 0 || cols <= 0 || rows > math.MaxInt32 || cols > math.MaxInt32 ||
+		pref.Info.Shape[0] != rows || sref.Info.Shape[0] != rows {
+		return 0, nil, 0, 0, fmt.Errorf("inconsistent shapes: weight_shape (%d, %d), packed %v, scale %v", rows, cols, pref.Info.Shape, sref.Info.Shape)
+	}
+	dt, payload, err := TranscodeCompressedTensors(CompressedTensorsTensor{
+		Packed:     packed,
+		PackedCols: int(pref.Info.Shape[1]),
+		Scale:      scale,
+		ScaleDType: sref.Info.DType,
+		ScaleCols:  int(sref.Info.Shape[1]),
+		Rows:       int(rows),
+		Cols:       int(cols),
+	}, scheme)
+	return dt, payload, int(rows), int(cols), err
+}
+
+func sortedBits(set map[int]bool) []int {
+	out := make([]int, 0, len(set))
+	for b := range set {
+		out = append(out, b)
+	}
+	sort.Ints(out)
+	return out
 }
 
 func writeOptionalFileSection(w *Writer, typ SectionType, version uint32, path string) error {

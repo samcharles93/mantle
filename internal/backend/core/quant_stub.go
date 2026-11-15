@@ -48,6 +48,24 @@ func rowToQuant(dst []float32, m *Mat, row int) error {
 		return nil
 	}
 
+	if layout.Family == 'g' {
+		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
+		data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
+		var qbuf [32]int8
+		for b := 0; b < layout.BlocksPerRow; b++ {
+			col := b * 32
+			n := min(m.C-col, 32)
+			blockIdx := row*layout.BlocksPerRow + b
+			scale := bf16ScaleAtRawLE(scalesRaw, row*layout.GroupsPerRow+col/layout.Group)
+			dataOff := blockIdx * layout.BlockDataBytes
+			decodeBlock(&qbuf, data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
+			for i := 0; i < n; i++ {
+				dst[col+i] = float32(qbuf[i]) * scale
+			}
+		}
+		return nil
+	}
+
 	if layout.Family == 'u' {
 		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
 		cbRaw := m.Raw[layout.CodebookOff : layout.CodebookOff+layout.CodebookBytes]

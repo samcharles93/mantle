@@ -148,7 +148,12 @@ func (m *Mat) RowTo(dst []float32, i int) {
 			panic(err)
 		}
 	default:
-		panic("unsupported dtype for row decode")
+		if !mcf.IsGQDType(m.DType) {
+			panic("unsupported dtype for row decode")
+		}
+		if err := rowToQuant(dst, m, i); err != nil {
+			panic(err)
+		}
 	}
 }
 

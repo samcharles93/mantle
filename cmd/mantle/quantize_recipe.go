@@ -13,7 +13,8 @@ import (
 // mixed follows llama.cpp's _M rule: the output head (or the token embedding
 // when the head is tied and absent), and the attention value and FFN down
 // projections in the first eighth of layers, the last eighth, and every third
-// layer between, take the upgraded method (k6 for k2-k4, q8 for q4).
+// layer between, take the upgraded method (k6 for k2-k4, q8 for q4, gq6 at
+// the same group size for gq2-gq5).
 const (
 	recipeUniform = "uniform"
 	recipeMixed   = "mixed"
@@ -39,6 +40,8 @@ func upgradedMethod(base quantMethod) (quantMethod, bool) {
 		name = "k6"
 	case base.Family == "q" && base.Bits < 8:
 		name = "q8"
+	case base.Family == "g" && base.Bits < 6:
+		name = fmt.Sprintf("gq6-%d", base.BlockSize)
 	default:
 		return quantMethod{}, false
 	}

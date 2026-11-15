@@ -39,7 +39,7 @@ func quantizeCmd() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "method",
-				Usage: "Quantization method: k6|k4|k3|k2|q8|q4",
+				Usage: "Quantization method: k6|k4|k3|k2|q8|q4|uqN|gqN (gqN-32|gqN-64|gqN-128; gqN means gqN-128)",
 				Value: "k4",
 			},
 			&cli.Float64Flag{
@@ -52,7 +52,7 @@ func quantizeCmd() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "recipe",
-				Usage: "Per-tensor method choice: uniform (every tensor gets --method) or mixed (output head, and v_proj/down_proj in the first and last eighth of layers and every third layer between, get k6 for k2-k4 or q8 for q4)",
+				Usage: "Per-tensor method choice: uniform (every tensor gets --method) or mixed (output head, and v_proj/down_proj in the first and last eighth of layers and every third layer between, get k6 for k2-k4, q8 for q4, or gq6 at the same group size for gq2-gq5)",
 				Value: recipeUniform,
 			},
 			&cli.StringFlag{
@@ -291,10 +291,16 @@ func parseQuantMethod(s string) (quantMethod, error) {
 	case "int8", "int4":
 		return quantMethod{}, errors.New("int* quantization is reserved for activations and is not implemented")
 	default:
+		if name := strings.ToLower(strings.TrimSpace(s)); strings.HasPrefix(name, "gq") {
+			return parseGQMethod(name)
+		}
 		if strings.HasPrefix(strings.ToLower(s), "uq") {
 			bits, err := strconv.Atoi(s[2:])
 			if err != nil {
 				return quantMethod{}, fmt.Errorf("unsupported method %q", s)
+			}
+			if bits > 4 {
+				return quantMethod{}, fmt.Errorf("method %q is deprecated: a uq%d codebook costs more than it saves; use k6, q8 or gq%d", s, bits, bits)
 			}
 			dt, err := mcf.UQDTypeForBits(bits)
 			if err != nil {
@@ -304,6 +310,28 @@ func parseQuantMethod(s string) (quantMethod, error) {
 		}
 		return quantMethod{}, fmt.Errorf("unsupported method %q", s)
 	}
+}
+
+// parseGQMethod parses "gqN" (group 128) or "gqN-G".
+func parseGQMethod(name string) (quantMethod, error) {
+	spec := strings.TrimPrefix(name, "gq")
+	group := 128
+	if b, g, ok := strings.Cut(spec, "-"); ok {
+		n, err := strconv.Atoi(g)
+		if err != nil {
+			return quantMethod{}, fmt.Errorf("unsupported method %q", name)
+		}
+		spec, group = b, n
+	}
+	bits, err := strconv.Atoi(spec)
+	if err != nil {
+		return quantMethod{}, fmt.Errorf("unsupported method %q", name)
+	}
+	dt, err := mcf.GQDType(bits, group)
+	if err != nil {
+		return quantMethod{}, err
+	}
+	return quantMethod{Name: mcf.GQName(dt), DType: dt, Bits: bits, BlockSize: group, SuperSize: 0, Family: "g"}, nil
 }
 
 func isQuantizableDType(dt mcf.TensorDType) bool {
@@ -583,7 +611,7 @@ func quantizeTensor(name string, src []float32, rows, cols int, method quantMeth
 		return nil, 0, 0, errors.New("min-clip greater than max-clip")
 	}
 
-	if method.Family != "q" && method.Family != "k" && method.Family != "u" {
+	if method.Family != "q" && method.Family != "k" && method.Family != "u" && method.Family != "g" {
 		return nil, 0, 0, errors.New("unsupported quantization family")
 	}
 
@@ -604,6 +632,15 @@ func quantizeTensor(name string, src []float32, rows, cols int, method quantMeth
 	case "k":
 		payload, err := mcf.EncodeKTensor(src, rows, cols, method.Bits)
 		return payload, minClip, maxClip, err
+	case "g":
+		dt, payload, err := mcf.EncodeGQTensor(src, rows, cols, method.Bits, method.BlockSize)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		if dt != method.DType {
+			return nil, 0, 0, fmt.Errorf("gq dtype mismatch: method %s, encoded %v", method.Name, dt)
+		}
+		return payload, minClip, maxClip, nil
 	case "u":
 		dt, payload, err := mcf.EncodeUQTensor(src, rows, cols, method.Bits, codebooks)
 		if err != nil {

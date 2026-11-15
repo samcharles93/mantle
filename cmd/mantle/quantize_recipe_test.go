@@ -91,3 +91,59 @@ func TestParseRecipe(t *testing.T) {
 		t.Error("unknown recipe accepted")
 	}
 }
+
+func TestParseGQMethod(t *testing.T) {
+	for in, want := range map[string]struct {
+		name        string
+		bits, group int
+	}{
+		"gq4":     {"gq4-128", 4, 128},
+		"GQ2-32":  {"gq2-32", 2, 32},
+		"gq8-64":  {"gq8-64", 8, 64},
+		"gq3-128": {"gq3-128", 3, 128},
+	} {
+		m, err := parseQuantMethod(in)
+		if err != nil {
+			t.Fatalf("parseQuantMethod(%q): %v", in, err)
+		}
+		if m.Name != want.name || m.Bits != want.bits || m.BlockSize != want.group || m.Family != "g" {
+			t.Errorf("parseQuantMethod(%q) = %+v, want %+v", in, m, want)
+		}
+	}
+	for _, bad := range []string{"gq", "gq1", "gq9", "gq4-16", "gq4-x", "gqx"} {
+		if _, err := parseQuantMethod(bad); err == nil {
+			t.Errorf("parseQuantMethod(%q) accepted", bad)
+		}
+	}
+}
+
+func TestUpgradedMethodGQKeepsGroup(t *testing.T) {
+	base, _ := parseQuantMethod("gq3-64")
+	up, ok := upgradedMethod(base)
+	if !ok || up.Name != "gq6-64" {
+		t.Fatalf("upgrade of gq3-64 = %+v, %v; want gq6-64", up, ok)
+	}
+	if _, ok := upgradedMethod(must(parseQuantMethod("gq6-128"))); ok {
+		t.Fatal("gq6 upgraded")
+	}
+}
+
+func must(m quantMethod, err error) quantMethod {
+	if err != nil {
+		panic(err)
+	}
+	return m
+}
+
+func TestParseQuantMethodRejectsDeprecatedUQ(t *testing.T) {
+	for _, name := range []string{"uq5", "uq6", "uq7", "uq8"} {
+		if _, err := parseQuantMethod(name); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	for _, name := range []string{"uq2", "uq3", "uq4"} {
+		if _, err := parseQuantMethod(name); err != nil {
+			t.Errorf("%s rejected: %v", name, err)
+		}
+	}
+}

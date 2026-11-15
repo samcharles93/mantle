@@ -235,7 +235,10 @@ func validateQuantRecord(r QuantRecord) error {
 			return errBadQuantInfo
 		}
 	default:
-		return errBadQuantInfo
+		_, group, ok := GQParams(method)
+		if !ok || r.Domain != uint8(DomainWeights) || r.BlockSize != uint16(group) || r.SuperSize != 0 {
+			return errBadQuantInfo
+		}
 	}
 	return nil
 }
@@ -270,6 +273,6 @@ func DTypeRequiresAligned64(dt TensorDType) bool {
 		DTypeUQ2, DTypeUQ3, DTypeUQ4, DTypeUQ5, DTypeUQ6, DTypeUQ7, DTypeUQ8:
 		return true
 	default:
-		return false
+		return IsGQDType(dt)
 	}
 }

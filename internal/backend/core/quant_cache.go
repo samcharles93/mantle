@@ -19,6 +19,10 @@ type QuantLayout struct {
 	SubScaleOff   int
 	SubScaleCount int
 
+	// GQ family: one bf16 scale per Group columns (ScaleOff/ScaleCount).
+	Group        int
+	GroupsPerRow int
+
 	// UQ family: codebook region (f16 levels per super-block) in addition to
 	// the block scales (ScaleOff/ScaleCount) and packed indices (DataOff).
 	CodebookOff   int
@@ -68,6 +72,25 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 	}
 
 	q := make([]int8, qLen)
+
+	if layout.Family == 'g' {
+		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
+		data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
+		for r := 0; r < m.R; r++ {
+			for b := 0; b < layout.BlocksPerRow; b++ {
+				blockIdx := r*layout.BlocksPerRow + b
+				scale := bf16ScaleAtRawLE(scalesRaw, r*layout.GroupsPerRow+b*32/layout.Group)
+				scales[blockIdx] = scale
+				if scale == 0 {
+					continue
+				}
+				dataOff := blockIdx * layout.BlockDataBytes
+				off := blockIdx * 32
+				decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
+			}
+		}
+		return &QuantCache{Q: q, Scales: scales, BlocksPerRow: layout.BlocksPerRow}, nil
+	}
 
 	if layout.Family == 'q' {
 		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
@@ -142,6 +165,30 @@ func QuantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (QuantLay
 		bits = 2
 		family = 'k'
 	default:
+		if _, _, ok := mcf.GQParams(dt); ok {
+			gl, err := mcf.GQPayloadLayoutFor([]uint64{uint64(rows), uint64(cols)}, dt)
+			if err != nil {
+				return QuantLayout{}, err
+			}
+			if gl.TotalBytes != uint64(rawLen) {
+				return QuantLayout{}, errors.New("quant payload size mismatch")
+			}
+			if gl.TotalBytes > uint64(int(^uint(0)>>1)) {
+				return QuantLayout{}, errors.New("quant payload too large")
+			}
+			return QuantLayout{
+				Family:         'g',
+				Bits:           gl.Bits,
+				BlocksPerRow:   int(gl.BlocksPerRow),
+				BlockDataBytes: int(gl.BlockDataBytes),
+				ScaleOff:       int(gl.ScaleOff),
+				ScaleCount:     int(gl.ScaleBytes / 2),
+				Group:          gl.Group,
+				GroupsPerRow:   int(gl.GroupsPerRow),
+				DataOff:        int(gl.DataOff),
+				DataBytes:      int(gl.DataBytes),
+			}, nil
+		}
 		if mcf.IsUQDType(dt) {
 			ub, ok := mcf.UQBits(dt)
 			if !ok {
@@ -258,6 +305,15 @@ func QuantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (QuantLay
 	layout.DataOff = off
 	layout.DataBytes = dataBytes
 	return layout, nil
+}
+
+// bf16ScaleAtRawLE reads the idx-th little-endian bf16 value from raw.
+func bf16ScaleAtRawLE(raw []byte, idx int) float32 {
+	off := idx * 2
+	if off < 0 || off+1 >= len(raw) {
+		return 0
+	}
+	return mcf.BF16ToFloat32(uint16(raw[off]) | uint16(raw[off+1])<<8)
 }
 
 func ScaleAtRawLE(raw []byte, idx int) float32 {

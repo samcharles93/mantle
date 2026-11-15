@@ -15,7 +15,7 @@ import (
 func packCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "pack",
-		Usage: "Pack a Safetensors model directory into a single .mcf file",
+		Usage: "Pack a Safetensors model directory into a single .mcf file (compressed-tensors pack-quantized checkpoints import as gq* without re-quantizing)",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:     "input",

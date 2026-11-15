@@ -36,13 +36,17 @@ func TestEncodedPayloadsDecodeInRuntime(t *testing.T) {
 		bits   int
 		encode func() ([]byte, error)
 		maxRel float64
+		group  int // absmax baseline group; 0 means 32
 	}{
-		{mcf.DTypeQ8, 8, func() ([]byte, error) { return mcf.EncodeQTensor(src, rows, cols, 8) }, 0.007},
-		{mcf.DTypeQ4, 4, func() ([]byte, error) { return mcf.EncodeQTensor(src, rows, cols, 4) }, 0.12},
-		{mcf.DTypeK6, 6, func() ([]byte, error) { return mcf.EncodeKTensor(src, rows, cols, 6) }, 0.03},
-		{mcf.DTypeK4, 4, func() ([]byte, error) { return mcf.EncodeKTensor(src, rows, cols, 4) }, 0.13},
-		{mcf.DTypeK3, 3, func() ([]byte, error) { return mcf.EncodeKTensor(src, rows, cols, 3) }, 0.27},
-		{mcf.DTypeK2, 2, func() ([]byte, error) { return mcf.EncodeKTensor(src, rows, cols, 2) }, 0.49},
+		{mcf.DTypeQ8, 8, func() ([]byte, error) { return mcf.EncodeQTensor(src, rows, cols, 8) }, 0.007, 0},
+		{mcf.DTypeQ4, 4, func() ([]byte, error) { return mcf.EncodeQTensor(src, rows, cols, 4) }, 0.12, 0},
+		{mcf.DTypeK6, 6, func() ([]byte, error) { return mcf.EncodeKTensor(src, rows, cols, 6) }, 0.03, 0},
+		{mcf.DTypeK4, 4, func() ([]byte, error) { return mcf.EncodeKTensor(src, rows, cols, 4) }, 0.13, 0},
+		{mcf.DTypeK3, 3, func() ([]byte, error) { return mcf.EncodeKTensor(src, rows, cols, 3) }, 0.27, 0},
+		{mcf.DTypeK2, 2, func() ([]byte, error) { return mcf.EncodeKTensor(src, rows, cols, 2) }, 0.49, 0},
+		{gqDType(t, 4, 128), 4, gqEncoder(src, rows, cols, 4, 128), 0.20, 128},
+		{gqDType(t, 3, 64), 3, gqEncoder(src, rows, cols, 3, 64), 0.32, 64},
+		{gqDType(t, 2, 32), 2, gqEncoder(src, rows, cols, 2, 32), 0.45, 32},
 	}
 	for _, tc := range cases {
 		raw, err := tc.encode()
@@ -69,7 +73,11 @@ func TestEncodedPayloadsDecodeInRuntime(t *testing.T) {
 			}
 		}
 		rel := math.Sqrt(errSq / srcSq)
-		base := absmaxBlockError(src, rows, cols, max(1, (1<<(tc.bits-1))-1))
+		group := tc.group
+		if group == 0 {
+			group = 32
+		}
+		base := absmaxBlockError(src, rows, cols, group, max(1, (1<<(tc.bits-1))-1))
 		t.Logf("%v: relative RMSE %.4f, absmax rounding %.4f", tc.dt, rel, math.Sqrt(base/srcSq))
 		if rel > tc.maxRel {
 			t.Errorf("%v: relative RMSE %.4f exceeds %.4f", tc.dt, rel, tc.maxRel)
@@ -80,13 +88,13 @@ func TestEncodedPayloadsDecodeInRuntime(t *testing.T) {
 	}
 }
 
-// absmaxBlockError is the squared error of rounding each 32-element block on
+// absmaxBlockError is the squared error of rounding each group of columns on
 // its absmax scale with codes in [-hi, hi], the scheme the encoders replaced.
-func absmaxBlockError(src []float32, rows, cols, hi int) float64 {
+func absmaxBlockError(src []float32, rows, cols, group, hi int) float64 {
 	var e float64
 	for r := range rows {
-		for c0 := 0; c0 < cols; c0 += 32 {
-			x := src[r*cols+c0 : r*cols+min(c0+32, cols)]
+		for c0 := 0; c0 < cols; c0 += group {
+			x := src[r*cols+c0 : r*cols+min(c0+group, cols)]
 			var amax float64
 			for _, v := range x {
 				amax = max(amax, math.Abs(float64(v)))
@@ -103,4 +111,20 @@ func absmaxBlockError(src []float32, rows, cols, hi int) float64 {
 		}
 	}
 	return e
+}
+
+func gqDType(t *testing.T, bits, group int) mcf.TensorDType {
+	t.Helper()
+	dt, err := mcf.GQDType(bits, group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dt
+}
+
+func gqEncoder(src []float32, rows, cols, bits, group int) func() ([]byte, error) {
+	return func() ([]byte, error) {
+		_, payload, err := mcf.EncodeGQTensor(src, rows, cols, bits, group)
+		return payload, err
+	}
 }

@@ -1,6 +1,6 @@
 # MCF quantization design: GSQ / RCO / SLQ outputs
 
-Status: **proposal** (no on-disk change yet). Nothing here alters `model-container-file.md`;
+Status: partly implemented (uq* in v1.1, gq* and compressed-tensors import in v1.2; see 2.0). Nothing here alters `model-container-file.md`;
 the spec only changes when a format addition is implemented, in the same commit, versioned per
 the Compatibility rule (readers reject unsupported major versions, may ignore unknown minors).
 
@@ -25,7 +25,34 @@ MCF already stores a per-tensor `TensorDType` in the fixed 40-byte `TensorIndexE
 quant registry (0x10–0x33: int*/q*/k*), a `QuantInfo` section (method metadata), and the
 `FlagTensorDataAligned64` 64-byte sub-region alignment rule. That maps onto the three methods as:
 
-### 2.1 GSQ → no format change (P0) — IMPLEMENTED
+### 2.0 Current path for GSQ / RCO output (v1.2) — IMPLEMENTED
+
+GSQ and RCO write safetensors checkpoints in the compressed-tensors "pack-quantized" format:
+symmetric integer codes with one scale per group of input columns, and RCO mixes code widths
+per tensor. GGUF is one optional deployment target of theirs, not a requirement.
+
+- **Format**: the `gq*` dtype family (v1.2, `model-container-file.md` "Family gq*") stores
+  b-bit codes (b = 2..8) over the full two's-complement range with a bf16 scale per group of
+  32, 64 or 128 columns. It holds GSQ's symmetric grids exactly.
+- **Import**: `mantle pack` detects `quantization_config.quant_method == "compressed-tensors"`
+  and transcodes every `<module>.weight_packed/_scale/_shape` triple into a `gq*` tensor named
+  `<module>.weight`, without re-quantizing (`pkg/mcf/compressed_tensors.go`). The code width
+  comes from the packed width and must be one the config declares, so RCO's mixed widths
+  import as they are. Source groups that are multiples of 128, 64 or 32 (including
+  per-channel scales) map onto the largest of those with the scale repeated. Asymmetric
+  (zero point), group act-order (`g_idx`), activation-quantized, dynamic and non-bf16-exact
+  scales are rejected explicitly. Verified on `nm-testing/Qwen3-0.6B-W4A16-G128`.
+- **Native**: `mantle quantize --method gqN[-G]` writes the same family from float weights.
+- **Runtime**: gq* expands into the int8 quant cache (group scale repeated per 32-block), so
+  the existing CPU and CUDA int8 kernels run it; with the cache disabled the CPU decodes rows.
+
+The sections below are the original proposal, kept for its reasoning; where they disagree
+with 2.0, 2.0 is current.
+
+### 2.1 GSQ → no format change (P0) — superseded by 2.0
+
+This only holds for GGUF Q8_0. GSQ's low-bit output (and every GGUF K-quant or i-quant) does
+not fit q*/k* exactly; see 2.0.
 
 GSQ payloads are indices into a uniform symmetric grid plus per-group scales — exactly the
 shape of MCF's existing `DTypeK2..K6` / `DTypeQ4/Q8` payloads (block 32, super-block 256, f16

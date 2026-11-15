@@ -79,7 +79,7 @@ while continuing to read the rest of the container.
 ## Header Flags
 
 - FlagTensorDataAligned64 (bit 0): indicates quantized tensor payloads follow the 64-byte internal sub-region alignment
-  rules defined in this spec. Files that contain DTypeQ* or DTypeK* tensors MUST set this flag.
+  rules defined in this spec. Files that contain DTypeQ*, DTypeK*, DTypeUQ* or DTypeGQ* tensors MUST set this flag.
 
 ## Quantization (v1.0)
 
@@ -108,11 +108,22 @@ These unique identifiers bind `TensorDType` (for fast dispatch) to the QuantInfo
 | 0x44 | DTypeUQ6 | UQ-Super (v1.1) | 6-bit indices + f16 codebook, block 32, super 256 | Non-uniform codebook weights. |
 | 0x45 | DTypeUQ7 | UQ-Super (v1.1) | 7-bit indices + f16 codebook, block 32, super 256 | Non-uniform codebook weights. |
 | 0x46 | DTypeUQ8 | UQ-Super (v1.1) | 8-bit indices + f16 codebook, block 32, super 256 | Non-uniform codebook weights. |
+| 0x50-0x56 | DTypeGQ (b=2..8, G=32) | Group (v1.2) | b-bit codes, bf16 scale per 32 columns | Symmetric group weights (GSQ, compressed-tensors). |
+| 0x60-0x66 | DTypeGQ (b=2..8, G=64) | Group (v1.2) | b-bit codes, bf16 scale per 64 columns | Symmetric group weights. |
+| 0x70-0x76 | DTypeGQ (b=2..8, G=128) | Group (v1.2) | b-bit codes, bf16 scale per 128 columns | Symmetric group weights. |
+
+Within each gq* range the ID is `base + (b - 2)`, so 0x52 is 4-bit codes with group 32 and 0x72 is 4-bit codes with
+group 128. Method names are `gq<b>-<G>`.
 
 Excluded methods: q2, q3, q6, k8.
 
 The `uq*` family (0x40-0x46) is introduced in **v1.1**. Per the Compatibility rule, v1.0 readers reject
 these `TensorDType` values when they must materialize those tensors; no v1.0 file changes meaning.
+uq5-uq8 are deprecated for writers: their per-super-block codebook costs 2^b f16 values per 256 weights (uq8 is
+24.5 bits per weight, more than bf16). Readers keep decoding them.
+
+The `gq*` family is introduced in **v1.2** (header minor version 2). Readers that predate it reject these
+`TensorDType` values when they must materialize those tensors; no earlier file changes meaning.
 
 ### 2) Domain Logic and Rules
 
@@ -123,7 +134,7 @@ QuantInfo records carry a domain flag that selects reconstruction logic:
 
 Constraints:
 
-- q* and k* are restricted to DomainWeights.
+- q*, k*, uq* and gq* are restricted to DomainWeights.
 - int* supports DomainWeights and DomainActivations.
 
 ### 3) QuantInfo Section Payload (v1)
@@ -207,13 +218,14 @@ Hierarchical quantization: super-block 256 containing sub-blocks of 32.
 ```
 [ Region 1: SuperScales ] (float16 array, Count = totalSuper)
 -> align64
-[ Region 2: SuperMins ] (float16 array, Count = totalSuper) present only if Domain=Activations
--> align64
-[ Region 3: SubScales ] (uint8 array, Count = totalBlocks)
+[ Region 2: SubScales ] (uint8 array, Count = totalBlocks)
   - each byte stores one 6-bit value in bits 0-5, top 2 bits zero
 -> align64
-[ Region 4: QuantData ] (packed)
+[ Region 3: QuantData ] (packed)
 ```
+
+k* is restricted to DomainWeights, so it has no minimum term. (Earlier revisions listed a SuperMins region for the
+activations domain, which k* cannot use; no writer ever produced it.)
 
 #### Family uq* (UQ-Super-Block, v1.1)
 
@@ -232,6 +244,28 @@ no sign bit and no zero point.
 
 Reconstruction: `w = BlockScale * Codebook[idx]` (codebook selected by the element's super-block).
 Files containing `DTypeUQ*` MUST set `FlagTensorDataAligned64`, like q*/k*.
+
+#### Family gq* (Group, v1.2)
+
+Symmetric scalar quantization with one scale per group of G columns (G = 32, 64 or 128) and b-bit codes
+(b = 2..8). It stores GSQ output and compressed-tensors "pack-quantized" symmetric checkpoints without
+re-quantizing.
+
+Let groupsPerRow = ceil(cols / G).
+
+```
+[ Region 1: GroupScales ] (bfloat16 array, Count = rows * groupsPerRow)
+-> align64
+[ Region 2: QuantData ] (packed; per row, blocksPerRow blocks of 32 codes, 4*b bytes each)
+```
+
+Codes are b-bit two's complement over the full range [-2^(b-1), 2^(b-1)-1], packed LSB first within each block of
+32 (same packing as k*). Codes past cols in a row's final block are zero.
+
+Reconstruction: `w = GroupScale[row, col / G] * code`.
+
+The QuantRecord for a gq* tensor has BlockSize = G and SuperSize = 0. Files containing `DTypeGQ*` MUST set
+`FlagTensorDataAligned64`.
 
 ### 5) Bit Packing
 
@@ -273,6 +307,8 @@ w = S_block * q_val
 
 For uq* (v1.1): `w = S_block * codebook_super[idx]`, where `codebook_super` is the f16 codebook of
 the element's super-block and `idx` is the unsigned b-bit index.
+
+For gq* (v1.2): `w = S_group * q_val`, where `S_group` is the bf16 scale of the element's group of G columns.
 
 Asymmetric activations (int*):
 

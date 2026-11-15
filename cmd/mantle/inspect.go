@@ -829,6 +829,9 @@ func dtypeName(dt mcf.TensorDType) string {
 	case mcf.DTypeK2:
 		return "k2"
 	default:
+		if name := mcf.GQName(dt); name != "" {
+			return name
+		}
 		return fmt.Sprintf("dtype_%d", dt)
 	}
 }
