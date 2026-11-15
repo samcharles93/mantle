@@ -59,7 +59,7 @@ func (gr *GraphRuntime) PrefillTokens(tokens []int) ([]float32, error) {
 		return nil, fmt.Errorf("cuda runtime is closed")
 	}
 	if !batchedPrefillEnabled() || gr.inst == nil || gr.ops == nil ||
-		gr.cudaRuntime.model == nil || !gr.batchedPrefillEligible(tokens) {
+		gr.model == nil || !gr.batchedPrefillEligible(tokens) {
 		return gr.cudaRuntime.PrefillTokens(tokens)
 	}
 
@@ -85,7 +85,7 @@ func (gr *GraphRuntime) PrefillTokensEmbeds(tokens []int, embeds [][]float32) ([
 		return gr.PrefillTokens(tokens)
 	}
 	if !batchedPrefillEnabled() || gr.inst == nil || gr.ops == nil ||
-		gr.cudaRuntime.model == nil || !gr.batchedPrefillEligible(tokens) {
+		gr.model == nil || !gr.batchedPrefillEligible(tokens) {
 		return gr.cudaRuntime.PrefillTokensEmbeds(tokens, embeds)
 	}
 	plan, err := gr.newBatchedPrefillPlanEmbeds(tokens, embeds)
@@ -100,7 +100,7 @@ func (gr *GraphRuntime) PrefillTokensEmbeds(tokens []int, embeds [][]float32) ([
 // unless every layer is a plain dense transformer block whose device kernels
 // the batched path can reproduce. It never mutates any state.
 func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
-	if gr == nil || gr.inst == nil || gr.ops == nil || gr.cudaRuntime == nil || gr.cudaRuntime.model == nil {
+	if gr == nil || gr.inst == nil || gr.ops == nil || gr.cudaRuntime == nil || gr.model == nil {
 		return false
 	}
 	if len(tokens) < 2 {

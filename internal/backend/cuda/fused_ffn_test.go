@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/samcharles93/mantle/internal/backend/core"
-	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/backend/cuda/native"
 	"github.com/samcharles93/mantle/internal/graph"
 )
@@ -84,7 +83,7 @@ func TestFusedFFNCUDA(t *testing.T) {
 	}
 	attention := core.NewMat(embDim, embDim)
 
-	layers := []instance.Layer{
+	layers := []core.Layer{
 		{
 			FfnUp:   &ffnUp,
 			FfnGate: &ffnGate,

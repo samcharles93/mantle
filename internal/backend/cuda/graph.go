@@ -201,10 +201,8 @@ func (gr *GraphRuntime) computeAttention(
 		return out, nil
 	}
 
-	if err := gr.computeAttentionFallback(ctx, layer, params, x, out); err != nil {
-		return nil, fmt.Errorf("attention fallback: %w", err)
-	}
-	return out, nil
+	// The fallback is not implemented, so this call always fails.
+	return nil, fmt.Errorf("attention fallback: %w", gr.computeAttentionFallback(ctx, layer, params, x, out))
 }
 
 func (gr *GraphRuntime) computeAttentionFallback(

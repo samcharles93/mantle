@@ -29,27 +29,27 @@ func BenchmarkQuantMatVecCachedBatch(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer qBuf.Free()
+	defer func() { _ = qBuf.Free() }()
 	sBuf, err := AllocDevice(int64(len(scales)) * 4)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer sBuf.Free()
+	defer func() { _ = sBuf.Free() }()
 	xBuf, err := AllocDevice(int64(len(x)) * 4)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer xBuf.Free()
+	defer func() { _ = xBuf.Free() }()
 	yBuf, err := AllocDevice(int64(len(y)) * 4)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer yBuf.Free()
+	defer func() { _ = yBuf.Free() }()
 	stream, err := NewStream()
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 	if err := MemcpyH2D(qBuf, unsafe.Pointer(&q[0]), int64(len(q))); err != nil {
 		b.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func BenchmarkQuantMatVecCachedBatchDp4a(b *testing.B) {
 	}
 	defer func() {
 		for _, buf := range allocs {
-			buf.Free()
+			_ = buf.Free()
 		}
 	}()
 	qBuf, sBuf, xBuf, yBuf := mk(int64(len(q))), mk(int64(len(scales))*4), mk(int64(len(x))*4), mk(int64(len(y))*4)
@@ -117,7 +117,7 @@ func BenchmarkQuantMatVecCachedBatchDp4a(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 	if err := MemcpyH2D(qBuf, unsafe.Pointer(&q[0]), int64(len(q))); err != nil {
 		b.Fatal(err)
 	}

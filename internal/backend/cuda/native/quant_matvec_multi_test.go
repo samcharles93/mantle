@@ -58,6 +58,7 @@ func makeQMVFixture(t testing.TB, rows, cols int) *qmvFixture {
 	if f.qBuf, err = AllocDevice(int64(len(f.q))); err != nil {
 		t.Fatalf("AllocDevice q: %v", err)
 	}
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
 	t.Cleanup(func() { _ = f.qBuf.Free() })
 	if f.sBuf, err = AllocDevice(int64(len(f.scales)) * 4); err != nil {
 		t.Fatalf("AllocDevice scales: %v", err)
@@ -79,7 +80,7 @@ func makeQMVFixture(t testing.TB, rows, cols int) *qmvFixture {
 	if f.stream, err = NewStream(); err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	t.Cleanup(func() { f.stream.Destroy() })
+	t.Cleanup(func() { _ = f.stream.Destroy() })
 	return f
 }
 
@@ -211,17 +212,17 @@ func TestQuantMatVecInt8MultiActBitExact(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AllocDevice gate: %v", err)
 		}
-		defer gateBuf.Free()
+		defer func() { _ = gateBuf.Free() }()
 		upBuf, err := AllocDevice(int64(cols) * 4)
 		if err != nil {
 			t.Fatalf("AllocDevice up: %v", err)
 		}
-		defer upBuf.Free()
+		defer func() { _ = upBuf.Free() }()
 		actBuf, err := AllocDevice(int64(cols) * 4)
 		if err != nil {
 			t.Fatalf("AllocDevice act: %v", err)
 		}
-		defer actBuf.Free()
+		defer func() { _ = actBuf.Free() }()
 		if err := MemcpyH2D(gateBuf, unsafe.Pointer(&gate[0]), int64(cols)*4); err != nil {
 			t.Fatalf("H2D gate: %v", err)
 		}

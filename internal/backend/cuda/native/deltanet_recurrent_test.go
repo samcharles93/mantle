@@ -264,7 +264,8 @@ func TestDeltaNetRecurrentF32InvalidDims(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice: %v", err)
 	}
-	defer buf.Free()
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	defer func() { _ = buf.Free() }()
 	if err := DeltaNetRecurrentF32(buf, buf, buf, buf, buf, buf, buf, buf, buf, 0.1, 0, 32, 4, 4, 1, Stream{}); err == nil {
 		t.Fatal("expected error for headKeyDim=0")
 	}

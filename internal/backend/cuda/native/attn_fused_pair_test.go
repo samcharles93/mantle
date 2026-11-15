@@ -20,7 +20,8 @@ func TestApplyRoPEPairF32BitExact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	defer func() { _ = stream.Destroy() }()
 
 	const (
 		nQ      = 16
@@ -58,22 +59,22 @@ func TestApplyRoPEPairF32BitExact(t *testing.T) {
 		return db, hb
 	}
 	qDev, qHB := alloc(qHost)
-	defer qDev.Free()
-	defer qHB.Free()
+	defer func() { _ = qDev.Free() }()
+	defer func() { _ = qHB.Free() }()
 	kDev, kHB := alloc(kHost)
-	defer kDev.Free()
-	defer kHB.Free()
+	defer func() { _ = kDev.Free() }()
+	defer func() { _ = kHB.Free() }()
 	ifDev, ifHB := alloc(ifHost)
-	defer ifDev.Free()
-	defer ifHB.Free()
+	defer func() { _ = ifDev.Free() }()
+	defer func() { _ = ifHB.Free() }()
 
 	// reference: two legacy launches on separate buffers
 	qRef, qRefHB := alloc(qHost)
-	defer qRef.Free()
-	defer qRefHB.Free()
+	defer func() { _ = qRef.Free() }()
+	defer func() { _ = qRefHB.Free() }()
 	kRef, kRefHB := alloc(kHost)
-	defer kRef.Free()
-	defer kRefHB.Free()
+	defer func() { _ = kRef.Free() }()
+	defer func() { _ = kRefHB.Free() }()
 	if err := ApplyRoPEInplaceF32(qRef, ifDev, pos, attnScale, headDim, half, nQ, stream); err != nil {
 		t.Fatalf("legacy rope Q: %v", err)
 	}
@@ -121,7 +122,7 @@ func TestStoreKVPairsBitExact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 
 	const (
 		cacheLen = 8
@@ -221,7 +222,7 @@ func TestRMSNormBatchedPairF32BitExact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 
 	const (
 		nQ      = 16
@@ -258,33 +259,33 @@ func TestRMSNormBatchedPairF32BitExact(t *testing.T) {
 		return db, hb
 	}
 	qDev, qHB := up(qHost)
-	defer qDev.Free()
-	defer qHB.Free()
+	defer func() { _ = qDev.Free() }()
+	defer func() { _ = qHB.Free() }()
 	kDev, kHB := up(kHost)
-	defer kDev.Free()
-	defer kHB.Free()
+	defer func() { _ = kDev.Free() }()
+	defer func() { _ = kHB.Free() }()
 	wQDev, wQHB := up(wQ)
-	defer wQDev.Free()
-	defer wQHB.Free()
+	defer func() { _ = wQDev.Free() }()
+	defer func() { _ = wQHB.Free() }()
 	wKDev, wKHB := up(wK)
-	defer wKDev.Free()
-	defer wKHB.Free()
+	defer func() { _ = wKDev.Free() }()
+	defer func() { _ = wKHB.Free() }()
 	qRef, qRefHB := up(qHost)
-	defer qRef.Free()
-	defer qRefHB.Free()
+	defer func() { _ = qRef.Free() }()
+	defer func() { _ = qRefHB.Free() }()
 	kRef, kRefHB := up(kHost)
-	defer kRef.Free()
-	defer kRefHB.Free()
+	defer func() { _ = kRef.Free() }()
+	defer func() { _ = kRefHB.Free() }()
 	qOut, qOutHB := up(make([]float32, len(qHost)))
-	defer qOut.Free()
-	defer qOutHB.Free()
+	defer func() { _ = qOut.Free() }()
+	defer func() { _ = qOutHB.Free() }()
 	kOut, kOutHB := up(make([]float32, len(kHost)))
-	defer kOut.Free()
-	defer kOutHB.Free()
+	defer func() { _ = kOut.Free() }()
+	defer func() { _ = kOutHB.Free() }()
 	qOutRef, _ := up(make([]float32, len(qHost)))
-	defer qOutRef.Free()
+	defer func() { _ = qOutRef.Free() }()
 	kOutRef, _ := up(make([]float32, len(kHost)))
-	defer kOutRef.Free()
+	defer func() { _ = kOutRef.Free() }()
 
 	RecordRMSNorm()
 	if err := RMSNormBatchedF32(qOutRef, qRef, wQDev, eps, headDim, nQ, stream); err != nil {
@@ -328,9 +329,9 @@ func requireDeviceBytesEqual(t *testing.T, a, b DeviceBuffer, label string, stre
 		t.Fatalf("%s: size mismatch %d vs %d", label, n, b.Nbytes())
 	}
 	ha, _ := allocPinnedF32(t, int(n)/4+1)
-	defer ha.Free()
+	defer func() { _ = ha.Free() }()
 	hb, _ := allocPinnedF32(t, int(n)/4+1)
-	defer hb.Free()
+	defer func() { _ = hb.Free() }()
 	if err := MemcpyD2HAsync(ha.Ptr(), a, n, stream); err != nil {
 		t.Fatalf("%s: D2H a: %v", label, err)
 	}
@@ -360,7 +361,7 @@ func TestRMSNormResidualF32BitExact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 
 	for _, n := range []int{2048, 100, 37} {
 		rng := rand.New(rand.NewSource(int64(n)))
@@ -387,18 +388,18 @@ func TestRMSNormResidualF32BitExact(t *testing.T) {
 			return db, hb
 		}
 		xDev, xHB := up(xHost)
-		defer xDev.Free()
-		defer xHB.Free()
+		defer func() { _ = xDev.Free() }()
+		defer func() { _ = xHB.Free() }()
 		wDev, wHB := up(wHost)
-		defer wDev.Free()
-		defer wHB.Free()
+		defer func() { _ = wDev.Free() }()
+		defer func() { _ = wHB.Free() }()
 
 		// reference: norm into tmp, then dst += tmp
 		tmpDev, _ := up(make([]float32, n))
-		defer tmpDev.Free()
+		defer func() { _ = tmpDev.Free() }()
 		refDev, refHB := up(outHost)
-		defer refDev.Free()
-		defer refHB.Free()
+		defer func() { _ = refDev.Free() }()
+		defer func() { _ = refHB.Free() }()
 		if err := RMSNormF32(tmpDev, xDev, wDev, eps, n, stream); err != nil {
 			t.Fatalf("RMSNormF32: %v", err)
 		}
@@ -407,8 +408,8 @@ func TestRMSNormResidualF32BitExact(t *testing.T) {
 		}
 		// fused
 		fusedDev, fusedHB := up(outHost)
-		defer fusedDev.Free()
-		defer fusedHB.Free()
+		defer func() { _ = fusedDev.Free() }()
+		defer func() { _ = fusedHB.Free() }()
 		if err := RMSNormResidualF32(fusedDev, xDev, wDev, eps, n, stream); err != nil {
 			t.Fatalf("RMSNormResidualF32: %v", err)
 		}

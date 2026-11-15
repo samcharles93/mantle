@@ -57,12 +57,13 @@ func TestMambaDtSoftplusClampF32(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewStream: %v", err)
 		}
-		defer stream.Destroy()
+		// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+		defer func() { _ = stream.Destroy() }()
 
 		dtBuf := mustAllocAndCopy(t, dt)
-		defer dtBuf.Free()
+		defer func() { _ = dtBuf.Free() }()
 		biasBuf := mustAllocAndCopy(t, bias)
-		defer biasBuf.Free()
+		defer func() { _ = biasBuf.Free() }()
 
 		if err := MambaDtSoftplusClampF32(dtBuf, biasBuf, n, tMin, tMax, tFloor, stream); err != nil {
 			t.Fatalf("MambaDtSoftplusClampF32: %v", err)
@@ -86,7 +87,7 @@ func TestMambaDtSoftplusClampF32(t *testing.T) {
 
 	t.Run("NilBuffer", func(t *testing.T) {
 		stream, _ := NewStream()
-		defer stream.Destroy()
+		defer func() { _ = stream.Destroy() }()
 		var nilBuf DeviceBuffer
 		if err := MambaDtSoftplusClampF32(nilBuf, nilBuf, 1, 0, 1, 0, stream); err == nil {
 			t.Fatal("expected error for nil buffers")
@@ -95,9 +96,9 @@ func TestMambaDtSoftplusClampF32(t *testing.T) {
 
 	t.Run("InvalidN", func(t *testing.T) {
 		stream, _ := NewStream()
-		defer stream.Destroy()
+		defer func() { _ = stream.Destroy() }()
 		buf, _ := AllocDevice(16)
-		defer buf.Free()
+		defer func() { _ = buf.Free() }()
 		if err := MambaDtSoftplusClampF32(buf, buf, 0, 0, 1, 0, stream); err == nil {
 			t.Fatal("expected error for n=0")
 		}
@@ -126,10 +127,10 @@ func TestScaleF32InPlace(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewStream: %v", err)
 		}
-		defer stream.Destroy()
+		defer func() { _ = stream.Destroy() }()
 
 		xBuf := mustAllocAndCopy(t, x)
-		defer xBuf.Free()
+		defer func() { _ = xBuf.Free() }()
 
 		if err := ScaleF32InPlace(xBuf, n, scale, stream); err != nil {
 			t.Fatalf("ScaleF32InPlace: %v", err)
@@ -152,10 +153,10 @@ func TestScaleF32InPlace(t *testing.T) {
 
 	t.Run("IdentityShortCircuit", func(t *testing.T) {
 		stream, _ := NewStream()
-		defer stream.Destroy()
+		defer func() { _ = stream.Destroy() }()
 		x := []float32{1, 2, 3}
 		buf := mustAllocAndCopy(t, x)
-		defer buf.Free()
+		defer func() { _ = buf.Free() }()
 		if err := ScaleF32InPlace(buf, len(x), 1.0, stream); err != nil {
 			t.Fatalf("ScaleF32InPlace(1.0): %v", err)
 		}
@@ -175,7 +176,7 @@ func TestScaleF32InPlace(t *testing.T) {
 
 	t.Run("NilBuffer", func(t *testing.T) {
 		stream, _ := NewStream()
-		defer stream.Destroy()
+		defer func() { _ = stream.Destroy() }()
 		var nilBuf DeviceBuffer
 		if err := ScaleF32InPlace(nilBuf, 1, 2.0, stream); err == nil {
 			t.Fatal("expected error for nil buffer")

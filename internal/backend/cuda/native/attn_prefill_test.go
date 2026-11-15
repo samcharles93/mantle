@@ -15,7 +15,8 @@ func uploadF32(tb testing.TB, host []float32) DeviceBuffer {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	tb.Cleanup(func() { buf.Free() })
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	tb.Cleanup(func() { _ = buf.Free() })
 	if err := MemcpyH2D(buf, unsafe.Pointer(&host[0]), int64(len(host))*4); err != nil {
 		tb.Fatal(err)
 	}
@@ -29,7 +30,7 @@ func allocZeroed(tb testing.TB, bytes int) DeviceBuffer {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	tb.Cleanup(func() { buf.Free() })
+	tb.Cleanup(func() { _ = buf.Free() })
 	if err := MemcpyH2D(buf, unsafe.Pointer(&host[0]), int64(bytes)); err != nil {
 		tb.Fatal(err)
 	}
@@ -74,7 +75,7 @@ func TestRoPERowsAndStoreRowsMatchPerRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 	invFreq := make([]float32, half)
 	for i := range invFreq {
 		invFreq[i] = float32(math.Pow(10000, -2*float64(i)/headDim))
@@ -149,7 +150,7 @@ func TestAttentionPrefillMatchesPerRow(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer stream.Destroy()
+			defer func() { _ = stream.Destroy() }()
 			kvStride := c.kvHeads * c.headDim
 			qDim := c.nHead * c.headDim
 			scale := float32(1 / math.Sqrt(float64(c.headDim)))
@@ -232,7 +233,7 @@ func BenchmarkAttentionPrefill(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 	kvStride := kvHeads * headDim
 	q := uploadF32(b, patternF32(n*nHead*headDim, 1, 1))
 	k := uploadF32(b, patternF32(n*kvStride, 2, 1))

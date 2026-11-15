@@ -155,7 +155,8 @@ func TestMambaSiluF32InPlaceInvalidN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice: %v", err)
 	}
-	defer buf.Free()
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	defer func() { _ = buf.Free() }()
 	if err := SiluF32InPlace(buf, 0, Stream{}); err == nil {
 		t.Fatal("expected error for n=0, got nil")
 	}

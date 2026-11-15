@@ -12,8 +12,6 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/samcharles93/mantle/internal/backend/core"
-	instance "github.com/samcharles93/mantle/internal/backend/core"
 	model "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/backend/cuda/native"
 	"github.com/samcharles93/mantle/pkg/mcf"
@@ -563,7 +561,7 @@ func (o *Ops) FusedRMSNormMatVec(out []float32, w *model.Mat, x, normWeight []fl
 
 // PreloadModelWeights uploads all model matrices and RMSNorm weights to device memory.
 // This removes lazy first-use uploads from the decode hot path.
-func (o *Ops) PreloadModelWeights(m *core.Instance) error {
+func (o *Ops) PreloadModelWeights(m *model.Instance) error {
 	if o == nil || m == nil {
 		return nil
 	}
@@ -972,7 +970,7 @@ func (o *Ops) ensureManagedMat(mat *model.Mat) error {
 	return nil
 }
 
-// BeginToken implements instance.DeviceStateOps.
+// BeginToken implements model.DeviceStateOps.
 func (o *Ops) BeginToken(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -990,9 +988,8 @@ func (o *Ops) BeginToken(x []float32) {
 	// Ensure persistent device buffer
 	bytes := int64(len(x)) * int64(unsafe.Sizeof(float32(0)))
 	if int(bytes) > o.xPersistBytes {
-		if err := o.xPersistDev.Free(); err != nil {
-			// ignore error; leak old buffer
-		}
+		// The old buffer is replaced below; a free failure here would only leak it.
+		_ = o.xPersistDev.Free()
 		buf, err := native.AllocDevice(bytes)
 		if err != nil {
 			panic(fmt.Errorf("cuda: failed to allocate persistent x buffer (%d bytes): %w", bytes, err))
@@ -1006,7 +1003,7 @@ func (o *Ops) BeginToken(x []float32) {
 	}
 }
 
-// EndToken implements instance.DeviceStateOps.
+// EndToken implements model.DeviceStateOps.
 func (o *Ops) EndToken(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -1045,7 +1042,7 @@ func (o *Ops) SetGreedyEndTokenSkipD2H() {
 	o.mu.Unlock()
 }
 
-// HostStateDirty implements instance.DeviceStateOps.
+// HostStateDirty implements model.DeviceStateOps.
 func (o *Ops) HostStateDirty(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -1061,7 +1058,7 @@ func (o *Ops) HostStateDirty(x []float32) {
 	o.xDevDirty = false
 }
 
-// SyncHostState implements instance.DeviceStateOps.
+// SyncHostState implements model.DeviceStateOps.
 func (o *Ops) SyncHostState(x []float32) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -1211,7 +1208,7 @@ func (o *Ops) DeviceScaleBF16InPlace(x []float32, scale float32) bool {
 	return true
 }
 
-// DeviceAdd implements instance.DeviceStateOps.
+// DeviceAdd implements model.DeviceStateOps.
 func (o *Ops) DeviceAdd(dst, src []float32) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -1294,7 +1291,7 @@ func (o *Ops) DeviceAdd(dst, src []float32) bool {
 	return true
 }
 
-// DeviceRMSNorm implements instance.DeviceStateOps.
+// DeviceRMSNorm implements model.DeviceStateOps.
 func (o *Ops) DeviceRMSNorm(dst, src, weight []float32, eps float32) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -1347,8 +1344,8 @@ func (o *Ops) DeviceRMSNorm(dst, src, weight []float32, eps float32) bool {
 	return false
 }
 
-// DeviceMatVec implements instance.DeviceStateOps.
-func (o *Ops) DeviceMatVec(dst []float32, w *instance.Mat, x []float32) bool {
+// DeviceMatVec implements model.DeviceStateOps.
+func (o *Ops) DeviceMatVec(dst []float32, w *model.Mat, x []float32) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if len(dst) < w.R {
@@ -1429,7 +1426,7 @@ func (o *Ops) DeviceMatVecNoCopy(w *model.Mat, x []float32) bool {
 	return true
 }
 
-// DeviceArgMaxLastResult implements instance.DeviceStateOps.
+// DeviceArgMaxLastResult implements model.DeviceStateOps.
 func (o *Ops) DeviceArgMaxLastResult() (idx int, ok bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -1446,7 +1443,7 @@ func (o *Ops) DeviceArgMaxLastResult() (idx int, ok bool) {
 	return val, true
 }
 
-// DeviceLogitSoftcap implements instance.DeviceStateOps.
+// DeviceLogitSoftcap implements model.DeviceStateOps.
 func (o *Ops) DeviceLogitSoftcap(data []float32, softcap float32) bool {
 	if softcap <= 0 {
 		return true
@@ -3082,7 +3079,8 @@ func (o *Ops) ensureConvKernel(kernel *model.Mat) (native.DeviceBuffer, error) {
 		return native.DeviceBuffer{}, err
 	}
 	if err := native.MemcpyH2D(buf, unsafe.Pointer(&kernel.Data[0]), bytes); err != nil {
-		buf.Free()
+		// The copy error is the failure worth reporting; a free failure here would only mask it.
+		_ = buf.Free()
 		return native.DeviceBuffer{}, err
 	}
 	o.convKernels[kernel] = buf
@@ -3096,7 +3094,8 @@ func (o *Ops) ensureConvState(layer *model.Layer, bytes int) (convDeviceState, e
 	}
 	// Free old if exists
 	if cs, ok := o.convStates[layer]; ok {
-		cs.buf.Free()
+		// The stale buffer is being dropped for a new allocation; a free failure cannot be acted on.
+		_ = cs.buf.Free()
 		delete(o.convStates, layer)
 	}
 	buf, err := native.AllocDevice(int64(bytes))
@@ -3116,7 +3115,8 @@ func (o *Ops) ensureMambaScratch(bytes int) (native.DeviceBuffer, error) {
 		return o.mambaScratchDev, nil
 	}
 	if o.mambaScratchBytes > 0 {
-		o.mambaScratchDev.Free()
+		// The stale scratch buffer is being replaced; a free failure cannot be acted on.
+		_ = o.mambaScratchDev.Free()
 		o.mambaScratchDev = native.DeviceBuffer{}
 		o.mambaScratchBytes = 0
 	}
@@ -3137,7 +3137,8 @@ func (o *Ops) ensureDeltaNetScratch(bytes int) (native.DeviceBuffer, error) {
 		return o.deltaNetScratchDev, nil
 	}
 	if o.deltaNetScratchBytes > 0 {
-		o.deltaNetScratchDev.Free()
+		// The stale scratch buffer is being replaced; a free failure cannot be acted on.
+		_ = o.deltaNetScratchDev.Free()
 		o.deltaNetScratchDev = native.DeviceBuffer{}
 		o.deltaNetScratchBytes = 0
 	}
@@ -3158,7 +3159,8 @@ func (o *Ops) ensureMoeScratch(bytes int) (native.DeviceBuffer, error) {
 		return o.moeScratchDev, nil
 	}
 	if o.moeScratchBytes > 0 {
-		o.moeScratchDev.Free()
+		// The stale scratch buffer is being replaced; a free failure cannot be acted on.
+		_ = o.moeScratchDev.Free()
 		o.moeScratchDev = native.DeviceBuffer{}
 		o.moeScratchBytes = 0
 	}
@@ -3171,7 +3173,7 @@ func (o *Ops) ensureMoeScratch(bytes int) (native.DeviceBuffer, error) {
 	return buf, nil
 }
 
-func (o *Ops) DeltaNetBlock(dl *model.DeltaNetLayer, x, out []float32, cfg core.DeltaNetConfig) bool {
+func (o *Ops) DeltaNetBlock(dl *model.DeltaNetLayer, x, out []float32, cfg model.DeltaNetConfig) bool {
 	if o == nil || dl == nil {
 		return false
 	}
@@ -3460,7 +3462,7 @@ func (o *Ops) DeltaNetBlock(dl *model.DeltaNetLayer, x, out []float32, cfg core.
 	return true
 }
 
-func (o *Ops) MoEBlock(ml *model.MoELayer, x, out []float32, cfg core.MoEConfig) bool {
+func (o *Ops) MoEBlock(ml *model.MoELayer, x, out []float32, cfg model.MoEConfig) bool {
 	if o == nil || ml == nil {
 		return false
 	}
@@ -3722,7 +3724,7 @@ func (o *Ops) MoEBlock(ml *model.MoELayer, x, out []float32, cfg core.MoEConfig)
 	return true
 }
 
-type MambaConfig = core.MambaConfig
+type MambaConfig = model.MambaConfig
 
 func (o *Ops) MambaBlock(ml *model.MambaLayer, x, out []float32, cfg MambaConfig) bool {
 	if o == nil || ml == nil {
@@ -4246,7 +4248,7 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []fl
 
 	if !cache.useQ8K {
 		for i := range kvStride {
-			o.kTmpU16[i] = instance.Float32ToFloat16(k[i])
+			o.kTmpU16[i] = model.Float32ToFloat16(k[i])
 		}
 	} else {
 		s := quantizeQ8(k, o.kTmpQ8[:kvStride])
@@ -4254,7 +4256,7 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []fl
 	}
 	if !cache.useQ8V {
 		for i := range kvStride {
-			o.vTmpU16[i] = instance.Float32ToFloat16(v[i])
+			o.vTmpU16[i] = model.Float32ToFloat16(v[i])
 		}
 	} else {
 		s := quantizeQ8(v, o.vTmpQ8[:kvStride])
@@ -4366,7 +4368,7 @@ func (o *Ops) AttentionInner(attnOut []float32, layer *model.Layer, q, k, v []fl
 	return true
 }
 
-func (o *Ops) AttentionInnerProjection(projOut []float32, layer, kvLayer *instance.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32) bool {
+func (o *Ops) AttentionInnerProjection(projOut []float32, layer, kvLayer *model.Layer, q, k, v []float32, pos, start, nHead, headDim, kvHeads, kvStride int, scale, epsilon, softcap float32) bool {
 	if !useAttentionInnerFastPath() {
 		return false
 	}
@@ -4447,7 +4449,7 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer, kvLayer *instan
 	if storeKV {
 		if !cache.useQ8K {
 			for i := range kvStride {
-				o.kTmpU16[i] = instance.Float32ToFloat16(k[i])
+				o.kTmpU16[i] = model.Float32ToFloat16(k[i])
 			}
 		} else {
 			s := quantizeQ8(k, o.kTmpQ8[:kvStride])
@@ -4455,7 +4457,7 @@ func (o *Ops) AttentionInnerProjection(projOut []float32, layer, kvLayer *instan
 		}
 		if !cache.useQ8V {
 			for i := range kvStride {
-				o.vTmpU16[i] = instance.Float32ToFloat16(v[i])
+				o.vTmpU16[i] = model.Float32ToFloat16(v[i])
 			}
 		} else {
 			s := quantizeQ8(v, o.vTmpQ8[:kvStride])
@@ -4809,12 +4811,6 @@ func (o *Ops) RMSNormBatched(dst, src, weight []float32, eps float32, headDim, n
 	return true
 }
 
-// rmsNormDevice computes RMSNorm on device buffers using a single custom kernel.
-// Requires o.mu locked, and buffers allocated.
-func (o *Ops) rmsNormDevice(srcDev native.DeviceBuffer, weightDev native.DeviceBuffer, dstDev native.DeviceBuffer, n int, eps float32) error {
-	return native.RMSNormF32(dstDev, srcDev, weightDev, eps, n, o.stream)
-}
-
 func (o *Ops) ApplyRoPE(x []float32, nHead, headDim, pos int, invFreq []float64, attentionFactor float32) {
 	if headDim%2 != 0 {
 		panic("headDim must be even for RoPE")
@@ -5005,11 +5001,11 @@ func (o *Ops) uploadQuantAsF16Device(w *model.Mat) (native.DeviceBuffer, error) 
 	if w == nil || w.Raw == nil || !mcf.DTypeRequiresAligned64(w.DType) {
 		return native.DeviceBuffer{}, fmt.Errorf("gpu dequant requires quantized raw matrix")
 	}
-	totalElems, ok := core.MulInt(w.R, w.C)
+	totalElems, ok := model.MulInt(w.R, w.C)
 	if !ok {
 		return native.DeviceBuffer{}, fmt.Errorf("quant matrix too large")
 	}
-	outBytes, ok := core.MulInt(totalElems, 2)
+	outBytes, ok := model.MulInt(totalElems, 2)
 	if !ok {
 		return native.DeviceBuffer{}, fmt.Errorf("quant matrix too large")
 	}
@@ -5030,8 +5026,9 @@ func (o *Ops) uploadQuantAsF16Device(w *model.Mat) (native.DeviceBuffer, error) 
 			_ = out.Free()
 			return native.DeviceBuffer{}, err
 		}
-		defer qBuf.Free()
-		defer sBuf.Free()
+		// Payload buffers are released on return; a free failure cannot be acted on.
+		defer func() { _ = qBuf.Free() }()
+		defer func() { _ = sBuf.Free() }()
 		if err := native.DequantizeQ4ToF16(qBuf, sBuf, out, w.R, v.blocksPerRow, w.C, o.stream); err != nil {
 			_ = out.Free()
 			return native.DeviceBuffer{}, err
@@ -5053,9 +5050,10 @@ func (o *Ops) uploadQuantAsF16Device(w *model.Mat) (native.DeviceBuffer, error) 
 			_ = out.Free()
 			return native.DeviceBuffer{}, err
 		}
-		defer qBuf.Free()
-		defer superBuf.Free()
-		defer subBuf.Free()
+		// Payload buffers are released on return; a free failure cannot be acted on.
+		defer func() { _ = qBuf.Free() }()
+		defer func() { _ = superBuf.Free() }()
+		defer func() { _ = subBuf.Free() }()
 		if err := native.DequantizeK4ToF16(qBuf, superBuf, subBuf, out, w.R, v.blocksPerRow, w.C, o.stream); err != nil {
 			_ = out.Free()
 			return native.DeviceBuffer{}, err
@@ -5395,15 +5393,15 @@ func parseQ4PayloadView(w *model.Mat) (q4PayloadView, error) {
 	if err != nil {
 		return q4PayloadView{}, err
 	}
-	scaleBytes, ok := core.MulInt(totalBlocks, 2)
+	scaleBytes, ok := model.MulInt(totalBlocks, 2)
 	if !ok {
 		return q4PayloadView{}, fmt.Errorf("q4 scale region too large")
 	}
-	dataOff, ok := core.Align64Int(scaleBytes)
+	dataOff, ok := model.Align64Int(scaleBytes)
 	if !ok {
 		return q4PayloadView{}, fmt.Errorf("q4 payload layout overflow")
 	}
-	dataBytes, ok := core.MulInt(totalBlocks, 16)
+	dataBytes, ok := model.MulInt(totalBlocks, 16)
 	if !ok {
 		return q4PayloadView{}, fmt.Errorf("q4 data region too large")
 	}
@@ -5423,28 +5421,28 @@ func parseK4PayloadView(w *model.Mat) (k4PayloadView, error) {
 		return k4PayloadView{}, err
 	}
 	superBlocksPerRow := (blocksPerRow + 7) / 8
-	superCount, ok := core.MulInt(w.R, superBlocksPerRow)
+	superCount, ok := model.MulInt(w.R, superBlocksPerRow)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 super scale region too large")
 	}
-	superBytes, ok := core.MulInt(superCount, 2)
+	superBytes, ok := model.MulInt(superCount, 2)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 super scale region too large")
 	}
-	subOff, ok := core.Align64Int(superBytes)
+	subOff, ok := model.Align64Int(superBytes)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 payload layout overflow")
 	}
 	subBytes := totalBlocks
-	dataOff, ok := core.AddInt(subOff, subBytes)
+	dataOff, ok := model.AddInt(subOff, subBytes)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 payload layout overflow")
 	}
-	dataOff, ok = core.Align64Int(dataOff)
+	dataOff, ok = model.Align64Int(dataOff)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 payload layout overflow")
 	}
-	dataBytes, ok := core.MulInt(totalBlocks, 16)
+	dataBytes, ok := model.MulInt(totalBlocks, 16)
 	if !ok {
 		return k4PayloadView{}, fmt.Errorf("k4 data region too large")
 	}
@@ -5635,7 +5633,7 @@ func quantBlocks(rows, cols int) (int, int, error) {
 		return 0, 0, fmt.Errorf("invalid quant matrix shape")
 	}
 	blocksPerRow := (cols + 31) / 32
-	totalBlocks, ok := core.MulInt(rows, blocksPerRow)
+	totalBlocks, ok := model.MulInt(rows, blocksPerRow)
 	if !ok {
 		return 0, 0, fmt.Errorf("quant matrix too large")
 	}
@@ -5907,7 +5905,7 @@ func (o *Ops) ensureAttnCache(layer *model.Layer, kvStride, cacheLen int) (devic
 		return deviceAttnCache{}, fmt.Errorf("kv stride must be a multiple of quant block size (%d)", mcf.QuantBlockSize)
 	}
 
-	totalElems, ok := core.MulInt(kvStride, cacheLen)
+	totalElems, ok := model.MulInt(kvStride, cacheLen)
 	if !ok {
 		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
 	}
@@ -5915,7 +5913,7 @@ func (o *Ops) ensureAttnCache(layer *model.Layer, kvStride, cacheLen int) (devic
 	useQ8K := layer.AttnCache.KQ8 != nil
 	useQ8V := layer.AttnCache.VQ8 != nil
 
-	totalF16Bytes, ok := core.MulInt(totalElems, 2)
+	totalF16Bytes, ok := model.MulInt(totalElems, 2)
 	if !ok {
 		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
 	}
@@ -5923,7 +5921,7 @@ func (o *Ops) ensureAttnCache(layer *model.Layer, kvStride, cacheLen int) (devic
 	totalQ8Bytes := totalElems
 
 	// Allocate enough scales for every block across entire cache len
-	scaleBytes, ok := core.MulInt(cacheLen*blocksPerStride, int(unsafe.Sizeof(float32(0))))
+	scaleBytes, ok := model.MulInt(cacheLen*blocksPerStride, int(unsafe.Sizeof(float32(0))))
 	if !ok {
 		return deviceAttnCache{}, fmt.Errorf("attention cache too large")
 	}

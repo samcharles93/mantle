@@ -75,22 +75,23 @@ func TestMambaDepthwiseConvFixed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice in: %v", err)
 	}
-	defer inDev.Free()
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	defer func() { _ = inDev.Free() }()
 	wDev, err := AllocDevice(int64(len(convW)) * fsize)
 	if err != nil {
 		t.Fatalf("AllocDevice convW: %v", err)
 	}
-	defer wDev.Free()
+	defer func() { _ = wDev.Free() }()
 	stDev, err := AllocDevice(int64(len(state)) * fsize)
 	if err != nil {
 		t.Fatalf("AllocDevice state: %v", err)
 	}
-	defer stDev.Free()
+	defer func() { _ = stDev.Free() }()
 	outDev, err := AllocDevice(int64(len(out)) * fsize)
 	if err != nil {
 		t.Fatalf("AllocDevice out: %v", err)
 	}
-	defer outDev.Free()
+	defer func() { _ = outDev.Free() }()
 
 	if err := MemcpyH2D(inDev, unsafe.Pointer(&in[0]), int64(len(in))*fsize); err != nil {
 		t.Fatalf("MemcpyH2D in: %v", err)
@@ -202,12 +203,12 @@ func TestMambaDepthwiseConvRandomized(t *testing.T) {
 			if err != nil {
 				t.Fatalf("AllocDevice in: %v", err)
 			}
-			defer inDev.Free()
+			defer func() { _ = inDev.Free() }()
 			wDev, err := AllocDevice(int64(len(convW)) * fsize)
 			if err != nil {
 				t.Fatalf("AllocDevice convW: %v", err)
 			}
-			defer wDev.Free()
+			defer func() { _ = wDev.Free() }()
 
 			var stDev DeviceBuffer
 			if len(state) > 0 {
@@ -215,13 +216,13 @@ func TestMambaDepthwiseConvRandomized(t *testing.T) {
 				if err != nil {
 					t.Fatalf("AllocDevice state: %v", err)
 				}
-				defer stDev.Free()
+				defer func() { _ = stDev.Free() }()
 			} else {
 				stDev, err = AllocDevice(fsize)
 				if err != nil {
 					t.Fatalf("AllocDevice state placeholder: %v", err)
 				}
-				defer stDev.Free()
+				defer func() { _ = stDev.Free() }()
 			}
 
 			var biasDev DeviceBuffer
@@ -230,14 +231,14 @@ func TestMambaDepthwiseConvRandomized(t *testing.T) {
 				if err != nil {
 					t.Fatalf("AllocDevice bias: %v", err)
 				}
-				defer biasDev.Free()
+				defer func() { _ = biasDev.Free() }()
 			}
 
 			outDev, err := AllocDevice(int64(tc.channels) * fsize)
 			if err != nil {
 				t.Fatalf("AllocDevice out: %v", err)
 			}
-			defer outDev.Free()
+			defer func() { _ = outDev.Free() }()
 
 			if err := MemcpyH2D(inDev, unsafe.Pointer(&in[0]), int64(len(in))*fsize); err != nil {
 				t.Fatalf("MemcpyH2D in: %v", err)

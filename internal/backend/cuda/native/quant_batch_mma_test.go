@@ -42,7 +42,7 @@ func newQuantBatchCase(tb testing.TB, rows, cols, n int) *quantBatchCase {
 		if err != nil {
 			tb.Fatal(err)
 		}
-		tb.Cleanup(func() { buf.Free() })
+		tb.Cleanup(func() { _ = buf.Free() })
 		return buf
 	}
 	c := &quantBatchCase{rows: rows, cols: cols, n: n}
@@ -52,7 +52,7 @@ func newQuantBatchCase(tb testing.TB, rows, cols, n int) *quantBatchCase {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	tb.Cleanup(func() { stream.Destroy() })
+	tb.Cleanup(func() { _ = stream.Destroy() })
 	c.stream = stream
 	for _, cp := range []struct {
 		dst   DeviceBuffer
@@ -76,7 +76,7 @@ func (c *quantBatchCase) run(tb testing.TB, mma bool) []float32 {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	defer y.Free()
+	defer func() { _ = y.Free() }()
 	bpr := c.cols / 32
 	if mma {
 		err = QuantMatVecCachedBatchMMA(c.q, c.scales, c.x, c.xq, c.xsc, y, c.rows, c.n, c.cols, bpr, c.stream)
@@ -127,7 +127,7 @@ func BenchmarkQuantBatchGEMM(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer y.Free()
+	defer func() { _ = y.Free() }()
 	bpr := cols / 32
 	for _, mode := range []struct {
 		name string
