@@ -32,6 +32,49 @@ type quantRows struct {
 
 var quantRowsPool = sync.Pool{New: func() any { return new(quantRows) }}
 
+// quantRowsTask is a range of activation rows to quantise on a pool worker.
+type quantRowsTask struct {
+	x      []float32
+	c      int
+	blocks int
+	q8     []int8
+	scales []float32
+	rs, re int
+}
+
+// quantizeRowsInto fills q8 and scales for n activation rows, spreading the rows
+// over the worker pool so the caller does not serialise the whole chunk before
+// the matmul dispatch. Falls back to the serial loop when a pool is
+// unavailable, and produces the same bytes either way: each row is quantised by
+// the same function with a private int16 scratch.
+func quantizeRowsInto(x []float32, n, c, blocks int, q8 []int8, q16 []int16, scales []float32) {
+	rowLen := blocks * 32
+	pool := getMatVecPool()
+	workers := 0
+	if pool != nil && pool.size > 1 && n > 1 {
+		workers = min(pool.size, n)
+	}
+	if workers < 2 {
+		for r := range n {
+			quantizeVecBlocksInto(x[r*c:(r+1)*c], blocks,
+				q8[r*rowLen:(r+1)*rowLen], q16, scales[r*blocks:(r+1)*blocks])
+		}
+		return
+	}
+	done := <-pool.doneSlots
+	for i := range workers {
+		rs := i * n / workers
+		re := (i + 1) * n / workers
+		pool.tasks <- matVecTask{qrows: &quantRowsTask{
+			x: x, c: c, blocks: blocks, q8: q8, scales: scales, rs: rs, re: re,
+		}, done: done}
+	}
+	for range workers {
+		<-done
+	}
+	pool.doneSlots <- done
+}
+
 func getQuantRows(x []float32, n, c int, pair bool) *quantRows {
 	qr := quantRowsPool.Get().(*quantRows)
 	blocks := (c + 31) / 32
@@ -39,10 +82,7 @@ func getQuantRows(x []float32, n, c int, pair bool) *quantRows {
 	qr.q8 = ensureInt8Slice(qr.q8, n*blocks*32)
 	qr.q16 = ensureInt16Slice(qr.q16, blocks*32)
 	qr.scales = ensureFloat32Slice(qr.scales, n*blocks)
-	for r := range n {
-		quantizeVecBlocksInto(x[r*c:(r+1)*c], blocks, qr.q8[r*blocks*32:(r+1)*blocks*32],
-			qr.q16, qr.scales[r*blocks:(r+1)*blocks])
-	}
+	quantizeRowsInto(x, n, c, blocks, qr.q8, qr.q16, qr.scales)
 	if pair {
 		qr.q8Pair = ensureInt8Slice(qr.q8Pair, n*blocks*32)
 		for blk := range n * blocks {
