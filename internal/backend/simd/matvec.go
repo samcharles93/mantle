@@ -23,9 +23,9 @@ type matVecTask struct {
 	// qj, when set, selects MatMatQuant: the worker claims weight-row
 	// tiles from the shared job until none remain.
 	qj *quantJob
-	// attn, when set, selects one attention row: the worker runs every head
-	// for that query position using its own scores buffer.
-	attn *AttnContext
+	// attn, when set, selects a head range of one attention row: the worker
+	// runs that range for the query position using its own scores buffer.
+	attn *attnTask
 	// qrows, when set, selects a range of activation rows to quantise for
 	// MatMatQuant, using the worker's own int16 scratch.
 	qrows *quantRowsTask
@@ -134,7 +134,7 @@ func newMatVecPool() *matVecPool {
 		go func(w *matVecWorker) {
 			for task := range w.tasks {
 				if task.attn != nil {
-					w.runAttnRow(task.attn)
+					w.runAttnHeads(task.attn)
 				} else if task.qrows != nil {
 					w.runQuantRows(task.qrows)
 				} else if task.qj != nil {
@@ -1075,18 +1075,24 @@ func matVecRangeF16(dst []float32, w *Mat, x []float32, rs, re int) {
 	matVecRangeF16Scalar(dst, w, x, rs, re)
 }
 
-// runAttnRow runs every head of one prefill query row. Each worker owns its
-// score buffer, so rows can attend concurrently without touching shared
-// scratch.
-func (w *matVecWorker) runAttnRow(ctx *AttnContext) {
-	winLen := ctx.Pos - ctx.Start + 1
-	if winLen < 1 {
+// attnTask is a head range of one prefill attention row.
+type attnTask struct {
+	ctx    *AttnContext
+	rs, re int
+}
+
+// runAttnHeads runs the task's head range for one query row. Each worker owns
+// its score buffer, so rows (or head ranges of one row) can attend
+// concurrently without touching shared scratch.
+func (w *matVecWorker) runAttnHeads(t *attnTask) {
+	winLen := t.ctx.Pos - t.ctx.Start + 1
+	if winLen < 1 || t.rs >= t.re {
 		return
 	}
 	if len(w.scores) < winLen {
 		w.scores = make([]float32, winLen)
 	}
-	RunAttnHeads(ctx, w.scores, 0, ctx.NHead)
+	RunAttnHeads(t.ctx, w.scores, t.rs, t.re)
 }
 
 // attendRows dispatches one batchPrefillChunk row per pool worker and waits
@@ -1104,7 +1110,8 @@ func attendRows(ctxs []AttnContext) bool {
 	}
 	done := <-pool.doneSlots
 	for i := range ctxs {
-		pool.tasks <- matVecTask{attn: &ctxs[i], done: done}
+		task := attnTask{ctx: &ctxs[i], re: ctxs[i].NHead}
+		pool.tasks <- matVecTask{attn: &task, done: done}
 	}
 	for range ctxs {
 		<-done
@@ -1127,4 +1134,37 @@ func (w *matVecWorker) runQuantRows(t *quantRowsTask) {
 		quantizeVecBlocksInto(t.x[r*t.c:(r+1)*t.c], t.blocks,
 			t.q8[r*rowLen:(r+1)*rowLen], qx16, t.scales[r*t.blocks:(r+1)*t.blocks])
 	}
+}
+
+// attendRowHeads runs one row's heads across the pool, reusing tasks as the
+// per-task storage so a row costs no allocation. It is for the path where rows
+// must stay in order because the KV ring wraps inside the chunk: stores and
+// attends are interleaved per row there, so the only parallelism left is across
+// the row's heads. It reports false when the caller should run the row itself.
+func attendRowHeads(ctx *AttnContext, tasks []attnTask) bool {
+	if ctx == nil || ctx.NHead < 2 {
+		return false
+	}
+	pool := getMatVecPool()
+	if pool == nil || pool.size < 2 {
+		return false
+	}
+	workers := min(pool.size, ctx.NHead)
+	if workers < 2 || len(tasks) < workers {
+		return false
+	}
+	done := <-pool.doneSlots
+	for i := range workers {
+		tasks[i] = attnTask{
+			ctx: ctx,
+			rs:  i * ctx.NHead / workers,
+			re:  (i + 1) * ctx.NHead / workers,
+		}
+		pool.tasks <- matVecTask{attn: &tasks[i], done: done}
+	}
+	for range workers {
+		<-done
+	}
+	pool.doneSlots <- done
+	return true
 }

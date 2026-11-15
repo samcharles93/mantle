@@ -118,21 +118,21 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 		}
 	}
 
-	attendRow := func(r int) {
-		ctx := attnCtxFor(r)
-		cache.EnsurePos(ctx.Pos % cacheLen)
-		RunAttnHeads(&ctx, m.Scratch.Scores, 0, nHead)
-	}
-
 	// Position t lives in cache slot t%cacheLen. Storing every row before
 	// attending is only equivalent to the sequential path while the batch does
 	// not wrap the ring: once startPos+n exceeds cacheLen, a later store
 	// overwrites a slot an earlier query still reads. When it wraps, interleave
 	// store and attend per row exactly as the sequential decode path does.
 	if p.startPos+n > cacheLen && !p.nonCausal {
+		// A later store overwrites a slot an earlier query still reads, so
+		// rows cannot overlap here. Spread each row's heads instead.
 		for r := range n {
 			storeRow(r)
-			attendRow(r)
+			ctx := attnCtxFor(r)
+			cache.EnsurePos(ctx.Pos % cacheLen)
+			if !attendRowHeads(&ctx, p.attnHeads) {
+				RunAttnHeads(&ctx, m.Scratch.Scores, 0, nHead)
+			}
 		}
 	} else {
 		for r := range n {
