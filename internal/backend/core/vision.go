@@ -68,7 +68,9 @@ func (c *VisionConfig) TokensPerImage(grid [3]int) int {
 
 // VisionEncoder runs the vision tower + projector over preprocessed image
 // patches and returns, per image, one projected embedding row per image
-// token (TokensPerImage rows of TextHiddenSize each).
+// token (TokensPerImage rows of TextHiddenSize each). Device backends run
+// the tower on the device and may fall back to the host implementation above
+// an explicit input-size threshold.
 type VisionEncoder interface {
 	Config() *VisionConfig
 	// Encode consumes pixelValues laid out as numPatches rows of PatchDim()

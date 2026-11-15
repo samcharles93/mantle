@@ -264,11 +264,16 @@ func (r *cudaRuntime) PrefillTokensEmbeds(tokens []int, embeds [][]float32) ([]f
 	return nil, fmt.Errorf("unreachable prefill state")
 }
 
-// VisionEncoder implements core.VisionEncoderProvider by delegating to the
-// wrapped model runtime when it carries a vision tower.
+// VisionEncoder implements core.VisionEncoderProvider. When the vision tower
+// was preloaded onto the device, this returns the device-side encoder (which
+// itself falls back to the host tower for oversized inputs); otherwise it
+// delegates to the wrapped model runtime's host encoder.
 func (r *cudaRuntime) VisionEncoder() core.VisionEncoder {
 	if r.model == nil {
 		return nil
+	}
+	if r.ops != nil && r.ops.vision != nil {
+		return r.ops.vision
 	}
 	if p, ok := r.model.(core.VisionEncoderProvider); ok {
 		return p.VisionEncoder()

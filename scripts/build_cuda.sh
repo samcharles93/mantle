@@ -106,6 +106,7 @@ KERNELS=(
 	moe_accumulate
 	quant_batch
 	attn_prefill
+	vision
 )
 
 echo "Detected compute capability: sm_${DETECTED_CAP}"
