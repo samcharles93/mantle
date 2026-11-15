@@ -29,6 +29,12 @@ type Loader struct {
 	UseGraph            bool
 	TilingConfig        simd.TilingConfig
 
+	// TextOnly loads the text decoder of a multimodal checkpoint and skips its
+	// declared vision/audio tower, so a checkpoint whose tower this build
+	// cannot construct still runs for text. Image and audio requests are
+	// rejected by the resulting engine.
+	TextOnly bool
+
 	// DSpark speculative decoding. DraftModelPath is a draft MCF; when set,
 	// the target captures the draft's target_layer_ids as hidden taps, the
 	// CPU backend is forced, and the returned engine speculates. DraftTokens
@@ -63,6 +69,7 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	opts := l.LoadOptions
 	// propagate UseGraph toggle from Loader to LoadModelOptions
 	opts.UseGraph = l.UseGraph
+	opts.TextOnly = l.TextOnly
 	if opts.HostCaps == nil {
 		if caps := hostcaps.FromContext(ctx); caps != nil {
 			opts.HostCaps = caps
@@ -196,6 +203,9 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 	if modelRuntime == nil {
 		return cleanup(fmt.Errorf("backend %q returned nil model runtime", runtime.Name()))
 	}
+	if opts.TextOnly {
+		logSkippedModalityTowers(log, cfgBytes)
+	}
 
 	var speculator *Speculator
 	if draftFile != nil {
@@ -265,6 +275,22 @@ func (l Loader) Load(ctx context.Context, modelPath string, maxContext int) (*Lo
 		GenerationDefaults: genDefaults,
 		Arch:               modelConfig.Arch,
 	}, nil
+}
+
+// logSkippedModalityTowers records which multimodal towers a text-only load
+// left unbuilt. The backend builds a tower for every declared vision_config /
+// audio_encoder_config, so each declaration is what TextOnly skipped.
+func logSkippedModalityTowers(log logger.Logger, cfgBytes []byte) {
+	cfg, err := model.LoadHFConfigBytes(cfgBytes)
+	if err != nil {
+		return
+	}
+	if vc := cfg.VisionConfig; vc != nil {
+		log.Info("text-only load: skipped vision tower", "model_type", vc.ModelType)
+	}
+	if ac := cfg.AudioEncoderConfig; ac != nil {
+		log.Info("text-only load: skipped audio tower", "model_type", ac.ModelType)
+	}
 }
 
 // loadDSparkSpeculator pairs a loaded CPU target with its DSpark draft MCF and

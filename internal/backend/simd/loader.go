@@ -755,40 +755,52 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 
 	// Multimodal models carry a vision tower + projector and/or an audio tower
 	// alongside the text decoder; load them when the config declares a
-	// vision_config / audio_encoder_config.
-	if cfg.VisionConfig != nil || cfg.AudioEncoderConfig != nil {
+	// vision_config / audio_encoder_config. A text-only load leaves both towers
+	// unbuilt so the checkpoint still runs for text.
+	if !opts.TextOnly && (cfg.VisionConfig != nil || cfg.AudioEncoderConfig != nil) {
 		proc, err := model.LoadProcessorConfigBytes(opts.ProcessorConfigJSON)
 		if err != nil {
 			return nil, err
 		}
-		if cfg.VisionConfig != nil {
-			vc, err := visionConfigFromHFConfig(cfg, proc)
-			if err != nil {
-				return nil, err
-			}
-			tower, err := loadVisionTower(src, cfg, vc)
-			if err != nil {
-				return nil, fmt.Errorf("vision tower: %w", err)
-			}
-			m.Vision = tower
-			modelCfg.Vision = vc
-		}
-		if cfg.AudioEncoderConfig != nil {
-			ac, err := audioConfigFromHFConfig(cfg, proc)
-			if err != nil {
-				return nil, err
-			}
-			if ac != nil {
-				tower, err := loadAudioTower(src, cfg, ac)
-				if err != nil {
-					return nil, fmt.Errorf("audio tower: %w", err)
-				}
-				m.Audio = tower
-				modelCfg.Audio = ac
-			}
+		if err := loadMultimodalTowers(m, cfg, src, proc); err != nil {
+			return nil, fmt.Errorf("%w; use --text-only to load this checkpoint for text generation", err)
 		}
 	}
 	return m, nil
+}
+
+// loadMultimodalTowers builds the vision and audio towers the hf config
+// declares. Every failure here stops the load: the runtime runs a multimodal
+// checkpoint only once its towers are in place, and a caller that wants text
+// out of a tower this build cannot construct passes TextOnly instead.
+func loadMultimodalTowers(m *Instance, cfg *model.HFConfig, src tensorSource, proc *model.ProcessorConfig) error {
+	if cfg.VisionConfig != nil {
+		vc, err := visionConfigFromHFConfig(cfg, proc)
+		if err != nil {
+			return err
+		}
+		tower, err := loadVisionTower(src, cfg, vc)
+		if err != nil {
+			return fmt.Errorf("vision tower: %w", err)
+		}
+		m.Vision = tower
+		m.Config.Vision = vc
+	}
+	if cfg.AudioEncoderConfig != nil {
+		ac, err := audioConfigFromHFConfig(cfg, proc)
+		if err != nil {
+			return err
+		}
+		if ac != nil {
+			tower, err := loadAudioTower(src, cfg, ac)
+			if err != nil {
+				return fmt.Errorf("audio tower: %w", err)
+			}
+			m.Audio = tower
+			m.Config.Audio = ac
+		}
+	}
+	return nil
 }
 
 func readTensorF32(src tensorSource, name string) ([]float32, []int, error) {
