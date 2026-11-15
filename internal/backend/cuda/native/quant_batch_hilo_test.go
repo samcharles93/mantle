@@ -16,7 +16,7 @@ func (c *quantBatchCase) runHilo(tb testing.TB) []float32 {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	defer y.Free()
+	defer func() { _ = y.Free() }()
 	bpr := c.cols / 32
 	if err := QuantMatVecCachedBatchMMAHilo(c.q, c.scales, c.x, c.xq, c.xsc, c.xq2, c.xsc2, y, c.rows, c.n, c.cols, bpr, c.stream); err != nil {
 		tb.Fatal(err)
@@ -37,12 +37,12 @@ func (c *quantBatchCase) hiloOracle(tb testing.TB) []float32 {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	defer y.Free()
+	defer func() { _ = y.Free() }()
 	xBuf, err := AllocDevice(int64(c.cols) * 4)
 	if err != nil {
 		tb.Fatal(err)
 	}
-	defer xBuf.Free()
+	defer func() { _ = xBuf.Free() }()
 	out := make([]float32, c.n*c.rows)
 	for tok := 0; tok < c.n; tok++ {
 		if err := MemcpyH2D(xBuf, unsafe.Pointer(&c.xh[tok*c.cols]), int64(c.cols)*4); err != nil {
@@ -122,7 +122,7 @@ func benchmarkQuantBatchMMA(b *testing.B, hilo bool) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer y.Free()
+	defer func() { _ = y.Free() }()
 	bpr := cols / 32
 	run := func() error {
 		if hilo {
