@@ -20,6 +20,7 @@ var (
 	logFormat         string
 	debug             bool
 	textOnly          bool
+	noQuantCache      bool
 )
 
 func commonModelFlags() []cli.Flag {
@@ -55,6 +56,13 @@ func commonModelFlags() []cli.Flag {
 			Value:       "auto",
 			Sources:     cli.EnvVars("MANTLE_BACKEND"),
 			Destination: &backend,
+		},
+		&cli.BoolFlag{
+			Name:        "no-quant-cache",
+			Category:    "Model Configuration",
+			Usage:       "decode q*/k* blocks on the fly instead of expanding every weight to int8 in RAM",
+			Sources:     cli.EnvVars("MANTLE_NO_QUANT_CACHE"),
+			Destination: &noQuantCache,
 		},
 	}
 }

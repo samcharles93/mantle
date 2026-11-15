@@ -81,6 +81,7 @@ func benchmarkCmd() *cli.Command {
 				Backend: backend,
 			}
 			loader.LoadOptions.GpuLayers = -1
+			loader.LoadOptions.NoQuantCache = noQuantCache
 			loadResult, err := loader.Load(ctx, modelPath, int(maxContext))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load model: %v", err), 1)

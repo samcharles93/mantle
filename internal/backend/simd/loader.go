@@ -66,6 +66,10 @@ func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int, opt
 		return nil, fmt.Errorf("mcf: audio tokenizer section: %w", err)
 	}
 	opts.AudioTokenizerConfigJSON = atConfig
+	if opts.NoQuantCache {
+		restore := SetQuantCacheBuildEnabledForLoad(false)
+		defer restore()
+	}
 	return loadModelFromSource(cfg, spec, mcfSource{mf: mcfFile}, maxContext, opts)
 }
 
