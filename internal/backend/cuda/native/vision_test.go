@@ -177,7 +177,7 @@ func mustAllocAndCopyInt32(t testing.TB, data []int32) DeviceBuffer {
 		t.Fatalf("AllocDevice: %v", err)
 	}
 	if err := MemcpyH2D(buf, unsafe.Pointer(&data[0]), int64(len(data)*4)); err != nil {
-		buf.Free()
+		_ = buf.Free()
 		t.Fatalf("MemcpyH2D: %v", err)
 	}
 	return buf
@@ -231,10 +231,10 @@ func TestVisionRoPEF32(t *testing.T) {
 		if d := maxAbsDiff(got, want); d > 1e-6 {
 			t.Fatalf("n=%d heads=%d hd=%d: max diff %g", n, heads, hd, d)
 		}
-		xBuf.Free()
-		cosBuf.Free()
-		sinBuf.Free()
-		stream.Destroy()
+		_ = xBuf.Free()
+		_ = cosBuf.Free()
+		_ = sinBuf.Free()
+		_ = stream.Destroy()
 	}
 }
 
@@ -311,13 +311,13 @@ func TestVisionAttnSegmentsF32(t *testing.T) {
 		if d := maxAbsDiff(got, want); d > 1e-5 {
 			t.Fatalf("segs=%v heads=%d kvHeads=%d hd=%d: max diff %g", tc.segs, heads, kvHeads, hd, d)
 		}
-		qBuf.Free()
-		kBuf.Free()
-		vBuf.Free()
-		outBuf.Free()
-		ssBuf.Free()
-		slBuf.Free()
-		stream.Destroy()
+		_ = qBuf.Free()
+		_ = kBuf.Free()
+		_ = vBuf.Free()
+		_ = outBuf.Free()
+		_ = ssBuf.Free()
+		_ = slBuf.Free()
+		_ = stream.Destroy()
 	}
 }
 
@@ -377,13 +377,13 @@ func TestVisionConv2dGatedF32(t *testing.T) {
 		if d := maxAbsDiff(got, want); d > 1e-5 {
 			t.Fatalf("frames=%v n=%d C=%d k=%d m=%d: max diff %g", tc.frames, n, C, k, m, d)
 		}
-		inBuf.Free()
-		wBuf.Free()
-		outBuf.Free()
-		fsBuf.Free()
-		fhBuf.Free()
-		fwBuf.Free()
-		stream.Destroy()
+		_ = inBuf.Free()
+		_ = wBuf.Free()
+		_ = outBuf.Free()
+		_ = fsBuf.Free()
+		_ = fhBuf.Free()
+		_ = fwBuf.Free()
+		_ = stream.Destroy()
 	}
 }
 
@@ -430,12 +430,12 @@ func TestLayerNormRowsF32(t *testing.T) {
 		if d := maxAbsDiff(got, want); d > 1e-6 {
 			t.Fatalf("withBias=%v: max diff %g", withBias, d)
 		}
-		xBuf.Free()
-		wBuf.Free()
+		_ = xBuf.Free()
+		_ = wBuf.Free()
 		if withBias {
-			bBuf.Free()
+			_ = bBuf.Free()
 		}
-		stream.Destroy()
+		_ = stream.Destroy()
 	}
 }
 
@@ -479,11 +479,11 @@ func TestGeluExactBiasF32(t *testing.T) {
 		if d := maxAbsDiff(got, want); d > 1e-6 {
 			t.Fatalf("withBias=%v: max diff %g", withBias, d)
 		}
-		xBuf.Free()
+		_ = xBuf.Free()
 		if withBias {
-			bBuf.Free()
+			_ = bBuf.Free()
 		}
-		stream.Destroy()
+		_ = stream.Destroy()
 	}
 }
 
@@ -518,9 +518,9 @@ func TestAddBiasRowsF32(t *testing.T) {
 	if d := maxAbsDiff(got, want); d > 1e-7 {
 		t.Fatalf("max diff %g", d)
 	}
-	xBuf.Free()
-	bBuf.Free()
-	stream.Destroy()
+	_ = xBuf.Free()
+	_ = bBuf.Free()
+	_ = stream.Destroy()
 }
 
 // ---------- benchmarks ----------
@@ -542,11 +542,11 @@ func BenchmarkVisionRoPEF32(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer xBuf.Free()
+	defer func() { _ = xBuf.Free() }()
 	cosBuf := mustAllocAndCopyBench(b, cosT)
-	defer cosBuf.Free()
+	defer func() { _ = cosBuf.Free() }()
 	sinBuf := mustAllocAndCopyBench(b, sinT)
-	defer sinBuf.Free()
+	defer func() { _ = sinBuf.Free() }()
 	if err := MemcpyH2D(xBuf, unsafe.Pointer(&x[0]), int64(len(x)*4)); err != nil {
 		b.Fatal(err)
 	}
@@ -554,7 +554,7 @@ func BenchmarkVisionRoPEF32(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 	if err := VisionRoPEF32(xBuf, cosBuf, sinBuf, n, heads, hd, stream); err != nil {
 		b.Fatal(err)
 	}
@@ -579,7 +579,7 @@ func mustAllocAndCopyBench(b *testing.B, data []float32) DeviceBuffer {
 		b.Fatalf("AllocDevice: %v", err)
 	}
 	if err := MemcpyH2D(buf, unsafe.Pointer(&data[0]), int64(len(data)*4)); err != nil {
-		buf.Free()
+		_ = buf.Free()
 		b.Fatalf("MemcpyH2D: %v", err)
 	}
 	return buf
@@ -602,25 +602,25 @@ func BenchmarkVisionAttnSegmentsF32(b *testing.B) {
 				v[i] = rng.Float32()*2 - 1
 			}
 			qBuf := mustAllocAndCopyBench(b, q)
-			defer qBuf.Free()
+			defer func() { _ = qBuf.Free() }()
 			kBuf := mustAllocAndCopyBench(b, k)
-			defer kBuf.Free()
+			defer func() { _ = kBuf.Free() }()
 			vBuf := mustAllocAndCopyBench(b, v)
-			defer vBuf.Free()
+			defer func() { _ = vBuf.Free() }()
 			outBuf, err := AllocDevice(int64(len(q) * 4))
 			if err != nil {
 				b.Fatal(err)
 			}
-			defer outBuf.Free()
+			defer func() { _ = outBuf.Free() }()
 			ssBuf := mustAllocAndCopyInt32Bench(b, []int32{0})
-			defer ssBuf.Free()
+			defer func() { _ = ssBuf.Free() }()
 			slBuf := mustAllocAndCopyInt32Bench(b, []int32{int32(L)})
-			defer slBuf.Free()
+			defer func() { _ = slBuf.Free() }()
 			stream, err := NewStream()
 			if err != nil {
 				b.Fatal(err)
 			}
-			defer stream.Destroy()
+			defer func() { _ = stream.Destroy() }()
 			launch := func() {
 				if err := VisionAttnSegmentsF32(qBuf, kBuf, vBuf, outBuf, ssBuf, slBuf, L, 1, heads, kvHeads, hd, scale, stream); err != nil {
 					b.Fatal(err)
@@ -648,7 +648,7 @@ func mustAllocAndCopyInt32Bench(b *testing.B, data []int32) DeviceBuffer {
 		b.Fatalf("AllocDevice: %v", err)
 	}
 	if err := MemcpyH2D(buf, unsafe.Pointer(&data[0]), int64(len(data)*4)); err != nil {
-		buf.Free()
+		_ = buf.Free()
 		b.Fatalf("MemcpyH2D: %v", err)
 	}
 	return buf
@@ -666,25 +666,25 @@ func BenchmarkVisionConv2dGatedF32(b *testing.B) {
 		convW[i] = rng.Float32()*0.1 - 0.05
 	}
 	inBuf := mustAllocAndCopyBench(b, in)
-	defer inBuf.Free()
+	defer func() { _ = inBuf.Free() }()
 	wBuf := mustAllocAndCopyBench(b, convW)
-	defer wBuf.Free()
+	defer func() { _ = wBuf.Free() }()
 	outBuf, err := AllocDevice(int64(n * C * 4))
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer outBuf.Free()
+	defer func() { _ = outBuf.Free() }()
 	fsBuf := mustAllocAndCopyInt32Bench(b, []int32{0})
-	defer fsBuf.Free()
+	defer func() { _ = fsBuf.Free() }()
 	fhBuf := mustAllocAndCopyInt32Bench(b, []int32{64})
-	defer fhBuf.Free()
+	defer func() { _ = fhBuf.Free() }()
 	fwBuf := mustAllocAndCopyInt32Bench(b, []int32{64})
-	defer fwBuf.Free()
+	defer func() { _ = fwBuf.Free() }()
 	stream, err := NewStream()
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 	launch := func() {
 		if err := VisionConv2dGatedF32(inBuf, wBuf, outBuf, fsBuf, fhBuf, fwBuf, 1, n, n, C, k, m, stream); err != nil {
 			b.Fatal(err)
@@ -719,16 +719,16 @@ func BenchmarkLayerNormRowsF32(b *testing.B) {
 		bias[i] = rng.Float32() * 0.1
 	}
 	xBuf := mustAllocAndCopyBench(b, x)
-	defer xBuf.Free()
+	defer func() { _ = xBuf.Free() }()
 	wBuf := mustAllocAndCopyBench(b, w)
-	defer wBuf.Free()
+	defer func() { _ = wBuf.Free() }()
 	bBuf := mustAllocAndCopyBench(b, bias)
-	defer bBuf.Free()
+	defer func() { _ = bBuf.Free() }()
 	stream, err := NewStream()
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 	launch := func() {
 		if err := LayerNormRowsF32(xBuf, xBuf, wBuf, bBuf, 1e-5, rows, cols, stream); err != nil {
 			b.Fatal(err)
@@ -759,14 +759,14 @@ func BenchmarkGeluExactBiasF32(b *testing.B) {
 		bias[i] = rng.Float32()*0.5 - 0.25
 	}
 	xBuf := mustAllocAndCopyBench(b, x)
-	defer xBuf.Free()
+	defer func() { _ = xBuf.Free() }()
 	bBuf := mustAllocAndCopyBench(b, bias)
-	defer bBuf.Free()
+	defer func() { _ = bBuf.Free() }()
 	stream, err := NewStream()
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 	launch := func() {
 		if err := GeluExactBiasF32(xBuf, bBuf, rows, cols, stream); err != nil {
 			b.Fatal(err)
@@ -797,14 +797,14 @@ func BenchmarkAddBiasRowsF32(b *testing.B) {
 		bias[i] = rng.Float32() * 0.1
 	}
 	xBuf := mustAllocAndCopyBench(b, x)
-	defer xBuf.Free()
+	defer func() { _ = xBuf.Free() }()
 	bBuf := mustAllocAndCopyBench(b, bias)
-	defer bBuf.Free()
+	defer func() { _ = bBuf.Free() }()
 	stream, err := NewStream()
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 	launch := func() {
 		if err := AddBiasRowsF32(xBuf, bBuf, rows, cols, stream); err != nil {
 			b.Fatal(err)
