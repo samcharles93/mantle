@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
@@ -16,7 +17,11 @@ const quantMaxBlocksPerRow = 256
 // quantises a single input vector (int8 values and one scale per 32-element
 // block), plus the scales of each row pair interleaved for the 2x2 kernel.
 type quantRows struct {
-	q8     []int8    // [n, blocks*32]
+	q8 []int8 // [n, blocks*32]
+	// q8Pair is q8 with each block in pair order (16 even elements, then 16
+	// odd), matching packed 4-bit weights decoded by decodePacked4Row. It is
+	// filled only for packed weights.
+	q8Pair []int8
 	q16    []int16   // one row of quantizeVecBlocksInto's widened output, unused
 	scales []float32 // [n, blocks]
 	// pairScales[(r/2)*blocks*4 + b*4 : +4] is {xs[r][b], xs[r+1][b],
@@ -27,7 +32,7 @@ type quantRows struct {
 
 var quantRowsPool = sync.Pool{New: func() any { return new(quantRows) }}
 
-func getQuantRows(x []float32, n, c int) *quantRows {
+func getQuantRows(x []float32, n, c int, pair bool) *quantRows {
 	qr := quantRowsPool.Get().(*quantRows)
 	blocks := (c + 31) / 32
 	qr.blocks = blocks
@@ -37,6 +42,17 @@ func getQuantRows(x []float32, n, c int) *quantRows {
 	for r := range n {
 		quantizeVecBlocksInto(x[r*c:(r+1)*c], blocks, qr.q8[r*blocks*32:(r+1)*blocks*32],
 			qr.q16, qr.scales[r*blocks:(r+1)*blocks])
+	}
+	if pair {
+		qr.q8Pair = ensureInt8Slice(qr.q8Pair, n*blocks*32)
+		for blk := range n * blocks {
+			src := qr.q8[blk*32 : blk*32+32]
+			dst := qr.q8Pair[blk*32 : blk*32+32]
+			for i := range 16 {
+				dst[i] = src[2*i]
+				dst[16+i] = src[2*i+1]
+			}
+		}
 	}
 	pairs := n / 2
 	qr.pairScales = ensureFloat32Slice(qr.pairScales, pairs*blocks*4)
@@ -54,13 +70,25 @@ func getQuantRows(x []float32, n, c int) *quantRows {
 func putQuantRows(qr *quantRows) { quantRowsPool.Put(qr) }
 
 // useBatchQuant reports whether dst = x * wᵀ for n activation rows can run
-// through MatMatQuant. It needs the int8 cache matVecRangeQuantCached uses on
-// AVX2 hosts and the shape that path's fused-row kernel takes, so the two
-// produce identical bits.
+// through MatMatQuant. It needs, on an AVX2 host, either the int8 cache
+// matVecRangeQuantCached uses or a packed 4-bit payload (which
+// matVecRangePacked4 matches bit for bit), and the shape the fused-row
+// kernel takes, so batched and per-row products produce identical bits.
 func useBatchQuant(w *Mat, n int) bool {
-	return n >= 1 && cpu.HasAVX2 && w.Raw != nil && mcf.DTypeRequiresAligned64(w.DType) &&
-		!mcf.IsUQDType(w.DType) && w.Quant != nil && w.Quant.ValidFor(w) &&
-		w.C%32 == 0 && w.Quant.BlocksPerRow <= quantMaxBlocksPerRow
+	if n < 1 || !cpu.HasAVX2 || w.Raw == nil || !mcf.DTypeRequiresAligned64(w.DType) ||
+		mcf.IsUQDType(w.DType) || w.C%32 != 0 {
+		return false
+	}
+	if w.Quant != nil && w.Quant.ValidFor(w) {
+		return w.Quant.BlocksPerRow <= quantMaxBlocksPerRow
+	}
+	return isPacked4DType(w.DType) && w.C/32 <= quantMaxBlocksPerRow
+}
+
+// batchWeightsPacked reports whether MatMatQuant reads w from its packed
+// payload rather than the int8 cache.
+func batchWeightsPacked(w *Mat) bool {
+	return (w.Quant == nil || !w.Quant.ValidFor(w)) && isPacked4DType(w.DType)
 }
 
 // MatMatQuant computes dst[r*w.R+i] = dot(w row i, x[r*w.C:(r+1)*w.C]) for
@@ -76,13 +104,13 @@ func MatMatQuant(dst []float32, w *Mat, x []float32, n int) {
 		return
 	}
 	if !useBatchQuant(w, n) {
-		panic("matmat: MatMatQuant needs a cached int8 quant weight on an AVX2 host")
+		panic("matmat: MatMatQuant needs a cached int8 or packed 4-bit quant weight on an AVX2 host")
 	}
 	if len(dst) < n*w.R || len(x) < n*w.C {
 		panic("matmat shape mismatch")
 	}
 
-	qr := getQuantRows(x, n, w.C)
+	qr := getQuantRows(x, n, w.C, batchWeightsPacked(w))
 	defer putQuantRows(qr)
 
 	job := &quantJob{dst: dst, w: w, qr: qr, n: n, tile: quantTileRows}
@@ -130,44 +158,85 @@ func (j *quantJob) run(worker *matVecWorker) {
 }
 
 // quantKernelScratch is the per-worker state of matMatRangeQuant: the block
-// scales of the current weight row pair, interleaved for quantDot2x2.
+// scales of the current weight row pair, interleaved for quantDot2x2, and for
+// packed weights the decoded row pair and its block scales.
 type quantKernelScratch struct {
 	wPairs []float32 // [blocks, 4]: {s0[b], s0[b], s1[b], s1[b]}
+	rows   []int8    // [2, blocks*32] decoded packed rows, pair order
+	scales []float32 // [2, blocks] their block scales
 }
 
 // matMatRangeQuant computes output columns [rs,re) for all n activation rows.
 // worker, when non-nil, supplies the scratch buffers.
 func matMatRangeQuant(dst []float32, w *Mat, qr *quantRows, n, rs, re int, worker *matVecWorker) {
-	qc := w.Quant
-	bpr := qc.BlocksPerRow
+	bpr := w.C / 32
 	c := bpr * 32
+	packed := batchWeightsPacked(w)
+	ensure := func(s *quantKernelScratch) {
+		s.wPairs = ensureFloat32Slice(s.wPairs, 4*bpr)
+		if packed {
+			s.rows = ensureInt8Slice(s.rows, 2*c)
+			s.scales = ensureFloat32Slice(s.scales, 2*bpr)
+		}
+	}
 	var scratch *quantKernelScratch
 	if worker != nil {
 		worker.mu.Lock()
 		scratch = &worker.quant
-		scratch.wPairs = ensureFloat32Slice(scratch.wPairs, 4*bpr)
+		ensure(scratch)
 		worker.mu.Unlock()
 	} else {
-		scratch = &quantKernelScratch{wPairs: make([]float32, 4*bpr)}
+		scratch = &quantKernelScratch{}
+		ensure(scratch)
 	}
 	wPairs := scratch.wPairs[:4*bpr]
 	ld := w.R
 
+	// rowsAt returns weight rows i and i+1 (or just i when two is false) with
+	// their block scales, from the int8 cache or decoded from the packed
+	// payload into scratch.
+	act := qr.q8
+	var layout instance.QuantLayout
+	if packed {
+		var err error
+		if layout, err = instance.QuantLayoutForMat(w.R, w.C, w.DType, len(w.Raw)); err != nil {
+			panic(err)
+		}
+		act = qr.q8Pair
+	}
+	rowsAt := func(i int, two bool) (w0, w1 []int8, s0, s1 []float32) {
+		if !packed {
+			qc := w.Quant
+			w0, s0 = qc.Q[i*c:(i+1)*c], qc.Scales[i*bpr:(i+1)*bpr]
+			if two {
+				w1, s1 = qc.Q[(i+1)*c:(i+2)*c], qc.Scales[(i+1)*bpr:(i+2)*bpr]
+			}
+			return
+		}
+		data := w.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
+		w0, s0 = scratch.rows[:c], scratch.scales[:bpr]
+		decodePacked4Row(w0, data[i*bpr*16:(i+1)*bpr*16], bpr)
+		packed4RowScales(s0, layout, w.Raw, i)
+		if two {
+			w1, s1 = scratch.rows[c:2*c], scratch.scales[bpr:2*bpr]
+			decodePacked4Row(w1, data[(i+1)*bpr*16:(i+2)*bpr*16], bpr)
+			packed4RowScales(s1, layout, w.Raw, i+1)
+		}
+		return
+	}
+
 	i := rs
 	for ; i+1 < re; i += 2 {
-		w0 := qc.Q[i*c : (i+1)*c]
-		w1 := qc.Q[(i+1)*c : (i+2)*c]
-		s0 := qc.Scales[i*bpr : (i+1)*bpr]
-		s1 := qc.Scales[(i+1)*bpr : (i+2)*bpr]
+		w0, w1, s0, s1 := rowsAt(i, true)
 		for b := range bpr {
 			wPairs[4*b], wPairs[4*b+1], wPairs[4*b+2], wPairs[4*b+3] = s0[b], s0[b], s1[b], s1[b]
 		}
 		r := 0
 		for ; r+3 < n; r += 4 {
-			x0 := qr.q8[r*c : (r+1)*c]
-			x1 := qr.q8[(r+1)*c : (r+2)*c]
-			x2 := qr.q8[(r+2)*c : (r+3)*c]
-			x3 := qr.q8[(r+3)*c : (r+4)*c]
+			x0 := act[r*c : (r+1)*c]
+			x1 := act[(r+1)*c : (r+2)*c]
+			x2 := act[(r+2)*c : (r+3)*c]
+			x3 := act[(r+3)*c : (r+4)*c]
 			xPairs01 := qr.pairScales[(r/2)*bpr*4 : (r/2+1)*bpr*4]
 			xPairs23 := qr.pairScales[(r/2+1)*bpr*4 : (r/2+2)*bpr*4]
 			var out01, out23 [4]float32
@@ -180,8 +249,8 @@ func matMatRangeQuant(dst []float32, w *Mat, qr *quantRows, n, rs, re int, worke
 			dst[(r+2)*ld+i+1], dst[(r+3)*ld+i+1] = out23[2], out23[3]
 		}
 		if r+1 < n {
-			x0 := qr.q8[r*c : (r+1)*c]
-			x1 := qr.q8[(r+1)*c : (r+2)*c]
+			x0 := act[r*c : (r+1)*c]
+			x1 := act[(r+1)*c : (r+2)*c]
 			xPairs := qr.pairScales[(r/2)*bpr*4 : (r/2+1)*bpr*4]
 			var out [4]float32
 			quantDot2x2(w0, w1, x0, x1, wPairs, xPairs).StoreArray(&out)
@@ -190,15 +259,14 @@ func matMatRangeQuant(dst []float32, w *Mat, qr *quantRows, n, rs, re int, worke
 			r += 2
 		}
 		if r < n {
-			dst[r*ld+i] = quantDotRow(w0, s0, qr, r)
-			dst[r*ld+i+1] = quantDotRow(w1, s1, qr, r)
+			dst[r*ld+i] = quantDotRow(w0, s0, act, qr, r)
+			dst[r*ld+i+1] = quantDotRow(w1, s1, act, qr, r)
 		}
 	}
 	if i < re {
-		w0 := qc.Q[i*c : (i+1)*c]
-		s0 := qc.Scales[i*bpr : (i+1)*bpr]
+		w0, _, s0, _ := rowsAt(i, false)
 		for r := range n {
-			dst[r*ld+i] = quantDotRow(w0, s0, qr, r)
+			dst[r*ld+i] = quantDotRow(w0, s0, act, qr, r)
 		}
 	}
 }
@@ -206,10 +274,10 @@ func matMatRangeQuant(dst []float32, w *Mat, qr *quantRows, n, rs, re int, worke
 // quantDotRow is the single-output form of quantDot2x2: weight row wrow with
 // block scales ws against activation row r, in the scalar order of
 // matVecRangeQuantCached.
-func quantDotRow(wrow []int8, ws []float32, qr *quantRows, r int) float32 {
+func quantDotRow(wrow []int8, ws []float32, act []int8, qr *quantRows, r int) float32 {
 	bpr := len(ws)
 	c := bpr * 32
-	x := qr.q8[r*c : (r+1)*c]
+	x := act[r*c : (r+1)*c]
 	xs := qr.scales[r*bpr : (r+1)*bpr]
 	ones := archsimd.BroadcastInt16x16(1)
 	var sum float32

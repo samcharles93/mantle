@@ -1,7 +1,6 @@
 package simd
 
 import (
-	"math"
 	"math/rand/v2"
 	"testing"
 
@@ -89,8 +88,8 @@ func TestDotBlocksPacked4MatchesScalar(t *testing.T) {
 }
 
 // TestMatVecPacked4MatchesCached checks the packed kernel against the int8
-// quant-cache kernel, which sees the same weights and the same quantized
-// activations, so the results must agree to float rounding.
+// quant-cache kernel on the same weights and activations: the results must be
+// bit-identical, so switching between the two never changes output.
 func TestMatVecPacked4MatchesCached(t *testing.T) {
 	const rows, cols = 48, 330 // cols not a multiple of 32
 	x := make([]float32, cols)
@@ -114,7 +113,7 @@ func TestMatVecPacked4MatchesCached(t *testing.T) {
 		ReleaseQuantVec(qx)
 
 		for r := range rows {
-			if d := math.Abs(float64(packed[r] - cached[r])); d > 1e-5*(1+math.Abs(float64(cached[r]))) {
+			if packed[r] != cached[r] {
 				t.Fatalf("%#x row %d: packed %v, cached %v", dt, r, packed[r], cached[r])
 			}
 		}

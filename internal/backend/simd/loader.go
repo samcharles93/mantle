@@ -1018,7 +1018,7 @@ func loadMat(src tensorSource, name string) (*core.Mat, error) {
 				return nil, fmt.Errorf("%s: quant payload size mismatch", name)
 			}
 			m := core.Mat{R: r, C: c, Stride: c, DType: payload.DType, Raw: payload.Raw}
-			if quantCacheBuildEnabledForLoad() {
+			if quantCacheWantedForLoad(payload.DType) {
 				cache, err := BuildQuantCache(&m)
 				if err != nil {
 					return nil, fmt.Errorf("%s: quant cache: %w", name, err)

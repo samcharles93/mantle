@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/samcharles93/mantle/internal/mcfstore"
+	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
 func TestCPULoadModelNoQuantCache(t *testing.T) {
@@ -24,5 +25,23 @@ func TestCPULoadModelNoQuantCache(t *testing.T) {
 		if !quantCacheBuildEnabledForLoad() {
 			t.Fatalf("NoQuantCache=%v: cache build left disabled after load", noCache)
 		}
+	}
+}
+
+func TestQuantCacheWantedForLoad(t *testing.T) {
+	gq4, _ := mcf.GQDType(4, 128)
+	gq3, _ := mcf.GQDType(3, 64)
+	for dt, want := range map[mcf.TensorDType]bool{
+		mcf.DTypeQ4: false, mcf.DTypeK4: false, gq4: false,
+		mcf.DTypeQ8: true, mcf.DTypeK6: true, mcf.DTypeK3: true, mcf.DTypeK2: true, gq3: true,
+	} {
+		if got := quantCacheWantedForLoad(dt); got != want {
+			t.Errorf("%#x: cache wanted = %v, want %v", dt, got, want)
+		}
+	}
+	restore := SetQuantCacheBuildEnabledForLoad(false)
+	defer restore()
+	if quantCacheWantedForLoad(mcf.DTypeQ8) {
+		t.Error("q8 cache wanted with cache building disabled")
 	}
 }

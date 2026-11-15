@@ -128,3 +128,53 @@ func gqEncoder(src []float32, rows, cols, bits, group int) func() ([]byte, error
 		return payload, err
 	}
 }
+
+// TestFloat16ToFloat32Subnormals pins subnormal decoding: quant scales below
+// f16's normal range (6.1e-5) are stored as subnormals and must not decode
+// to zero, or every weight in that block reads as zero on the CPU.
+func TestFloat16ToFloat32Subnormals(t *testing.T) {
+	for _, tc := range []struct {
+		bits uint16
+		want float32
+	}{
+		{0x0001, float32(math.Ldexp(1, -24))},    // smallest subnormal
+		{0x03FF, float32(math.Ldexp(1023, -24))}, // largest subnormal
+		{0x8200, -float32(math.Ldexp(512, -24))}, // negative subnormal
+		{0x0400, float32(math.Ldexp(1, -14))},    // smallest normal
+		{0x3C00, 1},                              // one
+		{0x0000, 0},
+	} {
+		if got := Float16ToFloat32(tc.bits); got != tc.want {
+			t.Errorf("Float16ToFloat32(%#04x) = %g, want %g", tc.bits, got, tc.want)
+		}
+	}
+}
+
+// TestQuantCacheKeepsSubnormalScales encodes a row of tiny weights whose k4
+// super-scale is an f16 subnormal and requires the CPU decode to keep it.
+func TestQuantCacheKeepsSubnormalScales(t *testing.T) {
+	const rows, cols = 2, 256
+	src := make([]float32, rows*cols)
+	for i := range src {
+		src[i] = float32((i%7)-3) * 1e-5
+	}
+	raw, err := mcf.EncodeKTensor(src, rows, cols, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := uint16(raw[0]) | uint16(raw[1])<<8; s&0x7C00 != 0 {
+		t.Fatalf("fixture super-scale %#04x is not subnormal", s)
+	}
+	m := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: raw}
+	row := make([]float32, cols)
+	m.RowTo(row, 0)
+	var nonzero int
+	for _, v := range row {
+		if v != 0 {
+			nonzero++
+		}
+	}
+	if nonzero == 0 {
+		t.Fatal("row with a subnormal super-scale decoded to all zeros")
+	}
+}

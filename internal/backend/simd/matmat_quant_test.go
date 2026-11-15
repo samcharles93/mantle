@@ -131,3 +131,77 @@ func BenchmarkMatMatQuant(b *testing.B) {
 		}
 	})
 }
+
+// TestMatMatQuantPackedMatchesMatVec runs the batched kernel on packed 4-bit
+// weights (no int8 cache) and requires every output to equal both the per-row
+// packed MatVec and the batched kernel on the cached copy, bit for bit.
+func TestMatMatQuantPackedMatchesMatVec(t *testing.T) {
+	if !cpu.HasAVX2 {
+		t.Skip("MatMatQuant needs AVX2")
+	}
+	dts := packed4DTypes(t)
+	for _, dt := range dts {
+		for _, n := range []int{1, 3, 6, 33} {
+			const rows, cols = 67, 768
+			t.Run(fmt.Sprintf("%#x_n%d", dt, n), func(t *testing.T) {
+				w := packed4Mat(t, dt, rows, cols)
+				if !useBatchQuant(&w, n) || !batchWeightsPacked(&w) {
+					t.Fatalf("packed %#x weight not taken by the batched kernel", dt)
+				}
+				x := quantTestActivations(n, cols)
+				got := make([]float32, n*rows)
+				MatMatQuant(got, &w, x, n)
+
+				cached := w
+				qc, err := instance.BuildQuantCache(&cached)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cached.Quant = qc
+				gotCached := make([]float32, n*rows)
+				MatMatQuant(gotCached, &cached, x, n)
+
+				want := make([]float32, rows)
+				for r := range n {
+					MatVec(want, &w, x[r*cols:(r+1)*cols])
+					for i, v := range want {
+						if g := got[r*rows+i]; g != v {
+							t.Fatalf("row %d col %d: packed MatMatQuant = %v, MatVec = %v", r, i, g, v)
+						}
+						if g := gotCached[r*rows+i]; g != v {
+							t.Fatalf("row %d col %d: cached MatMatQuant = %v, packed MatVec = %v", r, i, g, v)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkMatMatQuantK4 compares the batched kernel on packed k4 weights
+// with the same kernel on the int8 cache, at a prefill-sized chunk.
+func BenchmarkMatMatQuantK4(b *testing.B) {
+	if !cpu.HasAVX2 {
+		b.Skip("needs AVX2")
+	}
+	const rows, cols, n = 2048, 2048, 64
+	w := packed4Mat(b, mcf.DTypeK4, rows, cols)
+	x := quantTestActivations(n, cols)
+	dst := make([]float32, n*rows)
+	b.Run("packed", func(b *testing.B) {
+		for b.Loop() {
+			MatMatQuant(dst, &w, x, n)
+		}
+	})
+	cached := w
+	qc, err := instance.BuildQuantCache(&cached)
+	if err != nil {
+		b.Fatal(err)
+	}
+	cached.Quant = qc
+	b.Run("cached", func(b *testing.B) {
+		for b.Loop() {
+			MatMatQuant(dst, &cached, x, n)
+		}
+	})
+}
