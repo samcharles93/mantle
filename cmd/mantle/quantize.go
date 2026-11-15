@@ -14,7 +14,6 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	core "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/logger"
 	"github.com/samcharles93/mantle/internal/mcfstore"
 	"github.com/samcharles93/mantle/pkg/mcf"
@@ -50,6 +49,11 @@ func quantizeCmd() *cli.Command {
 			&cli.Float64Flag{
 				Name:  "max-clip",
 				Usage: "Optional override for MaxClip (applies to all tensors)",
+			},
+			&cli.StringFlag{
+				Name:  "recipe",
+				Usage: "Per-tensor method choice: uniform (every tensor gets --method) or mixed (output head, and v_proj/down_proj in the first and last eighth of layers and every third layer between, get k6 for k2-k4 or q8 for q4)",
+				Value: recipeUniform,
 			},
 			&cli.StringFlag{
 				Name:  "assignments",
@@ -95,6 +99,14 @@ func quantizeCmd() *cli.Command {
 				return errors.New("quantize: input and output paths must differ")
 			}
 
+			recipe, err := parseRecipe(cmd.String("recipe"))
+			if err != nil {
+				return fmt.Errorf("quantize: %w", err)
+			}
+			if recipe != recipeUniform && cmd.IsSet("assignments") {
+				return errors.New("quantize: --recipe and --assignments are mutually exclusive")
+			}
+
 			var assignments *quantAssignments
 			if cmd.IsSet("assignments") {
 				a, err := loadQuantAssignments(cmd.String("assignments"))
@@ -122,6 +134,7 @@ func quantizeCmd() *cli.Command {
 				Input:       inPath,
 				Output:      outPath,
 				Method:      method,
+				Recipe:      recipe,
 				Assignments: assignments,
 				BudgetBytes: budget,
 				MinClip:     minClip,
@@ -139,6 +152,7 @@ type quantizeOptions struct {
 	Input       string
 	Output      string
 	Method      quantMethod
+	Recipe      string
 	Assignments *quantAssignments
 	BudgetBytes *uint64
 	MinClip     *float32
@@ -395,6 +409,12 @@ func runQuantize(opts quantizeOptions) error {
 	}
 	sort.Strings(names)
 
+	var recipePlan map[string]quantMethod
+	if opts.Recipe == recipeMixed {
+		recipePlan = planMixedRecipe(names, opts.Method)
+		opts.Logger.Info("mixed recipe", "upgraded_tensors", len(recipePlan))
+	}
+
 	td, err := w.BeginSection(mcf.SectionTensorData, quantTensorDataVersion)
 	if err != nil {
 		return err
@@ -429,6 +449,9 @@ func runQuantize(opts quantizeOptions) error {
 		method := opts.Method
 		if opts.Assignments != nil {
 			method = opts.Assignments.methodFor(name)
+		}
+		if up, ok := recipePlan[name]; ok {
+			method = up
 		}
 
 		if shouldQuant {
@@ -568,14 +591,18 @@ func quantizeTensor(name string, src []float32, rows, cols int, method quantMeth
 		maxAbs := maxAbs(minVal, maxVal)
 		minClip = -maxAbs
 		maxClip = maxAbs
+	} else {
+		for i, v := range src {
+			src[i] = clamp(v, minClip, maxClip)
+		}
 	}
 
 	switch method.Family {
 	case "q":
-		payload, err := quantizeQ(src, rows, cols, method.Bits, minClip, maxClip)
+		payload, err := mcf.EncodeQTensor(src, rows, cols, method.Bits)
 		return payload, minClip, maxClip, err
 	case "k":
-		payload, err := quantizeK(src, rows, cols, method.Bits, minClip, maxClip)
+		payload, err := mcf.EncodeKTensor(src, rows, cols, method.Bits)
 		return payload, minClip, maxClip, err
 	case "u":
 		dt, payload, err := mcf.EncodeUQTensor(src, rows, cols, method.Bits, codebooks)
@@ -589,320 +616,6 @@ func quantizeTensor(name string, src []float32, rows, cols int, method quantMeth
 	default:
 		return nil, 0, 0, errors.New("unsupported quantization family")
 	}
-}
-
-func quantizeQ(src []float32, rows, cols, bits int, minClip, maxClip float32) ([]byte, error) {
-	if bits != 4 && bits != 8 {
-		return nil, errors.New("unsupported q* bit-width")
-	}
-	blockSize := 32
-	blocksPerRow := (cols + blockSize - 1) / blockSize
-	blockCount := rows * blocksPerRow
-
-	scales := make([]uint16, blockCount)
-	blockBytes := (blockSize * bits) / 8
-	dataBytes := blockCount * blockBytes
-	data := make([]byte, dataBytes)
-
-	qMax := int32((1 << (bits - 1)) - 1)
-
-	if bits == 8 {
-		for r := range rows {
-			rowBase := r * cols
-			rowLimit := rowBase + cols
-			for b := range blocksPerRow {
-				blockIdx := r*blocksPerRow + b
-				base := rowBase + b*blockSize
-				maxAbs := float32(0)
-				for i := range blockSize {
-					idx := base + i
-					v := float32(0)
-					if idx < rowLimit {
-						v = clamp(src[idx], minClip, maxClip)
-					}
-					if av := float32(math.Abs(float64(v))); av > maxAbs {
-						maxAbs = av
-					}
-				}
-				scale := float32(0)
-				if maxAbs > 0 {
-					scale = maxAbs / float32(qMax)
-				}
-				scales[blockIdx] = core.Float32ToFloat16(scale)
-				inv := float32(0)
-				if scale != 0 {
-					inv = float32(1.0) / scale
-				}
-				dataOff := blockIdx * blockBytes
-				for i := range blockSize {
-					idx := base + i
-					v := float32(0)
-					if idx < rowLimit {
-						v = clamp(src[idx], minClip, maxClip)
-					}
-					q := int32(0)
-					if scale != 0 {
-						q = int32(math.Round(float64(v * inv)))
-						if q > qMax {
-							q = qMax
-						} else if q < -qMax {
-							q = -qMax
-						}
-					}
-					data[dataOff+i] = byte(int8(q))
-				}
-			}
-		}
-	} else {
-		for r := range rows {
-			rowBase := r * cols
-			rowLimit := rowBase + cols
-			for b := range blocksPerRow {
-				blockIdx := r*blocksPerRow + b
-				base := rowBase + b*blockSize
-				maxAbs := float32(0)
-				for i := range blockSize {
-					idx := base + i
-					v := float32(0)
-					if idx < rowLimit {
-						v = clamp(src[idx], minClip, maxClip)
-					}
-					if av := float32(math.Abs(float64(v))); av > maxAbs {
-						maxAbs = av
-					}
-				}
-				scale := float32(0)
-				if maxAbs > 0 {
-					scale = maxAbs / float32(qMax)
-				}
-				scales[blockIdx] = core.Float32ToFloat16(scale)
-				inv := float32(0)
-				if scale != 0 {
-					inv = float32(1.0) / scale
-				}
-				dataOff := blockIdx * blockBytes
-				for i := 0; i < blockSize; i += 2 {
-					idx0 := base + i
-					idx1 := base + i + 1
-					q0 := int32(0)
-					q1 := int32(0)
-					if scale != 0 {
-						if idx0 < rowLimit {
-							v0 := clamp(src[idx0], minClip, maxClip)
-							q0 = int32(math.Round(float64(v0 * inv)))
-						}
-						if idx1 < rowLimit {
-							v1 := clamp(src[idx1], minClip, maxClip)
-							q1 = int32(math.Round(float64(v1 * inv)))
-						}
-						if q0 > qMax {
-							q0 = qMax
-						} else if q0 < -qMax {
-							q0 = -qMax
-						}
-						if q1 > qMax {
-							q1 = qMax
-						} else if q1 < -qMax {
-							q1 = -qMax
-						}
-					}
-					u0 := uint8(int8(q0)) & 0x0F
-					u1 := uint8(int8(q1)) & 0x0F
-					data[dataOff+(i/2)] = u0 | (u1 << 4)
-				}
-			}
-		}
-	}
-
-	payload := make([]byte, 0, alignedLen(len(scales)*2)+len(data))
-	payload = appendF16Slice(payload, scales)
-	payload = alignPayload(payload, 64)
-	payload = append(payload, data...)
-	return payload, nil
-}
-
-func quantizeK(src []float32, rows, cols, bits int, minClip, maxClip float32) ([]byte, error) {
-	if bits != 2 && bits != 3 && bits != 4 && bits != 6 {
-		return nil, errors.New("unsupported k* bit-width")
-	}
-	blockSize := 32
-	superBlocks := 8
-	blocksPerRow := (cols + blockSize - 1) / blockSize
-	superBlocksPerRow := (blocksPerRow + superBlocks - 1) / superBlocks
-	blockCount := rows * blocksPerRow
-	superCount := rows * superBlocksPerRow
-
-	superScales := make([]uint16, superCount)
-	subScales := make([]byte, blockCount)
-
-	blockBytes := (blockSize * bits) / 8
-	dataBytes := blockCount * blockBytes
-	packer := newBitPacker(blockCount * blockSize * bits)
-	qMax := int32((1 << (bits - 1)) - 1)
-
-	for r := range rows {
-		rowBase := r * cols
-		rowLimit := rowBase + cols
-
-		for s := range superBlocksPerRow {
-			var blockScales [8]float32
-			maxScale := float32(0)
-
-			for b := range superBlocks {
-				block := s*superBlocks + b
-				if block >= blocksPerRow {
-					blockScales[b] = 0
-					continue
-				}
-				maxAbs := float32(0)
-				base := rowBase + block*blockSize
-				for i := range blockSize {
-					idx := base + i
-					v := float32(0)
-					if idx < rowLimit {
-						v = clamp(src[idx], minClip, maxClip)
-					}
-					if av := float32(math.Abs(float64(v))); av > maxAbs {
-						maxAbs = av
-					}
-				}
-				if maxAbs == 0 {
-					blockScales[b] = 0
-					continue
-				}
-				blockScales[b] = maxAbs / float32(qMax)
-				if blockScales[b] > maxScale {
-					maxScale = blockScales[b]
-				}
-			}
-
-			superScale := maxScale
-			superIdx := r*superBlocksPerRow + s
-			superScales[superIdx] = core.Float32ToFloat16(superScale)
-
-			for b := range superBlocks {
-				block := s*superBlocks + b
-				if block >= blocksPerRow {
-					continue
-				}
-				blockIdx := r*blocksPerRow + block
-				u6 := uint8(0)
-				if blockScales[b] > 0 && superScale > 0 {
-					ratio := blockScales[b] / superScale
-					u := int(math.Round(float64(ratio * 32.0)))
-					if u < 1 {
-						u = 1
-					} else if u > 63 {
-						u = 63
-					}
-					u6 = uint8(u)
-				}
-				subScales[blockIdx] = u6 & 0x3F
-
-				var scale float32
-				if u6 > 0 && superScale > 0 {
-					scale = superScale * (float32(u6) / 32.0)
-				}
-				inv := float32(0)
-				if scale != 0 {
-					inv = 1 / scale
-				}
-
-				base := rowBase + block*blockSize
-				for i := range blockSize {
-					idx := base + i
-					v := float32(0)
-					if idx < rowLimit {
-						v = clamp(src[idx], minClip, maxClip)
-					}
-					q := int32(0)
-					if scale != 0 {
-						q = int32(math.Round(float64(v * inv)))
-						if q > qMax {
-							q = qMax
-						} else if q < -qMax {
-							q = -qMax
-						}
-					}
-					packer.write(signedToBits(q, bits), bits)
-				}
-			}
-		}
-	}
-
-	data := packer.bytes()
-	if len(data) != dataBytes {
-		return nil, errors.New("quantize: packed data size mismatch")
-	}
-
-	payload := make([]byte, 0, alignedLen(len(superScales)*2)+alignedLen(len(subScales))+len(data))
-	payload = appendF16Slice(payload, superScales)
-	payload = alignPayload(payload, 64)
-	payload = append(payload, subScales...)
-	payload = alignPayload(payload, 64)
-	payload = append(payload, data...)
-	return payload, nil
-}
-
-type bitPacker struct {
-	buf    []byte
-	bitPos int
-}
-
-func newBitPacker(totalBits int) *bitPacker {
-	return &bitPacker{buf: make([]byte, (totalBits+7)/8)}
-}
-
-func (p *bitPacker) write(v uint8, bits int) {
-	for i := range bits {
-		if (v>>uint(i))&1 == 1 {
-			byteIdx := p.bitPos / 8
-			bitIdx := uint(p.bitPos % 8)
-			p.buf[byteIdx] |= 1 << bitIdx
-		}
-		p.bitPos++
-	}
-}
-
-func (p *bitPacker) bytes() []byte {
-	return p.buf
-}
-
-func signedToBits(v int32, bits int) uint8 {
-	mask := uint8((1 << bits) - 1)
-	return uint8(int8(v)) & mask
-}
-
-func alignPayload(buf []byte, align int) []byte {
-	if align <= 1 {
-		return buf
-	}
-	rem := len(buf) % align
-	if rem == 0 {
-		return buf
-	}
-	pad := align - rem
-	return append(buf, make([]byte, pad)...)
-}
-
-func alignedLen(n int) int {
-	if n <= 0 {
-		return 0
-	}
-	return (n + 63) & ^63
-}
-
-func appendF16Slice(buf []byte, src []uint16) []byte {
-	if len(src) == 0 {
-		return buf
-	}
-	needed := len(src) * 2
-	out := make([]byte, needed)
-	for i, v := range src {
-		out[i*2] = byte(v)
-		out[i*2+1] = byte(v >> 8)
-	}
-	return append(buf, out...)
 }
 
 func minMaxFinite(src []float32) (float32, float32, error) {

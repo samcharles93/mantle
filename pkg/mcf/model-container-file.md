@@ -250,8 +250,11 @@ Packing by bit width:
 - k6 (6-bit): tight stream, 4 items in 3 bytes (24 bits total).
 - uq* (b-bit): tight stream, unsigned, LSB first (e.g. uq4: 2 indices per byte, item0 = low nibble).
 
-For symmetric weights (q* and k*), quantized values are signed integers within the bit width. The most-negative code is
-unused to keep Z=0 (for example, 4-bit uses [-7, 7]). uq* indices are unsigned codebook indices, not signed values.
+For symmetric weights (q* and k*), quantized values are two's-complement signed integers within the bit width, and Z is
+always 0. Readers MUST decode the full range, including the most-negative code (for example, 4-bit codes span [-8, 7]).
+Writers may use the most-negative code for widths below 8 bits; 8-bit writers keep codes in [-127, 127]. Block scales in
+q* may be negative. Files written before this clarification never used the most-negative code, so they decode unchanged.
+uq* indices are unsigned codebook indices, not signed values.
 
 ### 6) Reconstruction Formulas
 
