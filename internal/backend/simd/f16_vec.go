@@ -10,6 +10,7 @@ import (
 // emulated, so callers build them once outside their loops.
 type f16Consts struct {
 	expMant, exp, sign, bias, zero archsimd.Uint32x8
+	subScale                       archsimd.Float32x8 // 2^-24, one subnormal ulp
 }
 
 func newF16Consts() f16Consts {
@@ -19,12 +20,14 @@ func newF16Consts() f16Consts {
 		sign:    archsimd.BroadcastUint32x8(0x8000),
 		bias:    archsimd.BroadcastUint32x8(112 << 23), // (127-15) << 23
 		zero:    archsimd.BroadcastUint32x8(0),
+		// 2^-24 = 0x33800000.
+		subScale: archsimd.BroadcastUint32x8(0x33800000).BitsToFloat32(),
 	}
 }
 
 // f16x8ToF32 widens eight IEEE half values to float32 with exactly the results
 // of instance.Float16ToFloat32: normals rebias, Inf and NaN keep their
-// mantissa, and subnormals flush to a signed zero.
+// mantissa, and subnormals become mantissa * 2^-24 (exact in float32).
 func f16x8ToF32(h *[8]uint16, k *f16Consts) archsimd.Float32x8 {
 	u := archsimd.LoadUint16x8Array(h).ExtendToUint32()
 	em := u.And(k.expMant)
@@ -32,7 +35,11 @@ func f16x8ToF32(h *[8]uint16, k *f16Consts) archsimd.Float32x8 {
 	bits := em.ShiftAllLeft(13).Add(k.bias)
 	// Inf/NaN: a second bias moves exponent 31+112 up to 255.
 	bits = bits.Add(k.bias.Masked(e.Equal(k.exp)))
-	bits = bits.Masked(e.NotEqual(k.zero))
+	isSub := e.Equal(k.zero)
+	// With a zero exponent em is the bare mantissa, so the subnormal value is
+	// em * 2^-24; zero stays zero.
+	sub := em.BitsToInt32().ConvertToFloat32().Mul(k.subScale).ToBits()
+	bits = bits.Masked(e.NotEqual(k.zero)).Or(sub.Masked(isSub))
 	return bits.Or(u.And(k.sign).ShiftAllLeft(16)).BitsToFloat32()
 }
 

@@ -38,27 +38,8 @@ func Float32ToFloat16(f float32) uint16 {
 	return (sign << 15) | (outExp << 10) | outMant
 }
 
-// Float16ToFloat32 converts a float16 (uint16) to float32.
+// Float16ToFloat32 converts a float16 (uint16) to float32, including
+// subnormals. It reads the precomputed fp16 table.
 func Float16ToFloat32(h uint16) float32 {
-	sign := uint32((h >> 15) & 0x1)
-	exp := uint32((h >> 10) & 0x1F)
-	mant := uint32(h & 0x3FF)
-
-	var outBits uint32
-
-	switch exp {
-	case 0:
-		outBits = sign << 31
-	case 0x1F:
-		outBits = (sign << 31) | 0x7F800000
-		if mant != 0 {
-			outBits |= (mant << 13)
-		}
-	default:
-		newExp := exp + 127 - 15
-		newMant := mant << 13
-		outBits = (sign << 31) | (newExp << 23) | newMant
-	}
-
-	return math.Float32frombits(outBits)
+	return fp16Table[h]
 }
