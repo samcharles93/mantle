@@ -14,7 +14,9 @@ type quantBatchCase struct {
 	q             DeviceBuffer
 	scales        DeviceBuffer
 	x             DeviceBuffer
+	xh            []float32
 	xq, xsc       DeviceBuffer
+	xq2, xsc2     DeviceBuffer
 	stream        Stream
 }
 
@@ -45,9 +47,10 @@ func newQuantBatchCase(tb testing.TB, rows, cols, n int) *quantBatchCase {
 		tb.Cleanup(func() { buf.Free() })
 		return buf
 	}
-	c := &quantBatchCase{rows: rows, cols: cols, n: n}
+	c := &quantBatchCase{rows: rows, cols: cols, n: n, xh: x}
 	c.q, c.scales, c.x = mk(int64(len(q))), mk(int64(len(scales))*4), mk(int64(len(x))*4)
 	c.xq, c.xsc = mk(int64(n*cols)), mk(int64(n*bpr)*4)
+	c.xq2, c.xsc2 = mk(int64(n*cols)), mk(int64(n*bpr)*4)
 	stream, err := NewStream()
 	if err != nil {
 		tb.Fatal(err)

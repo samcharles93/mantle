@@ -831,7 +831,10 @@ func TestBatchedPrefillParityQ8(t *testing.T) {
 	d := defaultBatchTestDims()
 	d.q8 = true
 	d.layers = 2
-	tokens := []int{1, 3, 7, 11, 2}
+	// 20 tokens: below quantMMAMinRows the default falls back to the f32
+	// kernel, so a short prompt would not exercise the hi/lo path this test
+	// pins.
+	tokens := []int{1, 3, 7, 11, 2, 5, 9, 13, 0, 4, 8, 12, 6, 10, 14, 15, 1, 2, 3, 4}
 
 	grBatched, cleanup := newBatchTestRuntime(t, batchTestModel(d))
 	defer cleanup()
@@ -875,11 +878,39 @@ func TestBatchedPrefillParityQ8(t *testing.T) {
 	}
 }
 
-// TestBatchedPrefillParityQ8Int8OptIn covers the fast approximation: with
-// MANTLE_CUDA_BATCHED_PREFILL_QUANT=1 the activations are quantized to int8 per
-// 32-block and the tensor-core GEMM runs, which stays close to the per-token
-// result but not as close as the f32-activation default. It is opt-in for that
-// reason, and this test keeps the path runnable.
+// TestBatchedPrefillParityQ8F32OptIn covers the exact-precision f32-activation
+// kernel: MANTLE_CUDA_BATCHED_PREFILL_QUANT_F32=1 selects it instead of the
+// hi/lo default. It is the reference the hi/lo path was validated against, so
+// it must stay callable and stay this accurate.
+func TestBatchedPrefillParityQ8F32OptIn(t *testing.T) {
+	if !cudaAvailable(t) {
+		return
+	}
+	d := defaultBatchTestDims()
+	d.q8 = true
+	d.layers = 2
+	// 20 tokens, so the 16-token tensor-core tile threshold is crossed and the
+	// kernel actually runs rather than falling back to the f32 default.
+	tokens := []int{1, 3, 7, 11, 2, 5, 9, 13, 0, 4, 8, 12, 6, 10, 14, 15, 1, 2, 3, 4}
+
+	want := sequentialOracle(t, d, tokens)
+
+	t.Setenv(quantBatchedPrefillF32Env, "1")
+	gr, cleanup := newBatchTestRuntime(t, batchTestModel(d))
+	defer cleanup()
+	got, err := gr.PrefillTokens(tokens)
+	if err != nil {
+		t.Fatalf("f32 PrefillTokens: %v", err)
+	}
+	got = append([]float32(nil), got...)
+	compareBatchLogits(t, "Q8-f32", got, want, 1e-5, 1e-4)
+}
+
+// TestBatchedPrefillParityQ8Int8OptIn covers the single-term int8 approximation:
+// MANTLE_CUDA_BATCHED_PREFILL_QUANT_INT8=1 quantizes activations to int8 per
+// 32-block and runs the dp4a or tensor-core GEMM. It stays close to the
+// per-token result but not as close as the hi/lo default, which is why it is
+// reachable only for comparison.
 func TestBatchedPrefillParityQ8Int8OptIn(t *testing.T) {
 	if !cudaAvailable(t) {
 		return
@@ -887,11 +918,13 @@ func TestBatchedPrefillParityQ8Int8OptIn(t *testing.T) {
 	d := defaultBatchTestDims()
 	d.q8 = true
 	d.layers = 2
-	tokens := []int{1, 3, 7, 11, 2}
+	// 20 tokens, so the 16-token tensor-core tile threshold is crossed and the
+	// kernel actually runs rather than falling back to dp4a.
+	tokens := []int{1, 3, 7, 11, 2, 5, 9, 13, 0, 4, 8, 12, 6, 10, 14, 15, 1, 2, 3, 4}
 
 	want := sequentialOracle(t, d, tokens)
 
-	t.Setenv(quantBatchedPrefillInt8Env, "1")
+	t.Setenv(quantBatchedPrefillInt8SingleEnv, "1")
 	gr, cleanup := newBatchTestRuntime(t, batchTestModel(d))
 	defer cleanup()
 	got, err := gr.PrefillTokens(tokens)

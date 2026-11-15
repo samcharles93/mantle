@@ -24,13 +24,35 @@ Quant-cache matvec was reworked (fused per-block int32 dots + scalar scale combi
 - q8 MCF (1.85 GB, all 24 layers resident): decode ~60-61 tok/s after the bit-stable decode fusion wave (2026-11-09, was ~49); prefill ~167 tok/s on a 610-token prompt in auto mode (was ~93 after the quant GEMM, ~41 per-token before; the GEMM now uses an int8 dp4a inner product with per-32-block quantized activations, 16.3 -> 7.7 ms per 2048x2048x610 call). The decode fused attention pipeline accepts the standalone LFM3 attn gate (`gate_proj`) on device, and the sandwich (post-branch) norms are device-chained via the pending block result (no per-layer flush). Batched prefill now covers quantized weights in auto mode via a new tiled cached-int8 quant GEMM kernel (`quant_batch.cu`); k4 prefill ~70 tok/s. `MANTLE_CUDA_TRACE` gained a WaitForResult D2H attribution counter. The fusion wave (run3/cuda-decode-fusion) added a fused multi-segment int8 matvec kernel (one warp/row, warp-uniform scale broadcast), single-launch Wq|gate|Wk|Wv per attention layer (quant-path weights only), merged FFN up|gate launch, a fused rmsnorm+residual kernel (`__fmul_rn`/`__fadd_rn` against FMA contraction), and RoPE Q+K / StoreKV K+V pair kernels: graph launches 105 -> 61/token, WaitForResult 19.8 -> 16.0 ms/token, greedy output byte-identical (7 new on-device bit-exact tests). Decode is GPU-execution-bound (~16 ms/token on the RTX 3050); remaining gap to llama.cpp (75 tok/s decode, 4657 tok/s pp512) is weight streaming (~1.96 GB/token), which needs non-bit-stable wider loads.
 - llama.cpp reference on the same GPU (Q8_0 GGUF, ngl 99): pp512 4657 tok/s, tg128 75.3 tok/s.
 - CUDA prefill rework (2026-11-11), 812-token prompt: q8 160 -> 2245 tok/s, bf16 1760 tok/s (541 tokens: q8 ~2220). Three changes: the cached-int8 quant GEMM runs on tensor cores (`mma.sync m16n8k32`, one MMA per 32-element quant block, bit-identical to the dp4a kernel, 0.33 -> ~6 TMAC/s); RoPE and KV stores are one launch over all rows instead of three per row; and `AttentionPrefillF16` replaces the one-key-at-a-time batched attention. It reads earlier positions from the cache and the chunk's own rows directly, so sliding-window layers whose ring is shorter than the chunk no longer drop to per-row store-then-attend. The GEMM is now about three quarters of prefill time. k4 is 490 tok/s because its cached-int8 batch weights are built and uploaded on the first prefill. bf16 output is identical to the sequential path; see the quantized-prefill note below.
-- Quantized CUDA prefill (2026-11-11): the batched quant GEMM keeps activations in f32 by
-default, which matches the per-token path's precision. LFM3-1.7B 851-token prompt: q8 prefill 44
-(per-token) -> 103 tok/s, k4 89 tok/s, and 48 greedy tokens are identical to the CPU/per-token run.
-`MANTLE_CUDA_BATCHED_PREFILL_QUANT=1` selects the int8-activation dp4a/tensor-core GEMM instead: q8
-2188 tok/s, but activations lose precision, the logits move by 0.3 to 0.5 on the real model, and a
-greedy token can flip, so it stays opt-in. Real-model worst logit difference against the sequential
-oracle: k4 0.002, q8 0.148 (identical argmax; the residue is its quantized KV cache), bf16 0.119.
+- Quantized CUDA prefill (2026-11-11): the default is the hi/lo two-term tensor-core GEMM (details
+below); the f32-activation GEMM is the exact-precision fallback and is selected with
+`MANTLE_CUDA_BATCHED_PREFILL_QUANT_F32=1`. LFM3-1.7B 851-token prompt: q8 prefill 44 (per-token) ->
+187 tok/s on the f32 kernel and 1364 tok/s on the hi/lo default, k4 89 -> 401 tok/s, and 48 greedy
+tokens are identical to the CPU run on every path.
+The kernel uses a 512-thread 32-row x 16-token tile, eight f32 accumulators, `char4`/`float4`
+shared loads, and one dot per 32-element quant block so the scale costs a single multiply per block
+rather than one per element: 19.9 -> 10.6 ms for a 2048x2048x610 GEMM, which is within 1.2x of the
+dp4a kernel. Measured and rejected: a shared f32 dequantized weight tile (slower, shared bandwidth),
+weights read straight through L1 instead of staged (no change), 64-row tiles (slower) and a
+32x32 tile (slower).
+The hi/lo two-term tensor-core GEMM is the default (2026-11-15): each activation is split into two int8 terms with per-32-block f32 scales
+(`x = s1*q1 + s2*q2`), both block dots run as `mma.sync m16n8k32`, and the epilogue folds both
+scales (`acc = fma(wS*sc1, dot1, fma(wS*sc2, dot2, acc))`). That costs a second dot per block but
+keeps about 14 bits of the activation: 2048x2048x610 is 1.37 ms (1.87 TMAC/s) against 0.73 ms for
+the single int8 term, 8.5 ms for dp4a and 10.5 ms for the f32 default. LFM3-1.7B q8 on the
+851-token prompt: prefill 187 -> 1361 tok/s and the 48 greedy tokens are byte-identical to the CPU
+run. The real-model worst logit difference is 0.1487 against the f32 path's 0.1480 with the same
+argmax, so the residual is q8's quantized KV cache and the split itself adds under 1e-3; synthetic
+q8 parity is 6.5e-5 and the kernel matches the per-token f32 oracle to 2.5e-5 to 3.7e-5 of the
+largest logit. The second activation tile does not fit next to the first in 48 KB of static shared
+memory at `MMA_BK` 128, so the hi/lo kernel stages 64 bytes (two quant blocks) per step: 33 KB.
+Shapes it does not take (`cols != blocksPerRow*32`, misaligned buffers, fewer than 16 tokens,
+pre-sm_80) fall back to the f32 kernel rather than to a less accurate one. The pre-2026-11-12
+switch `MANTLE_CUDA_BATCHED_PREFILL_QUANT` is now a no-op, since what it opted into is the default.
+`MANTLE_CUDA_BATCHED_PREFILL_QUANT_INT8=1` keeps the older single-term int8 GEMM for comparison: 2244 tok/s, but activations lose precision, the logits
+move by 0.42 on the real model, and the greedy output diverges from the CPU run (first difference
+at byte 216 of 235 on that 851-token prompt). Real-model worst logit difference against the
+sequential oracle: k4 0.001, q8 0.1480 f32 / 0.1487 hi-lo / 0.424 single-term int8, bf16 0.119.
 - CPU: k4/q8 decode 11.7/11.6 after the fused quant-dot fix (were 4.1/6.9). Quantised weights now take the batched prefill path (`MatMatQuant`, 2026-11-11): a 2x4-tiled VPSIGNB/VPMADDUBSW/VPMADDWD kernel whose output matches the per-token matvec bit for bit, and f16 KV-cache attention is vectorised (exact half-to-float conversion, bit-identical V accumulation). LFM3-1.7B.q8 on an 812-token prompt: prefill 6.5 -> 31.5 tok/s, decode at that context 5.3 -> 8.5 tok/s; bf16 prefill 15.5 tok/s on the same prompt.
 
 ## Granite
@@ -118,18 +140,17 @@ authentication path are exercised only on CPU here.
 ## Open work
 
 1. DSpark on CUDA: the draft machinery is simd-only; the target verify batch and draft block need device paths (then `--draft-model` can stop forcing cpu).
-2. Performance vs llama.cpp on the RTX 3050 (Q8_0, ngl 99): llama-bench pp512 4657 / tg128 75.3 tok/s; Mantle LFM3-1.7B.q8 CUDA is at prefill ~2220 (541 tokens, int8-activation opt-in; 103 tok/s with the default f32-activation kernel) / decode ~60 tok/s. Remaining gaps: (a) prefill ~2.1x behind; the tensor-core quant GEMM (~6 TMAC/s) is most of the time, and its 32-bit shared-memory fragment loads and per-block scale epilogue are the next things to tune (ldmatrix, wider warp tiles); (b) decode ~1.25x behind — GPU-execution-bound; kernel fusion wave landed (105->61 graph launches/token), the rest is q8 weight streaming (~1.96 GB/token), which needs wider-than-1B-per-lane loads that are not bit-stable.
+2. Performance vs llama.cpp on the RTX 3050 (Q8_0, ngl 99): llama-bench pp512 4657 / tg128 75.3 tok/s; Mantle LFM3-1.7B.q8 CUDA is at prefill ~2220 (541 tokens, int8-activation opt-in; 182 tok/s with the default f32-activation kernel) / decode ~60 tok/s. Remaining gaps: (a) prefill ~2.1x behind; the tensor-core quant GEMM (~6 TMAC/s) is most of the time, and its 32-bit shared-memory fragment loads and per-block scale epilogue are the next things to tune (ldmatrix, wider warp tiles); (b) decode ~1.25x behind — GPU-execution-bound; kernel fusion wave landed (105->61 graph launches/token), the rest is q8 weight streaming (~1.96 GB/token), which needs wider-than-1B-per-lane loads that are not bit-stable.
 3. `mantle trace` is CPU-only, so CPU and CUDA logits can't be compared directly.
 4. Dependency bumps for existing modules (urfave/cli, echo, golang.org/x/*).
 5. Items in `TODO.md`: Gemma3 marked broken, Granite, CI, docs.
 6. LFM3-VL/Omni follow-ups: mp4/video-file decoding (currently frame directories only), LFM3-Omni-2B
    speech output (depth decoder + LiquidCodec decoder; audio input already works on the host path), a
    device-side vision tower for large images.
-7. Speed up the f32-activation quant GEMM: 103 tok/s by default against 2188 for the int8
-   approximation. Weight reads are already amortized across a 16-token tile (a 32-token tile and a
-   shared-memory dequantization variant were both measured slower). Next candidates: vectorized
-   float4/char4 loads, or a two-term int8 split (hi/lo) that keeps tensor cores at ~2x the MMA work
-   with f32-like precision.
+7. Close the remaining prefill gap: 182 tok/s with the f32-activation default against 2188 for the
+   int8 approximation. The f32 kernel is near its memory bound with a 32-row tile; the next real
+   step is a two-term (hi/lo) int8 activation split that keeps the tensor cores at ~2x the MMA work
+   with f32-like precision (~14-bit activations), rather than further tile tuning.
 
 8. gemma-4 text: loads with `--text-only` (2026-11-15) and q8 generates correctly; the
    `gemma4_vision` tower is still unimplemented, which is why the flag is needed. k4 (and q4) cannot

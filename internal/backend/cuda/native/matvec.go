@@ -87,6 +87,21 @@ extern int mantleCudaQuantMatVecCachedBatchMMA(
 	int blocksPerRow,
 	cudaStream_t stream
 );
+extern int mantleCudaQuantMatVecCachedBatchMMAHilo(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	signed char* xq2,
+	float* xsc2,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream
+);
 extern int mantleCudaQuantBatchMMASupported(void);
 
 extern int mantleCudaQuantMatVecCachedBatch(
@@ -231,6 +246,24 @@ static int mantleCudaQuantMatVecCachedBatchMMAWrapper(
 	cudaStream_t stream
 ) {
 	return mantleCudaQuantMatVecCachedBatchMMA(q, scales, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantMatVecCachedBatchMMAHiloWrapper(
+	const signed char* q,
+	const float* scales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	signed char* xq2,
+	float* xsc2,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream
+) {
+	return mantleCudaQuantMatVecCachedBatchMMAHilo(q, scales, x, xq, xsc, xq2, xsc2, y, rows, n, cols, blocksPerRow, stream);
 }
 
 static int mantleCudaQuantBatchMMASupportedWrapper(void) {
@@ -463,6 +496,35 @@ func QuantMatVecCachedBatchMMA(q, scales, x, xq, xsc, y DeviceBuffer, rows, n, c
 		(*C.float)(x.ptr),
 		(*C.schar)(xq.ptr),
 		(*C.float)(xsc.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecCachedBatchMMAHilo is the two-term form of
+// QuantMatVecCachedBatchMMA. x is quantized as s1*q1 + s2*q2 per 32-element
+// block into xq/xsc and xq2/xsc2 (device scratch), and the kernel folds both
+// block scales into the tensor-core dots. It has the same shape, alignment and
+// device requirements as QuantMatVecCachedBatchMMA, with xq2 aligned like xq.
+func QuantMatVecCachedBatchMMAHilo(q, scales, x, xq, xsc, xq2, xsc2, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if q.ptr == nil || scales.ptr == nil || x.ptr == nil || xq.ptr == nil || xsc.ptr == nil || xq2.ptr == nil || xsc2.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("quant batch mma hilo buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("quant batch mma hilo dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecCachedBatchMMAHiloWrapper(
+		(*C.schar)(q.ptr),
+		(*C.float)(scales.ptr),
+		(*C.float)(x.ptr),
+		(*C.schar)(xq.ptr),
+		(*C.float)(xsc.ptr),
+		(*C.schar)(xq2.ptr),
+		(*C.float)(xsc2.ptr),
 		(*C.float)(y.ptr),
 		C.int(rows),
 		C.int(n),

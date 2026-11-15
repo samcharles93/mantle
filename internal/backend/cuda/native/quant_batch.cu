@@ -13,7 +13,7 @@ extern "C" {
 // slices through double-buffered shared memory (next slice loads while the
 // current one computes), so each weight row is read from VRAM once per
 // TILE_N-wide n tile.
-#define TILE_R 16
+#define TILE_R 32
 #define TILE_N 16
 #define CHUNK 256
 #define CHUNKS_PER_BLOCK (CHUNK / 32)
@@ -28,9 +28,9 @@ __global__ void quant_matvec_cached_batch_kernel(
     int cols,
     int blocksPerRow
 ) {
-    __shared__ int8_t wsh[TILE_R][CHUNK + 1];
+    __shared__ int8_t wsh[TILE_R][CHUNK + 16];
     __shared__ float wsc[TILE_R][CHUNKS_PER_BLOCK + 1];
-    __shared__ float xsh[TILE_N][CHUNK + 1];
+    __shared__ float xsh[TILE_N][CHUNK + 4];
 
     const int tid = threadIdx.x;
     const int r = blockIdx.x * TILE_R + (tid / TILE_N);
@@ -40,7 +40,10 @@ __global__ void quant_matvec_cached_batch_kernel(
     const int nl = tid % TILE_N;
 
     const int nChunks = (cols + CHUNK - 1) / CHUNK;
-    float acc0 = 0.0f, acc1 = 0.0f;
+    // Eight accumulators break the fma dependency chain; the inner loop walks
+    // one 32-element quant block per iteration so the block scale stays in a
+    // register.
+    float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     for (int ch = 0; ch < nChunks; ch++) {
         const int cBase = ch * CHUNK;
         const int cLen = min(CHUNK, cols - cBase);
@@ -66,19 +69,45 @@ __global__ void quant_matvec_cached_batch_kernel(
         }
         __syncthreads();
         if (active) {
-            int c = 0;
-            for (; c + 1 < cLen; c += 2) {
-                acc0 += wsc[rl][c / 32] * (float)wsh[rl][c] * xsh[nl][c];
-                acc1 += wsc[rl][(c + 1) / 32] * (float)wsh[rl][c + 1] * xsh[nl][c + 1];
-            }
-            for (; c < cLen; c++) {
-                acc0 += wsc[rl][c / 32] * (float)wsh[rl][c] * xsh[nl][c];
+            const int8_t *wrow = wsh[rl];
+            const float *xrow = xsh[nl];
+            // One dot per 32-element quant block, then a single scale multiply:
+            // the per-element cost is a convert and an fma, not a convert, a
+            // multiply and an fma.
+            for (int b = 0; b < CHUNKS_PER_BLOCK; b++) {
+                const int c = b * 32;
+                if (c >= cLen) break;
+                const float s = wsc[rl][b];
+                if (s == 0.0f) continue;
+                const int len = min(32, cLen - c);
+                float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
+                float d4 = 0.0f, d5 = 0.0f, d6 = 0.0f, d7 = 0.0f;
+                int i = 0;
+                for (; i + 8 <= len; i += 8) {
+                    const char4 w0 = *reinterpret_cast<const char4 *>(wrow + c + i);
+                    const char4 w1 = *reinterpret_cast<const char4 *>(wrow + c + i + 4);
+                    const float4 x0 = *reinterpret_cast<const float4 *>(xrow + c + i);
+                    const float4 x1 = *reinterpret_cast<const float4 *>(xrow + c + i + 4);
+                    d0 = fmaf((float)w0.x, x0.x, d0);
+                    d1 = fmaf((float)w0.y, x0.y, d1);
+                    d2 = fmaf((float)w0.z, x0.z, d2);
+                    d3 = fmaf((float)w0.w, x0.w, d3);
+                    d4 = fmaf((float)w1.x, x1.x, d4);
+                    d5 = fmaf((float)w1.y, x1.y, d5);
+                    d6 = fmaf((float)w1.z, x1.z, d6);
+                    d7 = fmaf((float)w1.w, x1.w, d7);
+                }
+                float dot = ((d0 + d1) + (d2 + d3)) + ((d4 + d5) + (d6 + d7));
+                for (; i < len; i++) {
+                    dot = fmaf((float)wrow[c + i], xrow[c + i], dot);
+                }
+                acc[0] = fmaf(s, dot, acc[0]);
             }
         }
         __syncthreads();
     }
     if (active) {
-        y[(size_t)ni * rows + r] = acc0 + acc1;
+        y[(size_t)ni * rows + r] = ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
     }
 }
 
@@ -107,6 +136,66 @@ __global__ void quantize_x_blocks_kernel(
         float v = (scale > 0.0f) ? x[base + i] / scale : 0.0f;
         v = fminf(fmaxf(v, -127.0f), 127.0f);
         xq[base + i] = (int8_t)__float2int_rn(v);
+    }
+}
+
+// Two-term variant of quantize_x_blocks_kernel: each activation value is split
+// into x = s1*q1 + s2*q2 with q1 and q2 int8 and both scales f32 per
+// 32-element block. s1 is maxAbs/127 and q1 the nearest int8 on that grid, so
+// the residual r = x - s1*q1 satisfies |r| <= s1/2; s2 is max|r|/127 and q2 the
+// nearest int8 on the residual grid. The pair represents x to roughly 14 bits,
+// which is what lets the int8-activation GEMM keep the f32 path's accuracy.
+__global__ void quantize_x_blocks_hi_lo_kernel(
+    const float* __restrict__ x,
+    int8_t* __restrict__ xq,
+    float* __restrict__ xsc,
+    int8_t* __restrict__ xq2,
+    float* __restrict__ xsc2,
+    int n,
+    int cols,
+    int blocksPerRow
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = n * blocksPerRow;
+    if (idx >= total) return;
+    const int row = idx / blocksPerRow;
+    const int b = idx % blocksPerRow;
+    const int base = row * cols + b * 32;
+    const int len = min(32, cols - b * 32);
+    // Three streaming passes over the block rather than one pass keeping x in
+    // registers: a 32-float local array costs more than the two extra reads,
+    // which hit L1 (the block is 128 bytes).
+    float maxAbs = 0.0f;
+    for (int i = 0; i < len; i++) maxAbs = fmaxf(maxAbs, fabsf(x[base + i]));
+    const float scale1 = maxAbs / 127.0f;
+    float maxRes = 0.0f;
+    for (int i = 0; i < len; i++) {
+        const float v = x[base + i];
+        int q = 0;
+        if (scale1 > 0.0f) {
+            const float s = fminf(fmaxf(v / scale1, -127.0f), 127.0f);
+            q = __float2int_rn(s);
+        }
+        xq[base + i] = (int8_t)q;
+        maxRes = fmaxf(maxRes, fabsf(v - scale1 * (float)q));
+    }
+    const float scale2 = maxRes / 127.0f;
+    xsc[idx] = scale1;
+    xsc2[idx] = scale2;
+    for (int i = 0; i < len; i++) {
+        const float v = x[base + i];
+        int q1 = 0;
+        if (scale1 > 0.0f) {
+            const float s = fminf(fmaxf(v / scale1, -127.0f), 127.0f);
+            q1 = __float2int_rn(s);
+        }
+        int q2 = 0;
+        if (scale2 > 0.0f) {
+            const float r = v - scale1 * (float)q1;
+            const float s = fminf(fmaxf(r / scale2, -127.0f), 127.0f);
+            q2 = __float2int_rn(s);
+        }
+        xq2[base + i] = (int8_t)q2;
     }
 }
 
@@ -441,6 +530,177 @@ __global__ void __launch_bounds__(MMA_THREADS) quant_matmul_cached_mma_kernel(
 #endif
 }
 
+// Two-term form of quant_matmul_cached_mma_kernel above: the same tile and warp
+// layout, the same epilogue, and per output element and quant block
+//   acc = fma(wS*sc1, dot(q1, w), fma(wS*sc2, dot(q2, w), acc))
+// with both block dots taken on the tensor cores. K is staged 64 bytes (two
+// quant blocks) at a time instead of 128 so the second activation tile and its
+// scales still fit the 48 KB static shared-memory budget:
+//   3 x 2 x 64 x 80 int8 + 3 x 2 x 64 x 2 f32 = 33 KB.
+#define MMA_HL_BM 64
+#define MMA_HL_BN 64
+#define MMA_HL_BK 64
+#define MMA_HL_KB (MMA_HL_BK / 32)
+#define MMA_HL_LDS (MMA_HL_BK + 16)
+#define MMA_HL_THREADS 128
+
+__global__ void __launch_bounds__(MMA_HL_THREADS) quant_matmul_cached_mma_hilo_kernel(
+    const int8_t* __restrict__ q,
+    const float* __restrict__ scales,
+    const int8_t* __restrict__ xq,
+    const float* __restrict__ xsc,
+    const int8_t* __restrict__ xq2,
+    const float* __restrict__ xsc2,
+    float* __restrict__ y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow
+) {
+#if __CUDA_ARCH__ >= 800
+    __shared__ __align__(16) int8_t ws[2][MMA_HL_BM][MMA_HL_LDS];
+    __shared__ __align__(16) int8_t xs[2][MMA_HL_BN][MMA_HL_LDS];
+    __shared__ __align__(16) int8_t xs2[2][MMA_HL_BN][MMA_HL_LDS];
+    __shared__ float wsc[2][MMA_HL_BM][MMA_HL_KB];
+    __shared__ float xss[2][MMA_HL_BN][MMA_HL_KB];
+    __shared__ float xss2[2][MMA_HL_BN][MMA_HL_KB];
+
+    const int tid = threadIdx.x;
+    const int warp = tid >> 5;
+    const int lane = tid & 31;
+    const int g = lane >> 2;
+    const int t = lane & 3;
+    const int warpM = (warp >> 1) * 32;
+    const int warpN = (warp & 1) * 32;
+    const int mBase = blockIdx.x * MMA_HL_BM;
+    const int nBase = blockIdx.y * MMA_HL_BN;
+    const int nTiles = (blocksPerRow + MMA_HL_KB - 1) / MMA_HL_KB;
+    const size_t wRowBytes = (size_t)blocksPerRow * 32;
+
+    auto loadStage = [&](int stage, int kt) {
+        const int kb0 = kt * MMA_HL_KB;
+        const int kByte = kb0 * 32;
+        // 64 rows x 4 sixteen-byte chunks, two chunks per thread, per operand.
+        for (int c = tid; c < MMA_HL_BM * (MMA_HL_BK / 16); c += MMA_HL_THREADS) {
+            const int r = c >> 2;
+            const int off = (c & 3) * 16;
+            const bool inK = kByte + off < cols;
+            const int gr = mBase + r;
+            const bool wv = inK && gr < rows;
+            mma_cp_async16(&ws[stage][r][off], wv ? q + (size_t)gr * wRowBytes + kByte + off : q, wv);
+            const int gn = nBase + r;
+            const bool xv = inK && gn < n;
+            mma_cp_async16(&xs[stage][r][off], xv ? xq + (size_t)gn * cols + kByte + off : xq, xv);
+            mma_cp_async16(&xs2[stage][r][off], xv ? xq2 + (size_t)gn * cols + kByte + off : xq2, xv);
+        }
+        for (int c = tid; c < MMA_HL_BM * MMA_HL_KB; c += MMA_HL_THREADS) {
+            const int r = c / MMA_HL_KB;
+            const int j = c % MMA_HL_KB;
+            const bool inK = kb0 + j < blocksPerRow;
+            const int gr = mBase + r;
+            const bool wv = inK && gr < rows;
+            mma_cp_async4(&wsc[stage][r][j], wv ? scales + (size_t)gr * blocksPerRow + kb0 + j : scales, wv);
+            const int gn = nBase + r;
+            const bool xv = inK && gn < n;
+            mma_cp_async4(&xss[stage][r][j], xv ? xsc + (size_t)gn * blocksPerRow + kb0 + j : xsc, xv);
+            mma_cp_async4(&xss2[stage][r][j], xv ? xsc2 + (size_t)gn * blocksPerRow + kb0 + j : xsc2, xv);
+        }
+        asm volatile("cp.async.commit_group;\n" ::);
+    };
+
+    float acc[2][4][4];
+#pragma unroll
+    for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+        for (int ni = 0; ni < 4; ni++)
+#pragma unroll
+            for (int e = 0; e < 4; e++) acc[mi][ni][e] = 0.0f;
+
+    loadStage(0, 0);
+    for (int kt = 0; kt < nTiles; kt++) {
+        const int s = kt & 1;
+        if (kt + 1 < nTiles) {
+            loadStage(s ^ 1, kt + 1);
+            asm volatile("cp.async.wait_group 1;\n" ::);
+        } else {
+            asm volatile("cp.async.wait_group 0;\n" ::);
+        }
+        __syncthreads();
+
+        const int kbValid = min(MMA_HL_KB, blocksPerRow - kt * MMA_HL_KB);
+        for (int j = 0; j < kbValid; j++) {
+            const int koff = j * 32 + t * 4;
+            unsigned a[2][4], b[4][2], b2[4][2];
+            float wsv[2][2], xsv[4][2], xsv2[4][2];
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++) {
+                const int r0 = warpM + mi * 16 + g;
+                a[mi][0] = *reinterpret_cast<const unsigned*>(&ws[s][r0][koff]);
+                a[mi][1] = *reinterpret_cast<const unsigned*>(&ws[s][r0 + 8][koff]);
+                a[mi][2] = *reinterpret_cast<const unsigned*>(&ws[s][r0][koff + 16]);
+                a[mi][3] = *reinterpret_cast<const unsigned*>(&ws[s][r0 + 8][koff + 16]);
+                wsv[mi][0] = wsc[s][r0][j];
+                wsv[mi][1] = wsc[s][r0 + 8][j];
+            }
+#pragma unroll
+            for (int ni = 0; ni < 4; ni++) {
+                const int n0 = warpN + ni * 8;
+                b[ni][0] = *reinterpret_cast<const unsigned*>(&xs[s][n0 + g][koff]);
+                b[ni][1] = *reinterpret_cast<const unsigned*>(&xs[s][n0 + g][koff + 16]);
+                b2[ni][0] = *reinterpret_cast<const unsigned*>(&xs2[s][n0 + g][koff]);
+                b2[ni][1] = *reinterpret_cast<const unsigned*>(&xs2[s][n0 + g][koff + 16]);
+                xsv[ni][0] = xss[s][n0 + t * 2][j];
+                xsv[ni][1] = xss[s][n0 + t * 2 + 1][j];
+                xsv2[ni][0] = xss2[s][n0 + t * 2][j];
+                xsv2[ni][1] = xss2[s][n0 + t * 2 + 1][j];
+            }
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++) {
+#pragma unroll
+                for (int ni = 0; ni < 4; ni++) {
+                    int c0, c1, c2, c3;
+                    int d0, d1, d2, d3;
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%10,%10,%10};\n"
+                        : "=r"(c0), "=r"(c1), "=r"(c2), "=r"(c3)
+                        : "r"(a[mi][0]), "r"(a[mi][1]), "r"(a[mi][2]), "r"(a[mi][3]),
+                          "r"(b[ni][0]), "r"(b[ni][1]), "r"(0));
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%10,%10,%10};\n"
+                        : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
+                        : "r"(a[mi][0]), "r"(a[mi][1]), "r"(a[mi][2]), "r"(a[mi][3]),
+                          "r"(b2[ni][0]), "r"(b2[ni][1]), "r"(0));
+                    acc[mi][ni][0] = fmaf(wsv[mi][0] * xsv[ni][0], (float)c0, fmaf(wsv[mi][0] * xsv2[ni][0], (float)d0, acc[mi][ni][0]));
+                    acc[mi][ni][1] = fmaf(wsv[mi][0] * xsv[ni][1], (float)c1, fmaf(wsv[mi][0] * xsv2[ni][1], (float)d1, acc[mi][ni][1]));
+                    acc[mi][ni][2] = fmaf(wsv[mi][1] * xsv[ni][0], (float)c2, fmaf(wsv[mi][1] * xsv2[ni][0], (float)d2, acc[mi][ni][2]));
+                    acc[mi][ni][3] = fmaf(wsv[mi][1] * xsv[ni][1], (float)c3, fmaf(wsv[mi][1] * xsv2[ni][1], (float)d3, acc[mi][ni][3]));
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+#pragma unroll
+    for (int mi = 0; mi < 2; mi++) {
+#pragma unroll
+        for (int ni = 0; ni < 4; ni++) {
+#pragma unroll
+            for (int e = 0; e < 4; e++) {
+                const int m = mBase + warpM + mi * 16 + g + (e >> 1) * 8;
+                const int nn = nBase + warpN + ni * 8 + t * 2 + (e & 1);
+                if (m < rows && nn < n) {
+                    y[(size_t)nn * rows + m] = acc[mi][ni][e];
+                }
+            }
+        }
+    }
+#else
+    __trap();
+#endif
+}
+
 extern "C" {
 
 // mantleCudaQuantBatchMMASupported reports whether the current device runs the
@@ -486,6 +746,50 @@ __host__ int mantleCudaQuantMatVecCachedBatchMMA(
 
     dim3 grid((rows + MMA_BM - 1) / MMA_BM, (n + MMA_BN - 1) / MMA_BN);
     quant_matmul_cached_mma_kernel<<<grid, MMA_THREADS, 0, stream>>>(q, scales, xq, xsc, y, rows, n, cols, blocksPerRow);
+    return cudaGetLastError();
+}
+
+// mantleCudaQuantMatVecCachedBatchMMAHilo is the two-term form of
+// mantleCudaQuantMatVecCachedBatchMMA: the activations are quantized as
+// x = s1*q1 + s2*q2 (see quantize_x_blocks_hi_lo_kernel), which costs a second
+// tensor-core dot per quant block but keeps roughly 14 bits of the activation,
+// so the result tracks the f32-activation kernel instead of losing 0.3 to 0.5
+// on the logits. The shape, alignment and device requirements are the same as
+// mantleCudaQuantMatVecCachedBatchMMA.
+__host__ int mantleCudaQuantMatVecCachedBatchMMAHilo(
+    const int8_t* q,
+    const float* scales,
+    const float* x,
+    int8_t* xq,
+    float* xsc,
+    int8_t* xq2,
+    float* xsc2,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!q || !scales || !x || !xq || !xsc || !xq2 || !xsc2 || !y || rows <= 0 || n <= 0 || cols <= 0 ||
+        blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    if (cols != blocksPerRow * 32 ||
+        ((reinterpret_cast<uintptr_t>(q) | reinterpret_cast<uintptr_t>(xq) | reinterpret_cast<uintptr_t>(xq2)) & 15) != 0 ||
+        !mantleCudaQuantBatchMMASupported()) {
+        return cudaErrorNotSupported;
+    }
+    const int total = n * blocksPerRow;
+    const int qThreads = 256;
+    quantize_x_blocks_hi_lo_kernel<<<(total + qThreads - 1) / qThreads, qThreads, 0, stream>>>(
+        x, xq, xsc, xq2, xsc2, n, cols, blocksPerRow);
+    cudaError_t qe = cudaGetLastError();
+    if (qe != cudaSuccess) return qe;
+
+    dim3 grid((rows + MMA_HL_BM - 1) / MMA_HL_BM, (n + MMA_HL_BN - 1) / MMA_HL_BN);
+    quant_matmul_cached_mma_hilo_kernel<<<grid, MMA_HL_THREADS, 0, stream>>>(
+        q, scales, xq, xsc, xq2, xsc2, y, rows, n, cols, blocksPerRow);
     return cudaGetLastError();
 }
 
