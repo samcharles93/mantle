@@ -37,7 +37,7 @@ func TestDp4aVsF32Kernel(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { buf.Free() })
+		t.Cleanup(func() { _ = buf.Free() })
 		return buf
 	}
 	qBuf, sBuf, xBuf := mk(int64(len(q))), mk(int64(len(scales))*4), mk(int64(len(x))*4)
@@ -47,18 +47,28 @@ func TestDp4aVsF32Kernel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stream.Destroy()
-	MemcpyH2D(qBuf, unsafe.Pointer(&q[0]), int64(len(q)))
-	MemcpyH2D(sBuf, unsafe.Pointer(&scales[0]), int64(len(scales))*4)
-	MemcpyH2D(xBuf, unsafe.Pointer(&x[0]), int64(len(x))*4)
+	defer func() { _ = stream.Destroy() }()
+	if err := MemcpyH2D(qBuf, unsafe.Pointer(&q[0]), int64(len(q))); err != nil {
+		t.Fatal(err)
+	}
+	if err := MemcpyH2D(sBuf, unsafe.Pointer(&scales[0]), int64(len(scales))*4); err != nil {
+		t.Fatal(err)
+	}
+	if err := MemcpyH2D(xBuf, unsafe.Pointer(&x[0]), int64(len(x))*4); err != nil {
+		t.Fatal(err)
+	}
 	if err := QuantMatVecCachedBatch(qBuf, sBuf, xBuf, y1Buf, rows, n, cols, bpr, stream); err != nil {
 		t.Fatal(err)
 	}
 	if err := QuantMatVecCachedBatchDp4a(qBuf, sBuf, xBuf, xqBuf, xscBuf, y2Buf, rows, n, cols, bpr, stream); err != nil {
 		t.Fatal(err)
 	}
-	MemcpyD2H(unsafe.Pointer(&y1[0]), y1Buf, int64(len(y1))*4)
-	MemcpyD2H(unsafe.Pointer(&y2[0]), y2Buf, int64(len(y2))*4)
+	if err := MemcpyD2H(unsafe.Pointer(&y1[0]), y1Buf, int64(len(y1))*4); err != nil {
+		t.Fatal(err)
+	}
+	if err := MemcpyD2H(unsafe.Pointer(&y2[0]), y2Buf, int64(len(y2))*4); err != nil {
+		t.Fatal(err)
+	}
 	// dp4a quantizes x to int8 per 32-block, so it differs from the f32-x
 	// kernel by the activation quantization noise (~a few % of the output scale)
 	maxD, maxY := 0.0, 0.0

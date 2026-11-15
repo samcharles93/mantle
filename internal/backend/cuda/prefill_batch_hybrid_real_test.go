@@ -48,9 +48,9 @@ func TestBatchedPrefillRealHybridMCF(t *testing.T) {
 		t.Fatal(err)
 	}
 	seq := load()
-	os.Setenv("MANTLE_CUDA_BATCHED_PREFILL", "0")
+	_ = os.Setenv("MANTLE_CUDA_BATCHED_PREFILL", "0")
 	want, err := seq.PrefillTokens(tokens)
-	os.Unsetenv("MANTLE_CUDA_BATCHED_PREFILL")
+	_ = os.Unsetenv("MANTLE_CUDA_BATCHED_PREFILL")
 	if err != nil {
 		t.Fatal(err)
 	}

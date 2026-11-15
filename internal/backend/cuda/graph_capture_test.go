@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/samcharles93/mantle/internal/backend/core"
-	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/backend/cuda/native"
 	"github.com/samcharles93/mantle/internal/graph"
 )
@@ -77,7 +76,7 @@ func TestGraphCaptureStub(t *testing.T) {
 	}
 	attention := core.NewMat(embDim, embDim)
 
-	layers := []instance.Layer{
+	layers := []core.Layer{
 		{
 			FfnUp:       &ffnUp,
 			FfnGate:     &ffnGate,
@@ -234,7 +233,7 @@ func TestCaptureFFNGraphRejectsNonStatic(t *testing.T) {
 		Embeddings:  &core.Mat{},
 		Output:      &core.Mat{},
 		OutputNorm:  make([]float32, 8),
-		Layers:      []instance.Layer{{}},
+		Layers:      []core.Layer{{}},
 		HeadCount:   1,
 		MaxKVStride: 8,
 	}

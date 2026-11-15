@@ -82,27 +82,28 @@ func TestMambaSSMScan(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewStream: %v", err)
 		}
-		defer stream.Destroy()
+		// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+		defer func() { _ = stream.Destroy() }()
 
 		xBuf := mustAllocAndCopy(t, x)
-		defer xBuf.Free()
+		defer func() { _ = xBuf.Free() }()
 		dtBuf := mustAllocAndCopy(t, dt)
-		defer dtBuf.Free()
+		defer func() { _ = dtBuf.Free() }()
 		bBuf := mustAllocAndCopy(t, b)
-		defer bBuf.Free()
+		defer func() { _ = bBuf.Free() }()
 		cBuf := mustAllocAndCopy(t, c)
-		defer cBuf.Free()
+		defer func() { _ = cBuf.Free() }()
 		aLogBuf := mustAllocAndCopy(t, aLog)
-		defer aLogBuf.Free()
+		defer func() { _ = aLogBuf.Free() }()
 		dVecBuf := mustAllocAndCopy(t, dVec)
-		defer dVecBuf.Free()
+		defer func() { _ = dVecBuf.Free() }()
 		stateBuf := mustAllocAndCopy(t, state)
-		defer stateBuf.Free()
+		defer func() { _ = stateBuf.Free() }()
 		outBuf, err := AllocDevice(int64(headCount * headDim * 4))
 		if err != nil {
 			t.Fatalf("AllocDevice out: %v", err)
 		}
-		defer outBuf.Free()
+		defer func() { _ = outBuf.Free() }()
 
 		if err := MambaSSMScan(xBuf, dtBuf, bBuf, cBuf, aLogBuf, dVecBuf, stateBuf, outBuf, headCount, headDim, dState, groupSize, stream); err != nil {
 			t.Fatalf("MambaSSMScan: %v", err)
@@ -135,7 +136,7 @@ func TestMambaSSMScan(t *testing.T) {
 
 	t.Run("NilBuffer", func(t *testing.T) {
 		stream, _ := NewStream()
-		defer stream.Destroy()
+		defer func() { _ = stream.Destroy() }()
 		var nilBuf DeviceBuffer
 		if err := MambaSSMScan(nilBuf, nilBuf, nilBuf, nilBuf, nilBuf, nilBuf, nilBuf, nilBuf, 1, 1, 1, 1, stream); err == nil {
 			t.Fatal("expected error for nil buffers")
@@ -144,9 +145,9 @@ func TestMambaSSMScan(t *testing.T) {
 
 	t.Run("InvalidDims", func(t *testing.T) {
 		stream, _ := NewStream()
-		defer stream.Destroy()
+		defer func() { _ = stream.Destroy() }()
 		buf, _ := AllocDevice(64)
-		defer buf.Free()
+		defer func() { _ = buf.Free() }()
 		if err := MambaSSMScan(buf, buf, buf, buf, buf, buf, buf, buf, 0, 1, 1, 1, stream); err == nil {
 			t.Fatal("expected error for headCount=0")
 		}
@@ -166,7 +167,8 @@ func mustAllocAndCopy(t *testing.T, data []float32) DeviceBuffer {
 		t.Fatalf("AllocDevice: %v", err)
 	}
 	if err := MemcpyH2D(buf, unsafe.Pointer(&data[0]), int64(len(data)*4)); err != nil {
-		buf.Free()
+		// The copy error is what the caller needs to see; a free failure here would mask it.
+		_ = buf.Free()
 		t.Fatalf("MemcpyH2D: %v", err)
 	}
 	return buf

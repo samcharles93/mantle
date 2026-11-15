@@ -59,19 +59,20 @@ func runRMSNormGatedCase(t *testing.T, n int, normBeforeGate bool, tol float32) 
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	defer func() { _ = stream.Destroy() }()
 
 	yBuf := mustAllocAndCopy(t, y)
-	defer yBuf.Free()
+	defer func() { _ = yBuf.Free() }()
 	zBuf := mustAllocAndCopy(t, z)
-	defer zBuf.Free()
+	defer func() { _ = zBuf.Free() }()
 	wBuf := mustAllocAndCopy(t, w)
-	defer wBuf.Free()
+	defer func() { _ = wBuf.Free() }()
 	outBuf, err := AllocDevice(int64(n * 4))
 	if err != nil {
 		t.Fatalf("AllocDevice: %v", err)
 	}
-	defer outBuf.Free()
+	defer func() { _ = outBuf.Free() }()
 
 	if err := RMSNormGatedF32(outBuf, yBuf, zBuf, wBuf, n, eps, normBeforeGate, stream); err != nil {
 		t.Fatalf("RMSNormGatedF32: %v", err)
@@ -120,7 +121,7 @@ func TestRMSNormGatedF32(t *testing.T) {
 
 	t.Run("NilBuffer", func(t *testing.T) {
 		stream, _ := NewStream()
-		defer stream.Destroy()
+		defer func() { _ = stream.Destroy() }()
 		var nilBuf DeviceBuffer
 		if err := RMSNormGatedF32(nilBuf, nilBuf, nilBuf, nilBuf, 4, 1e-5, true, stream); err == nil {
 			t.Fatal("expected error for nil buffers")
@@ -129,9 +130,9 @@ func TestRMSNormGatedF32(t *testing.T) {
 
 	t.Run("InvalidN", func(t *testing.T) {
 		stream, _ := NewStream()
-		defer stream.Destroy()
+		defer func() { _ = stream.Destroy() }()
 		buf, _ := AllocDevice(16)
-		defer buf.Free()
+		defer func() { _ = buf.Free() }()
 		if err := RMSNormGatedF32(buf, buf, buf, buf, 0, 1e-5, true, stream); err == nil {
 			t.Fatal("expected error for n=0")
 		}

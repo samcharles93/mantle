@@ -116,7 +116,8 @@ func TestDeltaNetL2NormF32InvalidDims(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice: %v", err)
 	}
-	defer buf.Free()
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	defer func() { _ = buf.Free() }()
 	if err := DeltaNetL2NormF32(buf, 1e-6, 0, 1, Stream{}); err == nil {
 		t.Fatal("expected error for head_dim=0")
 	}

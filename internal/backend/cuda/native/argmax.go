@@ -41,7 +41,8 @@ func ArgMaxF32(x DeviceBuffer, n int, stream Stream) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer idxDev.Free()
+	// The index buffer is a local scratch allocation released on return; a free failure cannot be acted on.
+	defer func() { _ = idxDev.Free() }()
 
 	if err := ArgMaxF32To(x, n, idxDev, stream); err != nil {
 		return 0, err

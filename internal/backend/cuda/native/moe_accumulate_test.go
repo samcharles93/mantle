@@ -20,7 +20,8 @@ func TestMoEAccumulateF32Parity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	defer func() { _ = stream.Destroy() }()
 
 	cases := []struct {
 		n int

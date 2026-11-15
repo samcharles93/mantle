@@ -42,7 +42,8 @@ func TestApplyRoPEInplaceF32(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	defer func() { _ = stream.Destroy() }()
 
 	const (
 		nHead   = 4
@@ -53,9 +54,9 @@ func TestApplyRoPEInplaceF32(t *testing.T) {
 	attnScale := float32(1.25)
 
 	xHost, xSlice := allocPinnedF32(t, nHead*headDim)
-	defer xHost.Free()
+	defer func() { _ = xHost.Free() }()
 	ifHost, ifSlice := allocPinnedF32(t, half)
-	defer ifHost.Free()
+	defer func() { _ = ifHost.Free() }()
 	ref := make([]float32, nHead*headDim)
 
 	for i := range xSlice {
@@ -71,12 +72,12 @@ func TestApplyRoPEInplaceF32(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice x: %v", err)
 	}
-	defer xDev.Free()
+	defer func() { _ = xDev.Free() }()
 	ifDev, err := AllocDevice(int64(len(ifSlice)) * 4)
 	if err != nil {
 		t.Fatalf("AllocDevice invFreq: %v", err)
 	}
-	defer ifDev.Free()
+	defer func() { _ = ifDev.Free() }()
 
 	if err := MemcpyH2DAsync(xDev, xHost.Ptr(), int64(len(xSlice))*4, stream); err != nil {
 		t.Fatalf("H2D x: %v", err)
@@ -110,7 +111,7 @@ func TestApplyRoPEInplaceF32ZeroAttnScaleTreatedAsOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 
 	const (
 		nHead   = 2
@@ -119,9 +120,9 @@ func TestApplyRoPEInplaceF32ZeroAttnScaleTreatedAsOne(t *testing.T) {
 		pos     = 3
 	)
 	xHost, xSlice := allocPinnedF32(t, nHead*headDim)
-	defer xHost.Free()
+	defer func() { _ = xHost.Free() }()
 	ifHost, ifSlice := allocPinnedF32(t, half)
-	defer ifHost.Free()
+	defer func() { _ = ifHost.Free() }()
 	for i := range xSlice {
 		xSlice[i] = float32(i) - 3
 	}
@@ -136,12 +137,12 @@ func TestApplyRoPEInplaceF32ZeroAttnScaleTreatedAsOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice: %v", err)
 	}
-	defer xDev.Free()
+	defer func() { _ = xDev.Free() }()
 	ifDev, err := AllocDevice(int64(len(ifSlice)) * 4)
 	if err != nil {
 		t.Fatalf("AllocDevice: %v", err)
 	}
-	defer ifDev.Free()
+	defer func() { _ = ifDev.Free() }()
 	if err := MemcpyH2DAsync(xDev, xHost.Ptr(), int64(len(xSlice))*4, stream); err != nil {
 		t.Fatalf("H2D: %v", err)
 	}
@@ -173,7 +174,7 @@ func TestStoreKVF16Row(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 
 	const (
 		kvStride = 64
@@ -183,7 +184,7 @@ func TestStoreKVF16Row(t *testing.T) {
 	cacheBytes := int64(kvStride * cacheLen * 2)
 
 	srcHost, srcSlice := allocPinnedF32(t, kvStride)
-	defer srcHost.Free()
+	defer func() { _ = srcHost.Free() }()
 	for i := range srcSlice {
 		srcSlice[i] = float32(i)*0.25 - 2.0
 	}
@@ -194,7 +195,7 @@ func TestStoreKVF16Row(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocHostPinned: %v", err)
 	}
-	defer hostCacheBuf.Free()
+	defer func() { _ = hostCacheBuf.Free() }()
 	hostCache := unsafe.Slice((*uint16)(hostCacheBuf.Ptr()), kvStride*cacheLen)
 	for i := range hostCache {
 		hostCache[i] = 0xBEEF
@@ -204,12 +205,12 @@ func TestStoreKVF16Row(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice src: %v", err)
 	}
-	defer srcDev.Free()
+	defer func() { _ = srcDev.Free() }()
 	cacheDev, err := AllocDevice(cacheBytes)
 	if err != nil {
 		t.Fatalf("AllocDevice cache: %v", err)
 	}
-	defer cacheDev.Free()
+	defer func() { _ = cacheDev.Free() }()
 
 	if err := MemcpyH2DAsync(cacheDev, hostCacheBuf.Ptr(), cacheBytes, stream); err != nil {
 		t.Fatalf("H2D cache: %v", err)
@@ -294,7 +295,7 @@ func TestStoreKVQ8RowBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 
 	const (
 		kvStride      = 64 // 2 blocks of 32
@@ -305,7 +306,7 @@ func TestStoreKVQ8RowBroadcast(t *testing.T) {
 	)
 
 	srcHost, srcSlice := allocPinnedF32(t, kvStride)
-	defer srcHost.Free()
+	defer func() { _ = srcHost.Free() }()
 	var absmax float32
 	for i := range srcSlice {
 		v := float32(i) - 31.5
@@ -323,7 +324,7 @@ func TestStoreKVQ8RowBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pin q: %v", err)
 	}
-	defer qHostBuf.Free()
+	defer func() { _ = qHostBuf.Free() }()
 	qHost := unsafe.Slice((*int8)(qHostBuf.Ptr()), kvStride*cacheLen)
 	for i := range qHost {
 		qHost[i] = 99
@@ -332,7 +333,7 @@ func TestStoreKVQ8RowBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pin s: %v", err)
 	}
-	defer sHostBuf.Free()
+	defer func() { _ = sHostBuf.Free() }()
 	sHost := unsafe.Slice((*float32)(sHostBuf.Ptr()), scaleStripLen)
 	for i := range sHost {
 		sHost[i] = -7.0
@@ -342,17 +343,17 @@ func TestStoreKVQ8RowBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice src: %v", err)
 	}
-	defer srcDev.Free()
+	defer func() { _ = srcDev.Free() }()
 	qDev, err := AllocDevice(int64(kvStride * cacheLen))
 	if err != nil {
 		t.Fatalf("AllocDevice q: %v", err)
 	}
-	defer qDev.Free()
+	defer func() { _ = qDev.Free() }()
 	sDev, err := AllocDevice(int64(scaleStripLen) * 4)
 	if err != nil {
 		t.Fatalf("AllocDevice scales: %v", err)
 	}
-	defer sDev.Free()
+	defer func() { _ = sDev.Free() }()
 
 	if err := MemcpyH2DAsync(qDev, qHostBuf.Ptr(), int64(kvStride*cacheLen), stream); err != nil {
 		t.Fatalf("H2D q: %v", err)
@@ -421,7 +422,7 @@ func TestStoreKVQ8RowBroadcastZeroVector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 
 	const (
 		kvStride     = 32
@@ -430,27 +431,27 @@ func TestStoreKVQ8RowBroadcastZeroVector(t *testing.T) {
 	)
 
 	srcHost, srcSlice := allocPinnedF32(t, kvStride)
-	defer srcHost.Free()
+	defer func() { _ = srcHost.Free() }()
 	for i := range srcSlice {
 		srcSlice[i] = 0
 	}
 	qHostBuf, _ := AllocHostPinned(int64(kvStride))
-	defer qHostBuf.Free()
+	defer func() { _ = qHostBuf.Free() }()
 	qHost := unsafe.Slice((*int8)(qHostBuf.Ptr()), kvStride)
 	for i := range qHost {
 		qHost[i] = 33
 	}
 	sHostBuf, _ := AllocHostPinned(4)
-	defer sHostBuf.Free()
+	defer func() { _ = sHostBuf.Free() }()
 	sHost := unsafe.Slice((*float32)(sHostBuf.Ptr()), 1)
 	sHost[0] = -42
 
 	srcDev, _ := AllocDevice(int64(kvStride) * 4)
-	defer srcDev.Free()
+	defer func() { _ = srcDev.Free() }()
 	qDev, _ := AllocDevice(int64(kvStride))
-	defer qDev.Free()
+	defer func() { _ = qDev.Free() }()
 	sDev, _ := AllocDevice(4)
-	defer sDev.Free()
+	defer func() { _ = sDev.Free() }()
 
 	if err := MemcpyH2DAsync(qDev, qHostBuf.Ptr(), int64(kvStride), stream); err != nil {
 		t.Fatalf("H2D q: %v", err)

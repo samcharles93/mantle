@@ -121,11 +121,12 @@ func TestCublasGemmExF32(t *testing.T) {
 	)
 
 	aHost, aSlice := allocPinnedF32(t, m*k)
-	defer aHost.Free()
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	defer func() { _ = aHost.Free() }()
 	bHost, bSlice := allocPinnedF32(t, k*n)
-	defer bHost.Free()
+	defer func() { _ = bHost.Free() }()
 	cHost, cSlice := allocPinnedF32(t, m*n)
-	defer cHost.Free()
+	defer func() { _ = cHost.Free() }()
 	ref := make([]float32, m*n)
 
 	fillColMajor(aSlice, m, k, 0.5)
@@ -140,17 +141,17 @@ func TestCublasGemmExF32(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice A: %v", err)
 	}
-	defer aDev.Free()
+	defer func() { _ = aDev.Free() }()
 	bDev, err := AllocDevice(int64(len(bSlice)) * int64(unsafe.Sizeof(float32(0))))
 	if err != nil {
 		t.Fatalf("AllocDevice B: %v", err)
 	}
-	defer bDev.Free()
+	defer func() { _ = bDev.Free() }()
 	cDev, err := AllocDevice(int64(len(cSlice)) * int64(unsafe.Sizeof(float32(0))))
 	if err != nil {
 		t.Fatalf("AllocDevice C: %v", err)
 	}
-	defer cDev.Free()
+	defer func() { _ = cDev.Free() }()
 
 	if err := MemcpyH2DAsync(aDev, aHost.Ptr(), int64(len(aSlice))*int64(unsafe.Sizeof(float32(0))), stream); err != nil {
 		t.Fatalf("MemcpyH2DAsync A: %v", err)
@@ -211,11 +212,11 @@ func TestCublasGemvF32(t *testing.T) {
 	)
 
 	aHost, aSlice := allocPinnedF32(t, m*n)
-	defer aHost.Free()
+	defer func() { _ = aHost.Free() }()
 	xHost, xSlice := allocPinnedF32(t, n)
-	defer xHost.Free()
+	defer func() { _ = xHost.Free() }()
 	yHost, ySlice := allocPinnedF32(t, m)
-	defer yHost.Free()
+	defer func() { _ = yHost.Free() }()
 	ref := make([]float32, m)
 
 	fillColMajor(aSlice, m, n, 1.0)
@@ -232,17 +233,17 @@ func TestCublasGemvF32(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice A: %v", err)
 	}
-	defer aDev.Free()
+	defer func() { _ = aDev.Free() }()
 	xDev, err := AllocDevice(int64(len(xSlice)) * int64(unsafe.Sizeof(float32(0))))
 	if err != nil {
 		t.Fatalf("AllocDevice X: %v", err)
 	}
-	defer xDev.Free()
+	defer func() { _ = xDev.Free() }()
 	yDev, err := AllocDevice(int64(len(ySlice)) * int64(unsafe.Sizeof(float32(0))))
 	if err != nil {
 		t.Fatalf("AllocDevice Y: %v", err)
 	}
-	defer yDev.Free()
+	defer func() { _ = yDev.Free() }()
 
 	if err := MemcpyH2DAsync(aDev, aHost.Ptr(), int64(len(aSlice))*int64(unsafe.Sizeof(float32(0))), stream); err != nil {
 		t.Fatalf("MemcpyH2DAsync A: %v", err)
@@ -294,7 +295,7 @@ func TestSoftmaxRowsF32(t *testing.T) {
 	)
 
 	hostIn, hostSlice := allocPinnedF32(t, n)
-	defer hostIn.Free()
+	defer func() { _ = hostIn.Free() }()
 	ref := make([]float32, n)
 
 	for i := range hostSlice {
@@ -309,7 +310,7 @@ func TestSoftmaxRowsF32(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice: %v", err)
 	}
-	defer dev.Free()
+	defer func() { _ = dev.Free() }()
 
 	if err := MemcpyH2DAsync(dev, hostIn.Ptr(), int64(n)*int64(unsafe.Sizeof(float32(0))), stream); err != nil {
 		t.Fatalf("MemcpyH2DAsync: %v", err)
@@ -382,22 +383,22 @@ func TestQuantMatVecQ4F32(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice q: %v", err)
 	}
-	defer qDev.Free()
+	defer func() { _ = qDev.Free() }()
 	scalesDev, err := AllocDevice(int64(len(scaleRaw) * 2))
 	if err != nil {
 		t.Fatalf("AllocDevice scales: %v", err)
 	}
-	defer scalesDev.Free()
+	defer func() { _ = scalesDev.Free() }()
 	xDev, err := AllocDevice(int64(len(xHost) * 4))
 	if err != nil {
 		t.Fatalf("AllocDevice x: %v", err)
 	}
-	defer xDev.Free()
+	defer func() { _ = xDev.Free() }()
 	yDev, err := AllocDevice(int64(len(got) * 4))
 	if err != nil {
 		t.Fatalf("AllocDevice y: %v", err)
 	}
-	defer yDev.Free()
+	defer func() { _ = yDev.Free() }()
 
 	if err := MemcpyH2D(qDev, unsafe.Pointer(&qData[0]), int64(len(qData))); err != nil {
 		t.Fatalf("MemcpyH2D q: %v", err)
@@ -479,27 +480,27 @@ func TestQuantMatVecK4F32(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice q: %v", err)
 	}
-	defer qDev.Free()
+	defer func() { _ = qDev.Free() }()
 	superDev, err := AllocDevice(int64(len(superRaw) * 2))
 	if err != nil {
 		t.Fatalf("AllocDevice super scales: %v", err)
 	}
-	defer superDev.Free()
+	defer func() { _ = superDev.Free() }()
 	subDev, err := AllocDevice(int64(len(subScales)))
 	if err != nil {
 		t.Fatalf("AllocDevice sub scales: %v", err)
 	}
-	defer subDev.Free()
+	defer func() { _ = subDev.Free() }()
 	xDev, err := AllocDevice(int64(len(xHost) * 4))
 	if err != nil {
 		t.Fatalf("AllocDevice x: %v", err)
 	}
-	defer xDev.Free()
+	defer func() { _ = xDev.Free() }()
 	yDev, err := AllocDevice(int64(len(got) * 4))
 	if err != nil {
 		t.Fatalf("AllocDevice y: %v", err)
 	}
-	defer yDev.Free()
+	defer func() { _ = yDev.Free() }()
 
 	if err := MemcpyH2D(qDev, unsafe.Pointer(&qData[0]), int64(len(qData))); err != nil {
 		t.Fatalf("MemcpyH2D q: %v", err)
@@ -539,7 +540,7 @@ func TestDequantizeQ4ToF16(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 
 	const (
 		rows         = 2
@@ -576,17 +577,17 @@ func TestDequantizeQ4ToF16(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice q: %v", err)
 	}
-	defer qDev.Free()
+	defer func() { _ = qDev.Free() }()
 	sDev, err := AllocDevice(int64(len(scalesRaw) * 2))
 	if err != nil {
 		t.Fatalf("AllocDevice scales: %v", err)
 	}
-	defer sDev.Free()
+	defer func() { _ = sDev.Free() }()
 	outDev, err := AllocDevice(int64(len(outRaw) * 2))
 	if err != nil {
 		t.Fatalf("AllocDevice out: %v", err)
 	}
-	defer outDev.Free()
+	defer func() { _ = outDev.Free() }()
 
 	if err := MemcpyH2D(qDev, unsafe.Pointer(&qData[0]), int64(len(qData))); err != nil {
 		t.Fatalf("MemcpyH2D q: %v", err)
@@ -621,7 +622,7 @@ func TestDequantizeK4ToF16(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	defer func() { _ = stream.Destroy() }()
 
 	const (
 		rows         = 2
@@ -664,22 +665,22 @@ func TestDequantizeK4ToF16(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AllocDevice q: %v", err)
 	}
-	defer qDev.Free()
+	defer func() { _ = qDev.Free() }()
 	superDev, err := AllocDevice(int64(len(superRaw) * 2))
 	if err != nil {
 		t.Fatalf("AllocDevice super: %v", err)
 	}
-	defer superDev.Free()
+	defer func() { _ = superDev.Free() }()
 	subDev, err := AllocDevice(int64(len(subRaw)))
 	if err != nil {
 		t.Fatalf("AllocDevice sub: %v", err)
 	}
-	defer subDev.Free()
+	defer func() { _ = subDev.Free() }()
 	outDev, err := AllocDevice(int64(len(outRaw) * 2))
 	if err != nil {
 		t.Fatalf("AllocDevice out: %v", err)
 	}
-	defer outDev.Free()
+	defer func() { _ = outDev.Free() }()
 
 	if err := MemcpyH2D(qDev, unsafe.Pointer(&qData[0]), int64(len(qData))); err != nil {
 		t.Fatalf("MemcpyH2D q: %v", err)

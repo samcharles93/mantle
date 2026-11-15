@@ -191,7 +191,8 @@ func TestMoERouterF32TieBreak(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStream: %v", err)
 	}
-	defer stream.Destroy()
+	// Device teardown errors cannot be acted on at cleanup time, so they are dropped.
+	defer func() { _ = stream.Destroy() }()
 
 	const numExperts = 32
 	const k = 4
@@ -201,13 +202,13 @@ func TestMoERouterF32TieBreak(t *testing.T) {
 	}
 	bias := make([]float32, numExperts)
 	rawDev, _ := AllocDevice(int64(numExperts) * 4)
-	defer rawDev.Free()
+	defer func() { _ = rawDev.Free() }()
 	biasDev, _ := AllocDevice(int64(numExperts) * 4)
-	defer biasDev.Free()
+	defer func() { _ = biasDev.Free() }()
 	idxDev, _ := AllocDevice(int64(k) * 4)
-	defer idxDev.Free()
+	defer func() { _ = idxDev.Free() }()
 	wDev, _ := AllocDevice(int64(k) * 4)
-	defer wDev.Free()
+	defer func() { _ = wDev.Free() }()
 
 	if err := MemcpyH2D(rawDev, unsafe.Pointer(&raw[0]), int64(numExperts)*4); err != nil {
 		t.Fatal(err)
