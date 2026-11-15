@@ -1,0 +1,7 @@
+# parity set: k4m vs Q4_K_M, k4 vs Q4_K_M, q8 vs Q8_0 at main@043ab6a
+mantle	k4m	/work/wt/mantle-parity-lfm3/bin/mantle	/work/models/mcf/parity/lfm3-1.7b/LFM3-1.7B.k4m.mcf
+mantle	k4	/work/wt/mantle-parity-lfm3/bin/mantle	/work/models/mcf/parity/lfm3-1.7b/LFM3-1.7B.k4.mcf
+mantle	q8	/work/wt/mantle-parity-lfm3/bin/mantle	/work/models/mcf/parity/lfm3-1.7b/LFM3-1.7B.q8.mcf
+llama	llama-Q4_K_M-a	/work/tmp/llama-cpu/bin/llama-bench	/work/models/gguf/liquidai/LFM3-1.7B/LFM3-1.7B-Q4_K_M.gguf
+llama	llama-Q4_K_M-b	/work/tmp/llama-cpu/bin/llama-bench	/work/models/gguf/liquidai/LFM3-1.7B/LFM3-1.7B-Q4_K_M.gguf
+llama	llama-Q8_0	/work/tmp/llama-cpu/bin/llama-bench	/work/models/gguf/liquidai/LFM3-1.7B/LFM3-1.7B-Q8_0.gguf

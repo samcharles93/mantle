@@ -144,6 +144,100 @@ load-2.2 window; measured in the same window as `043ab6a` the branch kernel is 1
 against 12.39, so `043ab6a` is the faster of the two implementations and the 15.01 was
 a quiet-window figure, not a regression since.
 
+## Parity set at main@043ab6a: throughput against llama.cpp
+
+Containers from `/work/models/mcf/parity/lfm3-1.7b/` (see its MANIFEST.md for
+provenance), binary `/work/wt/mantle-parity-lfm3/bin/mantle` (main@043ab6a, CPU
+only). llama.cpp CPU-only build. 96 tokens generated, 3 repeats rotating order,
+medians. Bits per weight against 1,728,801,536 parameters.
+
+| config      | MiB  | bpw  | prompt tok/s | gen tok/s | peak RSS MiB |
+|-------------|------|------|--------------|-----------|--------------|
+| k4m         | 1015 | 4.93 | 44.33        | 12.55     | 2064 |
+| k4          | 906  | 4.40 | 43.75        | 13.90     | 1139 |
+| q8          | 1769 | 8.58 | 46.14        | 12.40     | 4151 |
+| llama Q4_K_M | 1049 | 5.09 | 178.7       | 24.6      | 1812 |
+| llama Q8_0  | 1761 | 8.54 | 115.2        | 16.2      | 1845 |
+
+| pair          | decode      | prefill     | RSS         |
+|---------------|-------------|-------------|-------------|
+| k4m vs Q4_K_M | 1.96x slower | 4.04x slower | 1.14x llama |
+| k4 vs Q4_K_M  | 1.77x slower | 4.10x slower | 0.63x llama |
+| q8 vs Q8_0    | 1.31x slower | 2.50x slower | 2.25x llama |
+
+**k4m costs 2x the resident memory of plain k4** (2064 against 1139 MiB) for a file
+only 12% bigger. `mantle inspect --quant` shows why: k4m's mixed recipe leaves 18
+tensors at k6 (343.24 MiB, the output head plus v_proj/down_proj), and k6 is not in
+the packed path, so those tensors get the int8 cache at load while the 136 k4 tensors
+do not. The extra 925 MiB is that k6 payload plus its cache. The packed default
+(`043ab6a`) covers q4/k4/gq*4 only, so any mixed recipe that upgrades to k6 pays the
+cache again. Extending the packed matvec to k6 would remove it.
+
+Decode also reverses on the mixed container: k4m 12.55 against k4 13.90, for +12% file
+size. So the mixed recipe currently costs both speed and memory, and the case for it
+is quality alone.
+
+## Quality against llama.cpp's own KL
+
+`mantle compare` gives Mantle's KL against its own bf16 container. llama.cpp measures
+its own with `llama-perplexity --kl-divergence`, so the two are separate harnesses.
+Both were run over the same `eval.txt`, bf16 as reference:
+
+| harness | file | positions | ref PPL |
+|---------|------|-----------|---------|
+| `mantle compare --max-tokens 512` | eval.txt | 511 | 15.8971 |
+| `llama-perplexity -c 256 --chunks 2` | eval.txt | 512 | 15.1374 |
+
+```
+llama-perplexity -m LFM3-1.7B-BF16.gguf -f eval.txt -c 256 --chunks 2 \
+  --kl-divergence-base llamacpp-bf16-base.kld
+llama-perplexity -m LFM3-1.7B-Q4_K_M.gguf -f eval.txt -c 256 --chunks 2 \
+  --kl-divergence --kl-divergence-base llamacpp-bf16-base.kld
+```
+
+llama.cpp, per chunk and mean:
+
+| file    | KL chunk 1 | KL chunk 2 | mean KL | same top p |
+|---------|------------|------------|---------|------------|
+| Q8_0    | 0.00151    | 0.00135    | 0.00143 | 97.8% |
+| Q4_K_M  | 0.06663    | 0.06038    | 0.06351 | 88.4% |
+
+Mantle, from the parity MANIFEST (511 positions, mean KL and top-1 agreement):
+
+| container | mean KL | top-1 |
+|-----------|---------|-------|
+| q8        | 0.00257 | 96.28% |
+| k6        | 0.01987 | 93.74% |
+| k4m       | 0.09898 | 84.15% |
+| k4        | 0.17555 | 76.52% |
+| gq4       | 0.23952 | 73.58% |
+
+The two harnesses need a calibration before any 4-bit claim, because they disagree on
+a container that is essentially lossless: mantle q8 reads 1.80x llama's Q8_0
+(0.00257 against 0.00143) and 1.5 points lower on top-1. Applying that offset:
+
+| container | raw KL | adjusted KL | raw top-1 | adjusted top-1 |
+|-----------|--------|-------------|-----------|----------------|
+| q8        | 0.00257 | 0.00143 | 96.3% | 97.8% |
+| k6        | 0.01987 | 0.01104 | 93.7% | 95.2% |
+| k4m       | 0.09898 | 0.05501 | 84.2% | 85.7% |
+| k4        | 0.17555 | 0.09757 | 76.5% | 78.0% |
+| gq4       | 0.23952 | 0.13312 | 73.6% | 75.1% |
+
+Against llama.cpp Q4_K_M (0.06351 KL, 88.4% top-1) at 5.09 bpw:
+
+- **k4m** at 4.93 bpw: adjusted KL 0.0550 is 0.87x Q4_K_M, adjusted top-1 85.7% is 2.7
+  points lower. The two metrics disagree in direction, so the defensible claim is that
+  k4m sits in Q4_K_M's quality range at 3% smaller size, not that it wins.
+- **k4** at 4.40 bpw: adjusted KL 0.0976 is 1.54x worse and top-1 78.0% is 10.4 points
+  lower. Plain k4 is not in Q4_K_M's range even after calibration.
+
+Caveats: different harnesses (utilities of the same weights, different tokenizer
+pipelines, 511 against 512 positions, one window against two), so the 1.80x offset is
+a correction derived from a single near-lossless pair, not a calibrated constant. The
+reference perplexities differ by 5% (15.897 against 15.137), which is the size of the
+pipeline difference to expect.
+
 ## Question 2 — 4-bit payloads without the int8 cache
 
 `--no-quant-cache` decodes q*/k* blocks during the matvec instead of expanding every
