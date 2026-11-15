@@ -113,6 +113,37 @@ against 1812 MiB for a container 10% smaller than Q4_K_M) and the closest on dec
 (1.61x against 1.96x). Output text is identical between the packed and cached paths
 on the same binary.
 
+## main@043ab6a: packed 4-bit as the default
+
+`043ab6a` makes the packed weights the default for q4/k4/gq*4, extends `MatMatQuant`
+to packed weights so batched prefill no longer needs the int8 cache, and stops
+building the cache for 4-bit dtypes. Compared against `b42b720` (the packed kernel
+merged but the int8 cache still the default) and llama.cpp, quiet window (load 2.7-3.2),
+96 tokens generated, 3 repeats rotating order, medians:
+
+| config                       | prompt tok/s | gen tok/s | peak RSS MiB |
+|------------------------------|--------------|-----------|--------------|
+| main@043ab6a, default (packed) | 43.70      | 13.71     | 1125 |
+| main@b42b720, default (cached) | 40.66      | 11.39     | 3293 |
+| llama.cpp Q4_K_M             | 162.25       | 19.20     | 1812 |
+
+| comparison          | decode | prefill | RAM |
+|---------------------|--------|---------|-----|
+| packed vs cached    | 1.20x faster | 1.07x faster | 2.93x less |
+| packed vs llama.cpp | 1.40x slower | 3.71x slower | 0.62x of llama |
+| cached vs llama.cpp | 1.69x slower | 3.99x slower | 1.86x of llama |
+
+The switch costs nothing on prefill, which was the open risk in the earlier section:
+43.70 against the old cached 40.66 in the same window, and 44.5 for the cached path in
+the quietest window measured. Decode gains 20% and resident memory drops 2.93x, to the
+point where mantle now uses less RAM than llama.cpp for a smaller container.
+
+Decode medians across three windows on this box: 13.71 (load 3), 12.06 and 12.39
+(load 4.5-5). The 15.01 recorded for the uncommitted branch kernel came from a
+load-2.2 window; measured in the same window as `043ab6a` the branch kernel is 11.35
+against 12.39, so `043ab6a` is the faster of the two implementations and the 15.01 was
+a quiet-window figure, not a regression since.
+
 ## Question 2 — 4-bit payloads without the int8 cache
 
 `--no-quant-cache` decodes q*/k* blocks during the matvec instead of expanding every

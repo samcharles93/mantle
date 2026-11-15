@@ -1,0 +1,10 @@
+config	rep	pp_tps	tg_tps	peak_rss_kb
+main-043ab6a-packed	1	40.68	12.77	1151444
+main-b42b720-cached	1	39.38	10.83	3368836
+llama-Q4_K_M	1	145.67	23.56	1854632
+main-b42b720-cached	2	35.92	11.73	3368620
+llama-Q4_K_M	2	151.03	22.90	1855220
+main-043ab6a-packed	2	38.88	12.06	1175576
+llama-Q4_K_M	3	151.40	23.24	1855304
+main-043ab6a-packed	3	39.34	12.04	1137080
+main-b42b720-cached	3	37.49	11.19	3369820

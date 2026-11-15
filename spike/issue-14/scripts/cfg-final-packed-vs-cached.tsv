@@ -1,0 +1,4 @@
+# 043ab6a packed default vs b42b720 cached vs llama Q4_K_M, 5 repeats
+mantle	main-043ab6a-packed	/work/wt/mantle-043ab6a/bin/mantle	/work/models/mcf/probe/lfm3/LFM3-1.7B.k4.mcf
+mantle	main-b42b720-cached	/work/wt/mantle-b42b720/bin/mantle	/work/models/mcf/probe/lfm3/LFM3-1.7B.k4.mcf
+llama	llama-Q4_K_M	/work/tmp/llama-cpu/bin/llama-bench	/work/models/gguf/liquidai/LFM3-1.7B/LFM3-1.7B-Q4_K_M.gguf
