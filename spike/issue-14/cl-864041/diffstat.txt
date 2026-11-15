@@ -1,0 +1,3 @@
+ src/cmd/asm/internal/asm/testdata/amd64enc_extra.s | 14 ++++++++++++++
+ src/cmd/internal/obj/x86/avx_optabs.go             | 16 ++++++++++++----
+ 2 files changed, 26 insertions(+), 4 deletions(-)

@@ -1,0 +1,64 @@
+diff --git a/src/cmd/asm/internal/asm/testdata/amd64enc_extra.s b/src/cmd/asm/internal/asm/testdata/amd64enc_extra.s
+index 1c01a252..7a61b282 100644
+--- a/src/cmd/asm/internal/asm/testdata/amd64enc_extra.s
++++ b/src/cmd/asm/internal/asm/testdata/amd64enc_extra.s
+@@ -8,6 +8,20 @@
+ #include "../../../../../runtime/textflag.h"
+ 
+ TEXT asmtest(SB),DUPOK|NOSPLIT,$0
++
++	// AVX-VNNI (VEX-encoded), added alongside the assembler encodings.
++	VPDPBUSD X0, X1, X2                     // c4e27150d0
++	VPDPBUSD Y0, Y1, Y2                     // c4e27550d0
++	VPDPBUSD X12, X13, X14                  // c4421150f4
++	VPDPBUSD Y12, Y13, Y14                  // c4421550f4
++	VPDPBUSD (AX), Y1, Y2                   // c4e2755010
++	VPDPBUSD 16(AX), X1, X2                 // c4e271505010
++	VPDPBUSDS X0, X1, X2                    // c4e27151d0
++	VPDPBUSDS Y0, Y1, Y2                    // c4e27551d0
++	VPDPWSSD X0, X1, X2                     // c4e27152d0
++	VPDPWSSD Y0, Y1, Y2                     // c4e27552d0
++	VPDPWSSDS X0, X1, X2                    // c4e27153d0
++	VPDPWSSDS Y0, Y1, Y2                    // c4e27553d0
+ 	// AVX2GATHER: basic combinations.
+ 	VPGATHERDQ Y2, (BP)(X7*2), Y1           // c4e2ed904c7d00
+ 	VPGATHERDQ X12, (R13)(X14*2), X11       // c40299905c7500
+diff --git a/src/cmd/internal/obj/x86/avx_optabs.go b/src/cmd/internal/obj/x86/avx_optabs.go
+index b8ff4699..3a209926 100644
+--- a/src/cmd/internal/obj/x86/avx_optabs.go
++++ b/src/cmd/internal/obj/x86/avx_optabs.go
+@@ -3053,22 +3053,30 @@ var avxOptab = [...]Optab{
+ 		avxEscape | evex256 | evex66 | evex0F38 | evexW1, evexN32 | evexBcstN8 | evexZeroingEnabled, 0xC4,
+ 		avxEscape | evex512 | evex66 | evex0F38 | evexW1, evexN64 | evexBcstN8 | evexZeroingEnabled, 0xC4,
+ 	}},
+-	{as: AVPDPBUSD, ytab: _yvblendmpd, prefix: Pavx, op: opBytes{
++	{as: AVPDPBUSD, ytab: _yvandnpd, prefix: Pavx, op: opBytes{
++		avxEscape | vex128 | vex66 | vex0F38 | vexW0, 0x50,
++		avxEscape | vex256 | vex66 | vex0F38 | vexW0, 0x50,
+ 		avxEscape | evex128 | evex66 | evex0F38 | evexW0, evexN16 | evexBcstN4 | evexZeroingEnabled, 0x50,
+ 		avxEscape | evex256 | evex66 | evex0F38 | evexW0, evexN32 | evexBcstN4 | evexZeroingEnabled, 0x50,
+ 		avxEscape | evex512 | evex66 | evex0F38 | evexW0, evexN64 | evexBcstN4 | evexZeroingEnabled, 0x50,
+ 	}},
+-	{as: AVPDPBUSDS, ytab: _yvblendmpd, prefix: Pavx, op: opBytes{
++	{as: AVPDPBUSDS, ytab: _yvandnpd, prefix: Pavx, op: opBytes{
++		avxEscape | vex128 | vex66 | vex0F38 | vexW0, 0x51,
++		avxEscape | vex256 | vex66 | vex0F38 | vexW0, 0x51,
+ 		avxEscape | evex128 | evex66 | evex0F38 | evexW0, evexN16 | evexBcstN4 | evexZeroingEnabled, 0x51,
+ 		avxEscape | evex256 | evex66 | evex0F38 | evexW0, evexN32 | evexBcstN4 | evexZeroingEnabled, 0x51,
+ 		avxEscape | evex512 | evex66 | evex0F38 | evexW0, evexN64 | evexBcstN4 | evexZeroingEnabled, 0x51,
+ 	}},
+-	{as: AVPDPWSSD, ytab: _yvblendmpd, prefix: Pavx, op: opBytes{
++	{as: AVPDPWSSD, ytab: _yvandnpd, prefix: Pavx, op: opBytes{
++		avxEscape | vex128 | vex66 | vex0F38 | vexW0, 0x52,
++		avxEscape | vex256 | vex66 | vex0F38 | vexW0, 0x52,
+ 		avxEscape | evex128 | evex66 | evex0F38 | evexW0, evexN16 | evexBcstN4 | evexZeroingEnabled, 0x52,
+ 		avxEscape | evex256 | evex66 | evex0F38 | evexW0, evexN32 | evexBcstN4 | evexZeroingEnabled, 0x52,
+ 		avxEscape | evex512 | evex66 | evex0F38 | evexW0, evexN64 | evexBcstN4 | evexZeroingEnabled, 0x52,
+ 	}},
+-	{as: AVPDPWSSDS, ytab: _yvblendmpd, prefix: Pavx, op: opBytes{
++	{as: AVPDPWSSDS, ytab: _yvandnpd, prefix: Pavx, op: opBytes{
++		avxEscape | vex128 | vex66 | vex0F38 | vexW0, 0x53,
++		avxEscape | vex256 | vex66 | vex0F38 | vexW0, 0x53,
+ 		avxEscape | evex128 | evex66 | evex0F38 | evexW0, evexN16 | evexBcstN4 | evexZeroingEnabled, 0x53,
+ 		avxEscape | evex256 | evex66 | evex0F38 | evexW0, evexN32 | evexBcstN4 | evexZeroingEnabled, 0x53,
+ 		avxEscape | evex512 | evex66 | evex0F38 | evexW0, evexN64 | evexBcstN4 | evexZeroingEnabled, 0x53,
