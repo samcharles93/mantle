@@ -131,15 +131,17 @@ authentication path are exercised only on CPU here.
    float4/char4 loads, or a two-term int8 split (hi/lo) that keeps tensor cores at ~2x the MMA work
    with f32-like precision.
 
-8. gemma-4 text: loads with `--text-only` (2026-11-15) and the q8 container generates coherently;
-   the `gemma4_vision` tower is still unimplemented, which is why the flag is needed. The k4 container
-   emits zero tokens at greedy because its first sample is the stop token: under the 30.0 softcap the
-   distribution is flat (top1 20.00 `<turn|>`, top2 19.68) and a 4-bit LM head, tied to the
-   262144-way `embed_tokens` and feeding the per-layer input table (46% of the k4 payload), reorders
-   it; q8 resolves the same prompt. Not yet proven by dequantising rows: the next step is a
-   mixed-precision file (q8 embeddings, k4 elsewhere) to confirm the attribution. Two gemma-4 config
-   flags are parsed and never read: `use_double_wide_mlp` (inert, the packed shapes already carry the
-   width) and `vocab_size_per_layer_input` (the PLE table's row count is never validated, so a
-   smaller PLE vocab would mis-index silently).
+8. gemma-4 text: loads with `--text-only` (2026-11-15) and q8 generates correctly; the
+   `gemma4_vision` tower is still unimplemented, which is why the flag is needed. k4 (and q4) cannot
+   be used: at greedy the first sample is the stop token `<turn|>` because the prompt distribution is
+   flat (top1 20.00 stop, top2 19.68 `The`, under a 30.0 softcap) and 4-bit layer weights reorder it.
+   Proven by mixed-precision containers made with `quantize --assignments`: q8 embeddings with k4
+   layers fails the same way, k4 embeddings with q8 layers answers correctly, k6 layers with q8
+   tables answers `"Hi" is a simple greeting.`, and a q4 container fails with the same signature as
+   k4. So the requirement is on layer weights, not embeddings, and 4-bit is too coarse for this model
+   at all; use q8 or k6. Bits of the tied 262144-way head only move the first-token margin.
+   Two gemma-4 config flags are parsed and never read: `use_double_wide_mlp` (inert, the packed
+   shapes already carry the width) and `vocab_size_per_layer_input` (the PLE table's row count is
+   never validated, so a smaller PLE vocab would mis-index silently).
 
 CUDA build: `CUDA=1 task build -f`, then run with `LD_LIBRARY_PATH=/usr/local/cuda-13.2/targets/x86_64-linux/lib`.
