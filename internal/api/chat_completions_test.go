@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -134,6 +135,129 @@ func TestChatCompletionsStreamingOmitsReasoningChunks(t *testing.T) {
 	}
 	if strings.Contains(respBody, "secret") {
 		t.Fatalf("expected reasoning to be omitted from chat stream, got %s", respBody)
+	}
+}
+
+// TestChatCompletionsReasoningOutput pins where a reasoning model's generated
+// text lands in a chat completion and how finish_reason reports truncation. A
+// thinking model that spends its whole budget inside <think>...</think> has no
+// visible content, so its reasoning text is the only generated text there is to
+// return, and a run that used its whole step budget is a length truncation.
+func TestChatCompletionsReasoningOutput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		maxTokens   int
+		result      inference.Result
+		wantContent string
+		wantFinish  string
+	}{
+		{
+			name:        "reasoning only, truncated",
+			maxTokens:   16,
+			result:      inference.Result{ReasoningText: "the user wants a greeting", Stats: inference.Stats{PromptTokens: 11, TokensGenerated: 16}},
+			wantContent: "the user wants a greeting",
+			wantFinish:  "length",
+		},
+		{
+			name:        "reasoning only, stopped early",
+			maxTokens:   16,
+			result:      inference.Result{ReasoningText: "hmm", Stats: inference.Stats{TokensGenerated: 3}},
+			wantContent: "hmm",
+			wantFinish:  "stop",
+		},
+		{
+			name:        "content with reasoning",
+			maxTokens:   16,
+			result:      inference.Result{Text: "Hi!", ReasoningText: "thinking", Stats: inference.Stats{TokensGenerated: 8}},
+			wantContent: "Hi!",
+			wantFinish:  "stop",
+		},
+		{
+			name:        "content, truncated",
+			maxTokens:   4,
+			result:      inference.Result{Text: "Hi", Stats: inference.Stats{TokensGenerated: 4}},
+			wantContent: "Hi",
+			wantFinish:  "length",
+		},
+		{
+			name:        "no token limit, not truncated",
+			maxTokens:   0,
+			result:      inference.Result{Text: "Hi", Stats: inference.Stats{TokensGenerated: 64}},
+			wantContent: "Hi",
+			wantFinish:  "stop",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			service := NewInferenceService(testProvider{engine: testEngine{result: &tc.result}})
+			e := echo.New()
+			NewServer(NewResponseStore(), service).Register(e)
+
+			body := `{"model":"mantle","messages":[{"role":"user","content":"hello"}]}`
+			if tc.maxTokens > 0 {
+				body = fmt.Sprintf(`{"model":"mantle","messages":[{"role":"user","content":"hello"}],"max_tokens":%d}`, tc.maxTokens)
+			}
+			rec := doJSON(t, e, http.MethodPost, "/v1/chat/completions", body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+			}
+
+			var resp ChatCompletionResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if len(resp.Choices) != 1 || resp.Choices[0].Message == nil {
+				t.Fatalf("expected one choice with a message, got %s", rec.Body.String())
+			}
+			if got := resp.Choices[0].Message.Content; got != tc.wantContent {
+				t.Fatalf("content = %v, want %q", got, tc.wantContent)
+			}
+			if resp.Choices[0].FinishReason == nil {
+				t.Fatalf("missing finish_reason in %s", rec.Body.String())
+			}
+			if got := *resp.Choices[0].FinishReason; got != tc.wantFinish {
+				t.Fatalf("finish_reason = %q, want %q", got, tc.wantFinish)
+			}
+		})
+	}
+}
+
+// TestChatCompletionsStreamingReasoningOnly covers the streaming arm of the
+// same rule: a reasoning-only completion sends its reasoning text once as
+// content instead of an empty assistant message, and reports the truncation.
+func TestChatCompletionsStreamingReasoningOnly(t *testing.T) {
+	t.Parallel()
+
+	engine := testEngine{
+		chunks: []inference.StreamChunk{
+			{Type: inference.StreamChunkReasoningDelta, Delta: "the user wants a greeting"},
+		},
+		result: &inference.Result{
+			ReasoningText: "the user wants a greeting",
+			Stats:         inference.Stats{TokensGenerated: 16},
+		},
+	}
+	service := NewInferenceService(testProvider{engine: engine})
+	e := echo.New()
+	NewServer(NewResponseStore(), service).Register(e)
+
+	body := `{"model":"mantle","messages":[{"role":"user","content":"hello"}],"stream":true,"max_tokens":16}`
+	rec := doJSON(t, e, http.MethodPost, "/v1/chat/completions", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	respBody := rec.Body.String()
+	if !strings.Contains(respBody, "the user wants a greeting") {
+		t.Fatalf("expected reasoning text as content in stream, got %s", respBody)
+	}
+	if !strings.Contains(respBody, `"finish_reason":"length"`) {
+		t.Fatalf("expected finish_reason length in stream, got %s", respBody)
 	}
 }
 

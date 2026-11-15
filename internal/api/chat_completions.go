@@ -167,7 +167,9 @@ func (s *Server) handleChatCompletions(c *echo.Context) error {
 
 func (s *Server) handleChatCompletionsSync(c *echo.Context, req ChatCompletionRequest, msgs []tokenizer.Message, completionID string, created int64, model string) error {
 	var resultText string
+	var resultReasoning string
 	var resultStats inference.Stats
+	var resultSteps int
 
 	err := s.service.provider.WithEngine(c.Request().Context(), req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
 		inferReq := chatToInferenceRequest(&req, msgs, defaults)
@@ -176,14 +178,16 @@ func (s *Server) handleChatCompletionsSync(c *echo.Context, req ChatCompletionRe
 			return err
 		}
 		resultText = result.Text
+		resultReasoning = result.ReasoningText
 		resultStats = result.Stats
+		resultSteps = inferReq.Steps
 		return nil
 	})
 	if err != nil {
 		return writeError(c, http.StatusInternalServerError, "server_error", err.Error(), "", "")
 	}
 
-	finishReason := "stop"
+	finishReason := chatFinishReason(resultSteps, resultStats.TokensGenerated)
 	resp := ChatCompletionResponse{
 		ID:      completionID,
 		Object:  "chat.completion",
@@ -194,7 +198,7 @@ func (s *Server) handleChatCompletionsSync(c *echo.Context, req ChatCompletionRe
 				Index: 0,
 				Message: &ChatMessage{
 					Role:    "assistant",
-					Content: resultText,
+					Content: chatCompletionContent(resultText, resultReasoning),
 				},
 				FinishReason: &finishReason,
 			},
@@ -207,6 +211,27 @@ func (s *Server) handleChatCompletionsSync(c *echo.Context, req ChatCompletionRe
 	}
 
 	return c.JSON(http.StatusOK, resp)
+}
+
+// chatCompletionContent returns the assistant content for a chat completion.
+// A thinking model can spend its whole token budget inside <think>...</think>
+// and emit no visible content, in which case the reasoning text is the only
+// text the completion generated.
+func chatCompletionContent(text, reasoningText string) string {
+	if text != "" {
+		return text
+	}
+	return reasoningText
+}
+
+// chatFinishReason maps the engine's stop condition to an OpenAI finish_reason.
+// Generation ends on a stop token or on the caller's step budget, and only the
+// budget case is a truncation.
+func chatFinishReason(steps, tokensGenerated int) string {
+	if steps > 0 && tokensGenerated >= steps {
+		return "length"
+	}
+	return "stop"
 }
 
 func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletionRequest, msgs []tokenizer.Message, completionID string, created int64, model string) error {
@@ -238,28 +263,39 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 	}
 	flusher.Flush()
 
+	sendDelta := func(delta string) {
+		if delta == "" {
+			return
+		}
+		sseChunk := ChatCompletionChunk{
+			ID:      completionID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   model,
+			Choices: []ChatChoice{
+				{
+					Index: 0,
+					Delta: &ChatMessage{Content: delta},
+				},
+			},
+		}
+		_ = sendSSEChunk(res, sseChunk)
+		flusher.Flush()
+	}
+
+	var result *inference.Result
+	var resultSteps int
 	err := s.service.provider.WithEngine(c.Request().Context(), req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
 		inferReq := chatToInferenceRequest(&req, msgs, defaults)
-		_, err := engine.Generate(c.Request().Context(), &inferReq, func(streamChunk inference.StreamChunk) {
+		resultSteps = inferReq.Steps
+		var genErr error
+		result, genErr = engine.Generate(c.Request().Context(), &inferReq, func(streamChunk inference.StreamChunk) {
 			if streamChunk.Type != inference.StreamChunkTextDelta && streamChunk.Type != inference.StreamChunkPromptEcho {
 				return
 			}
-			sseChunk := ChatCompletionChunk{
-				ID:      completionID,
-				Object:  "chat.completion.chunk",
-				Created: created,
-				Model:   model,
-				Choices: []ChatChoice{
-					{
-						Index: 0,
-						Delta: &ChatMessage{Content: streamChunk.Delta},
-					},
-				},
-			}
-			_ = sendSSEChunk(res, sseChunk)
-			flusher.Flush()
+			sendDelta(streamChunk.Delta)
 		})
-		return err
+		return genErr
 	})
 	if err != nil {
 		// Best effort error chunk
@@ -267,8 +303,17 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 		flusher.Flush()
 	}
 
+	// A reasoning-only completion streamed nothing visible, so send the
+	// reasoning text once as content rather than an empty assistant message.
+	if result != nil && result.Text == "" {
+		sendDelta(result.ReasoningText)
+	}
+
 	// Send final chunk with finish_reason
 	finishReason := "stop"
+	if result != nil {
+		finishReason = chatFinishReason(resultSteps, result.Stats.TokensGenerated)
+	}
 	finalChunk := ChatCompletionChunk{
 		ID:      completionID,
 		Object:  "chat.completion.chunk",
