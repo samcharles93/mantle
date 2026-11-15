@@ -1,0 +1,134 @@
+diff --git a/x86/x86avxgen/decode.go b/x86/x86avxgen/decode.go
+index 667f77c..3411a00 100644
+--- a/x86/x86avxgen/decode.go
++++ b/x86/x86avxgen/decode.go
+@@ -8,6 +8,7 @@ import (
+ 	"fmt"
+ 	"log"
+ 	"regexp"
++	"sort"
+ 	"strings"
+ 
+ 	"golang.org/x/arch/x86/xeddata"
+@@ -55,6 +56,22 @@ type encoding struct {
+ type decoder struct {
+ 	ctx   *context
+ 	insts []*instruction
++
++	// skipped is set when an object uses an operand class or tuple this
++	// package does not model. DecodeAll drops such objects instead of
++	// failing, so that generating from a newer Intel XED keeps working.
++	skipped     bool
++	skippedObjs int
++	skipClasses map[string]int
++}
++
++// noteSkip records that the current object uses an unmodelled operand kind.
++func (d *decoder) noteSkip(what string) {
++	d.skipped = true
++	if d.skipClasses == nil {
++		d.skipClasses = make(map[string]int)
++	}
++	d.skipClasses[what]++
+ }
+ 
+ // decodeGroups fills ctx.groups with decoded instruction groups.
+@@ -77,6 +94,7 @@ func decodeGroups(ctx *context) {
+ // DecodeAll decodes every XED instruction.
+ func (d *decoder) DecodeAll() []*instruction {
+ 	err := xeddata.WalkInsts(d.ctx.xedPath, func(inst *xeddata.Inst) {
++		d.skipped = false
+ 		inst.Pattern = xeddata.ExpandStates(d.ctx.db, inst.Pattern)
+ 		pset := xeddata.NewPatternSet(inst.Pattern)
+ 
+@@ -95,7 +113,11 @@ func (d *decoder) DecodeAll() []*instruction {
+ 		pset.Replace("FIX_ROUND_LEN128()", "VL=0")
+ 		pset.Replace("FIX_ROUND_LEN512()", "VL=2")
+ 
+-		mask, args := d.decodeArgs(pset, inst)
++		mask, args, ok := d.decodeArgs(pset, inst)
++		if !ok || d.skipped {
++			d.skippedObjs++
++			return // Operand class or tuple this package does not model
++		}
+ 		d.insts = append(d.insts, &instruction{
+ 			pset:   pset,
+ 			opcode: opcode,
+@@ -107,6 +129,15 @@ func (d *decoder) DecodeAll() []*instruction {
+ 	if err != nil {
+ 		log.Fatalf("walk insts: %v", err)
+ 	}
++	if d.skippedObjs > 0 {
++		var kinds []string
++		for k, n := range d.skipClasses {
++			kinds = append(kinds, fmt.Sprintf("%s x%d", k, n))
++		}
++		sort.Strings(kinds)
++		log.Printf("decoded %d instructions, skipped %d XED objects with unmodelled operands: %s",
++			len(d.insts), d.skippedObjs, strings.Join(kinds, ", "))
++	}
+ 	return d.insts
+ }
+ 
+@@ -153,7 +184,7 @@ var registerArgs = map[string]argument{
+ 	"MASK1()": {"MASK1()", "MASK1()"},
+ }
+ 
+-func (d *decoder) decodeArgs(pset xeddata.PatternSet, inst *xeddata.Inst) (mask *argument, args []*argument) {
++func (d *decoder) decodeArgs(pset xeddata.PatternSet, inst *xeddata.Inst) (mask *argument, args []*argument, ok bool) {
+ 	for i, f := range strings.Fields(inst.Operands) {
+ 		xarg, err := xeddata.NewOperand(d.ctx.db, f)
+ 		if err != nil {
+@@ -173,7 +204,9 @@ func (d *decoder) decodeArgs(pset xeddata.PatternSet, inst *xeddata.Inst) (mask
+ 		switch xarg.NameLHS() {
+ 		case "IMM0":
+ 			if xarg.Width != "b" {
+-				log.Fatalf("%s: args[%d]: expected width=b, found %s", inst, i, xarg.Width)
++				// APX introduces immediates that are not byte-wide (IMMz).
++				d.noteSkip("IMM0 width " + xarg.Width)
++				return nil, nil, false
+ 			}
+ 			if pset["IMM0SIGNED=1"] {
+ 				arg.ytype = "Yi8"
+@@ -189,7 +222,11 @@ func (d *decoder) decodeArgs(pset xeddata.PatternSet, inst *xeddata.Inst) (mask
+ 			}
+ 			*arg = registerArgs[rhs]
+ 			if arg.ytype == "" {
+-				log.Fatalf("%s: args[%d]: unexpected %s reg", inst, i, rhs)
++				// A register class the assembler has no operand type for,
++				// such as AMX tile or APX registers. Drop the object and
++				// record the class so the skip is visible.
++				d.noteSkip(rhs)
++				return nil, nil, false
+ 			}
+ 			if xarg.Attributes["MULTISOURCE4"] {
+ 				arg.ytype += "Multi4"
+@@ -206,7 +243,8 @@ func (d *decoder) decodeArgs(pset xeddata.PatternSet, inst *xeddata.Inst) (mask
+ 			arg.zkind = "reg/mem"
+ 
+ 		default:
+-			log.Fatalf("%s: args[%d]: unexpected %s", inst, i, xarg.NameRHS())
++			d.noteSkip(xarg.NameRHS())
++			return nil, nil, false
+ 		}
+ 	}
+ 
+@@ -216,7 +254,7 @@ func (d *decoder) decodeArgs(pset xeddata.PatternSet, inst *xeddata.Inst) (mask
+ 		args[i], args[j] = args[j], args[i]
+ 	}
+ 
+-	return mask, args
++	return mask, args, true
+ }
+ 
+ func (d *decoder) decodePattern(pset xeddata.PatternSet, inst *xeddata.Inst) *encoding {
+@@ -388,7 +426,8 @@ func (d *decoder) findEVEXBcstScale(pset xeddata.PatternSet, inst *xeddata.Inst)
+ 		return "BcstN4"
+ 	default:
+ 		if inst.HasAttribute("BROADCAST_ENABLED") {
+-			log.Fatalf("%s: unexpected tuple for bcst", inst)
++			d.noteSkip("bcst tuple " + pset.String())
++			return ""
+ 		}
+ 		return ""
+ 	}

@@ -99,3 +99,48 @@ and returns eight int32 lanes. `main.go` checks it against a scalar reference:
 - **mantle is not using this yet.** The intrinsic path (`AddDotProductQuads` in
   archsimd) remains unlanded, so mantle would consume this through a hand-written
   `.s` file, which is the route `dot_amd64.s` demonstrates.
+
+---
+
+# Companion CL 863322 — x86avxgen skips unmodelled operands
+
+    https://go-review.googlesource.com/c/arch/+/863322    NEW, master, +46/-7
+
+`x86/x86avxgen/decode.go`: an XED operand class or broadcast tuple the generator
+does not model was a fatal error, so the tool died on the first unknown thing in a
+current Intel XED. It now records the object as skipped, accumulates the reason, and
+reports the totals at the end of `DecodeAll`.
+
+Against Intel XED v2026.08.23 (`0bcb6237`) the decode stage completes:
+
+    6237 instructions decoded, 2188 XED objects skipped, reasons reported:
+      GPRv_N() x556, GPRv_B() x428, GPRv_R() x384, GPR8_B() x193, GPR8_N() x170,
+      GPR8_R() x101, GPR64_N() x56, GPR32_N() x56, TMM_R3() x19, TMM_R() x18,
+      TMM_B3() x12, IMM0 width z x120, IMM0 width d x8, XED_REG_CL x42,
+      XED_REG_BSR0 x11, plus 18 EVEX broadcast tuples over NELEM_QUARTER()
+
+Most of that is APX and AMX, i.e. ISA extensions Go's assembler has no operand types
+for. The APX list is worth reading twice: `GPRv_*`/`GPR8_*` are largely *renames* of
+classes the map already knows under other spellings, so a chunk of those 2188 could
+be recovered by mapping the new names rather than by adding instructions.
+
+**No behaviour change on the supported path.** Output for the checked-in XED test
+data is byte-identical before and after, and `x86/x86avxgen` tests pass. The
+pre-existing `riscv64` objdump test failures are unrelated (they fail on a clean tree
+too; they need local test data).
+
+## Where a full regeneration still stops
+
+    x86avxgen: generate.go:220: no zcase for "evex imm8 reg/mem opdigit"
+
+The generate stage runs after decode and has its own gap, so even with decoding fixed
+a full regeneration from current XED does not complete. Two remaining pieces of work:
+
+1. Add the missing zcase (and whatever follows it) in `generate.go`.
+2. Map the renamed APX register classes onto Go operand types, otherwise a regenerated
+   table would silently lose instructions that the assembler could otherwise support.
+
+Only then would a "regenerate the table from current XED" CL make sense, and it would
+be a large diff of new instruction forms needing its own review. Neither is required
+for CL 864041: the four VPDP rows are what the generator emits from VEX XED objects,
+which the fixture-based run in `generator-vs-manual.diff` demonstrates.
