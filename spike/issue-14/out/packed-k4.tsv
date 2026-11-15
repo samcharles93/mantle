@@ -1,0 +1,10 @@
+config	rep	pp_tps	tg_tps	peak_rss_kb
+branch-packed-nocache	1	18.75	15.01	1147276
+branch-cached	1	45.49	11.97	3373260
+llama-q4km	1	197.54	25.79	1854836
+llama-q4km	2	169.71	22.05	1855448
+branch-packed-nocache	2	18.31	15.18	1192664
+branch-cached	2	41.13	12.36	3369236
+branch-cached	3	44.48	12.43	3372196
+llama-q4km	3	170.18	24.21	1855560
+branch-packed-nocache	3	15.76	14.77	1174316

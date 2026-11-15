@@ -82,6 +82,37 @@ So dequant buys 1.7x prefill (cuBLAS f16 GEMM) and loses 1.2x decode and 300 MiB
   llama Q4_K_M decodes faster than Q8_0 (132.5 against 88.9). The k4 sub-scale
   correction costs more than the bytes it saves.
 
+## The packed 4-bit matvec (`run3/quant-quality`, uncommitted)
+
+The branch build replaces the on-the-fly block decode with a matvec that reads the
+packed nibbles straight from the payload (`dotBlocksPacked4Int16`: 16 bytes per
+32-element block, sign-extended with `(n ^ 8) - 8` in AVX2 lanes, no int8 cache).
+Measured quiet (load average 2.2), 64 tokens generated, three configs rotating order
+over 3 repeats, medians:
+
+| config                        | prompt tok/s | gen tok/s | peak RSS MiB |
+|-------------------------------|--------------|-----------|--------------|
+| branch, `--no-quant-cache`    | 18.31        | 15.01     | 1147 |
+| branch, cached                | 44.48        | 12.36     | 3293 |
+| llama.cpp Q4_K_M              | 170.18       | 24.21     | 1812 |
+
+| comparison      | decode | prefill | RAM |
+|-----------------|--------|---------|-----|
+| packed vs cached | 1.21x faster | 2.43x slower | 2.87x less |
+| packed vs llama.cpp | 1.61x slower | 9.29x slower | 0.63x of llama |
+| cached vs llama.cpp | 1.96x slower | 3.83x slower | 1.82x of llama |
+
+Why prefill falls over: the batched prefill GEMM (`matmat_quant.go`) requires
+`w.Quant`, so with the cache disabled it falls back to the per-token matvec. The
+packed kernel is therefore a decode and memory win and a prefill regression, and the
+prefill regression is the same missing piece as finding 3 below: the batched path
+needs to read the packed payload too.
+
+This is the first mantle configuration that beats llama.cpp on memory (1147 MiB
+against 1812 MiB for a container 10% smaller than Q4_K_M) and the closest on decode
+(1.61x against 1.96x). Output text is identical between the packed and cached paths
+on the same binary.
+
 ## Question 2 — 4-bit payloads without the int8 cache
 
 `--no-quant-cache` decodes q*/k* blocks during the matvec instead of expanding every
@@ -144,12 +175,13 @@ in this document uses the CPU-only build.
 
 ## What to fix first
 
-1. **Fused 4-bit dot product on CPU.** Decode is flat across bit widths (k4 9.52,
-   q8 9.33) because both read the int8 cache, and the cache costs 3.6x the file in
-   RAM. Removing the cache naively is not the answer (7.3x slower decode), so the
-   work is a k4 block-dot kernel on packed payload, which also removes the reason
-   for the cache to exist. This single item covers the decode gap, the memory
-   inflation and the flat bit-width curve.
+1. **Fused 4-bit dot product on CPU, and route the batched prefill through it.** The
+   packed-nibble matvec on `run3/quant-quality` already proves the decode and memory
+   half: 1.21x faster decode than the int8 cache at 2.87x less RAM, beating
+   llama.cpp's footprint. What is missing is the batched prefill, which still
+   requires `w.Quant`, so prefill drops from 44.5 to 18.3 tok/s when the cache is
+   off. Fix that path and the cache stops being needed at all, which also removes
+   the 3.6x file-to-RSS inflation.
 2. **Stop holding two copies of 4-bit weights in VRAM.** k4 peaks at 3129 MiB for a
    906 MiB file because the raw payload and the int8 prefill cache are both resident.
    Either make the batched prefill read the raw payload like the per-token path does,
