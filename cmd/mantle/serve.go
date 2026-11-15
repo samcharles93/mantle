@@ -156,6 +156,7 @@ func serveCmd() *cli.Command {
 				Backend:             backend,
 			}
 			loader.LoadOptions.GpuLayers = -1
+			loader.LoadOptions.NoQuantCache = noQuantCache
 			loader.TextOnly = textOnly
 			provider := api.NewCachedEngineProvider(api.EngineProviderConfig{
 				DefaultModelPath: modelPath,

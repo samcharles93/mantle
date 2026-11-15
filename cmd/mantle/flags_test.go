@@ -92,3 +92,34 @@ func TestTextOnlyFlagOnModelCommands(t *testing.T) {
 		t.Fatalf("MANTLE_TEXT_ONLY=1 did not set the load option")
 	}
 }
+
+func TestNoQuantCacheFlagOnModelCommands(t *testing.T) {
+	for _, cmd := range []*cli.Command{runCmd(), serveCmd(), benchmarkCmd(), traceCmd()} {
+		var flag *cli.BoolFlag
+		for _, f := range cmd.Flags {
+			if bf, ok := f.(*cli.BoolFlag); ok && bf.Name == "no-quant-cache" {
+				flag = bf
+			}
+		}
+		if flag == nil {
+			t.Fatalf("%s: missing --no-quant-cache flag", cmd.Name)
+		}
+		if flag.Destination != any(&noQuantCache) {
+			t.Fatalf("%s: --no-quant-cache does not target the shared noQuantCache field", cmd.Name)
+		}
+	}
+	t.Setenv("MANTLE_NO_QUANT_CACHE", "1")
+	noQuantCache = false
+	t.Cleanup(func() { noQuantCache = false })
+	cmd := &cli.Command{
+		Name:   "parse",
+		Flags:  commonModelFlags(),
+		Action: func(context.Context, *cli.Command) error { return nil },
+	}
+	if err := cmd.Run(context.Background(), []string{"parse"}); err != nil {
+		t.Fatal(err)
+	}
+	if !noQuantCache {
+		t.Fatal("MANTLE_NO_QUANT_CACHE did not set the load option")
+	}
+}

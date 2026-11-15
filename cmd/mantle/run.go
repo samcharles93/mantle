@@ -512,6 +512,7 @@ func runCmd() *cli.Command {
 			}
 			loader.LoadOptions.CacheTypeK = c.String("cache-type-k")
 			loader.LoadOptions.CacheTypeV = c.String("cache-type-v")
+			loader.LoadOptions.NoQuantCache = noQuantCache
 			loader.LoadOptions.GpuLayers = int(gpuLayers)
 			tapLayers, err := parseTapLayers(captureTaps)
 			if err != nil {

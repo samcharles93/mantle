@@ -20,6 +20,7 @@ var (
 	logFormat         string
 	debug             bool
 	textOnly          bool
+	noQuantCache      bool
 )
 
 func commonModelFlags() []cli.Flag {
@@ -55,6 +56,13 @@ func commonModelFlags() []cli.Flag {
 			Value:       "auto",
 			Sources:     cli.EnvVars("MANTLE_BACKEND"),
 			Destination: &backend,
+		},
+		&cli.BoolFlag{
+			Name:        "no-quant-cache",
+			Category:    "Model Configuration",
+			Usage:       "CPU backend: keep quantized weights packed and decode them during each matvec instead of expanding every weight to int8 at load (less RAM, much slower)",
+			Sources:     cli.EnvVars("MANTLE_NO_QUANT_CACHE"),
+			Destination: &noQuantCache,
 		},
 	}
 }

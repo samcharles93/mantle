@@ -100,6 +100,7 @@ func traceCmd() *cli.Command {
 				HFConfigPath:        hfConfig,
 				Backend:             backend,
 			}
+			loader.LoadOptions.NoQuantCache = noQuantCache
 			loadResult, err := loader.Load(ctx, modelPath, int(maxContext))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: load mcf model: %v", err), 1)

@@ -11,6 +11,13 @@ type LoadModelOptions struct {
 	GpuLayers    int  // -1 auto, 0 all layers on CPU, N first N layers on GPU
 	UseGraph     bool // experimental: use graph-based execution
 
+	// NoQuantCache keeps q*/k* payloads in their packed on-disk form and decodes
+	// blocks during the matrix-vector product instead of pre-expanding every
+	// weight to an int8 block plus an f32 scale at load. It trades decode speed
+	// for resident memory: the int8 cache is one byte per weight, so a 4-bit
+	// container otherwise costs 8 bits per weight in RAM.
+	NoQuantCache bool
+
 	// TextOnly loads the text decoder of a multimodal checkpoint and leaves a
 	// declared vision/audio tower unbuilt, so a checkpoint whose tower this
 	// build cannot construct still runs for text. The runtime then reports no
