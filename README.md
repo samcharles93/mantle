@@ -118,6 +118,11 @@ mantle pack --in /path/to/model --out /work/models/MyModel.mcf
 mantle serve --model /models/mcf/Qwen3-0.6B.k4.mcf --addr 127.0.0.1:8080
 ```
 
+Thinking models keep their trace separate: `/v1/chat/completions` returns it in
+`reasoning_content` (streamed as `delta.reasoning_content`) and the answer in `content`, and both
+endpoints accept `reasoning_format` (`auto`, `none`, `deepseek`, `deepseek-legacy`) and
+`reasoning_budget` (`0` asks the chat template to disable thinking, `-1` leaves it unrestricted).
+
 `/v1/*` is unauthenticated by default (local use). Set `--api-key` (or
 `MANTLE_API_KEY`) to require `Authorization: Bearer <key>` or `X-API-Key: <key>`;
 the embedded web UI keeps loading without it. Request bodies are capped at

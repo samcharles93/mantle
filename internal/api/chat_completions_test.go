@@ -103,7 +103,7 @@ func TestChatCompletionsStreaming(t *testing.T) {
 	}
 }
 
-func TestChatCompletionsStreamingOmitsReasoningChunks(t *testing.T) {
+func TestChatCompletionsStreamingReasoningChannel(t *testing.T) {
 	t.Parallel()
 
 	provider := testProvider{
@@ -130,49 +130,56 @@ func TestChatCompletionsStreamingOmitsReasoningChunks(t *testing.T) {
 	}
 
 	respBody := rec.Body.String()
-	if !strings.Contains(respBody, "visible") {
-		t.Fatalf("expected visible content in stream, got %s", respBody)
+	if !strings.Contains(respBody, `"content":"visible"`) {
+		t.Fatalf("expected visible content in the content channel, got %s", respBody)
 	}
-	if strings.Contains(respBody, "secret") {
-		t.Fatalf("expected reasoning to be omitted from chat stream, got %s", respBody)
+	if !strings.Contains(respBody, `"reasoning_content":"secret"`) {
+		t.Fatalf("expected reasoning in the reasoning_content channel, got %s", respBody)
+	}
+	if strings.Contains(respBody, `"content":"secret"`) {
+		t.Fatalf("reasoning leaked into the content channel: %s", respBody)
 	}
 }
 
-// TestChatCompletionsReasoningOutput pins where a reasoning model's generated
-// text lands in a chat completion and how finish_reason reports truncation. A
-// thinking model that spends its whole budget inside <think>...</think> has no
-// visible content, so its reasoning text is the only generated text there is to
-// return, and a run that used its whole step budget is a length truncation.
+// TestChatCompletionsReasoningOutput pins the two output channels and how
+// finish_reason reports truncation. A thinking model that spends its whole
+// budget inside <think>...</think> has no visible content: the answer goes in
+// reasoning_content, content stays empty as the OpenAI-compatible servers do,
+// and a run that used its whole step budget is a length truncation.
 func TestChatCompletionsReasoningOutput(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		maxTokens   int
-		result      inference.Result
-		wantContent string
-		wantFinish  string
+		name          string
+		maxTokens     int
+		result        inference.Result
+		wantContent   string
+		wantReasoning string
+		wantFinish    string
 	}{
 		{
-			name:        "reasoning only, truncated",
-			maxTokens:   16,
-			result:      inference.Result{ReasoningText: "the user wants a greeting", Stats: inference.Stats{PromptTokens: 11, TokensGenerated: 16}},
-			wantContent: "the user wants a greeting",
-			wantFinish:  "length",
+			name:          "reasoning only, truncated",
+			maxTokens:     16,
+			result:        inference.Result{ReasoningText: "the user wants a greeting", Stats: inference.Stats{PromptTokens: 11, TokensGenerated: 16}},
+			wantContent:   "",
+			wantReasoning: "the user wants a greeting",
+			wantFinish:    "length",
 		},
 		{
-			name:        "reasoning only, stopped early",
-			maxTokens:   16,
-			result:      inference.Result{ReasoningText: "hmm", Stats: inference.Stats{TokensGenerated: 3}},
-			wantContent: "hmm",
-			wantFinish:  "stop",
+			name:          "reasoning only, stopped early",
+			maxTokens:     16,
+			result:        inference.Result{ReasoningText: "hmm", Stats: inference.Stats{TokensGenerated: 3}},
+			wantContent:   "",
+			wantReasoning: "hmm",
+			wantFinish:    "stop",
 		},
 		{
-			name:        "content with reasoning",
-			maxTokens:   16,
-			result:      inference.Result{Text: "Hi!", ReasoningText: "thinking", Stats: inference.Stats{TokensGenerated: 8}},
-			wantContent: "Hi!",
-			wantFinish:  "stop",
+			name:          "content with reasoning",
+			maxTokens:     16,
+			result:        inference.Result{Text: "Hi!", ReasoningText: "thinking", Stats: inference.Stats{TokensGenerated: 8}},
+			wantContent:   "Hi!",
+			wantReasoning: "thinking",
+			wantFinish:    "stop",
 		},
 		{
 			name:        "content, truncated",
@@ -217,6 +224,9 @@ func TestChatCompletionsReasoningOutput(t *testing.T) {
 			if got := resp.Choices[0].Message.Content; got != tc.wantContent {
 				t.Fatalf("content = %v, want %q", got, tc.wantContent)
 			}
+			if got := resp.Choices[0].Message.ReasoningContent; got != tc.wantReasoning {
+				t.Fatalf("reasoning_content = %q, want %q", got, tc.wantReasoning)
+			}
 			if resp.Choices[0].FinishReason == nil {
 				t.Fatalf("missing finish_reason in %s", rec.Body.String())
 			}
@@ -227,9 +237,9 @@ func TestChatCompletionsReasoningOutput(t *testing.T) {
 	}
 }
 
-// TestChatCompletionsStreamingReasoningOnly covers the streaming arm of the
-// same rule: a reasoning-only completion sends its reasoning text once as
-// content instead of an empty assistant message, and reports the truncation.
+// TestChatCompletionsStreamingReasoningOnly covers the streaming arm: a
+// reasoning-only completion streams into reasoning_content, leaves content
+// empty, and reports the truncation.
 func TestChatCompletionsStreamingReasoningOnly(t *testing.T) {
 	t.Parallel()
 
@@ -253,12 +263,66 @@ func TestChatCompletionsStreamingReasoningOnly(t *testing.T) {
 	}
 
 	respBody := rec.Body.String()
-	if !strings.Contains(respBody, "the user wants a greeting") {
-		t.Fatalf("expected reasoning text as content in stream, got %s", respBody)
+	if !strings.Contains(respBody, `"reasoning_content":"the user wants a greeting"`) {
+		t.Fatalf("expected reasoning in reasoning_content, got %s", respBody)
+	}
+	if strings.Contains(respBody, `"content":"the user wants a greeting"`) {
+		t.Fatalf("reasoning leaked into the content channel: %s", respBody)
 	}
 	if !strings.Contains(respBody, `"finish_reason":"length"`) {
 		t.Fatalf("expected finish_reason length in stream, got %s", respBody)
 	}
+}
+
+// TestChatCompletionsReasoningKnobs checks that the chat endpoint accepts the
+// same reasoning controls as /v1/responses and that a request value wins over
+// the server default.
+func TestChatCompletionsReasoningKnobs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("request overrides the server default", func(t *testing.T) {
+		engine := &captureEngine{}
+		service := NewInferenceService(testProvider{engine: engine})
+		service.SetReasoningDefaults("auto", -1)
+		e := echo.New()
+		NewServer(NewResponseStore(), service).Register(e)
+
+		body := `{"model":"mantle","messages":[{"role":"user","content":"hello"}],"reasoning_format":"none","reasoning_budget":0}`
+		if rec := doJSON(t, e, http.MethodPost, "/v1/chat/completions", body); rec.Code != http.StatusOK {
+			t.Fatalf("status %d body=%s", rec.Code, rec.Body.String())
+		}
+		if engine.req == nil {
+			t.Fatal("expected the request to reach the engine")
+		}
+		if engine.req.ReasoningFormat != "none" {
+			t.Fatalf("reasoning format = %q, want none", engine.req.ReasoningFormat)
+		}
+		if engine.req.ReasoningBudget != 0 {
+			t.Fatalf("reasoning budget = %d, want 0", engine.req.ReasoningBudget)
+		}
+	})
+
+	t.Run("server default applies when the request omits them", func(t *testing.T) {
+		engine := &captureEngine{}
+		service := NewInferenceService(testProvider{engine: engine})
+		service.SetReasoningDefaults("deepseek-legacy", 0)
+		e := echo.New()
+		NewServer(NewResponseStore(), service).Register(e)
+
+		body := `{"model":"mantle","messages":[{"role":"user","content":"hello"}]}`
+		if rec := doJSON(t, e, http.MethodPost, "/v1/chat/completions", body); rec.Code != http.StatusOK {
+			t.Fatalf("status %d body=%s", rec.Code, rec.Body.String())
+		}
+		if engine.req == nil {
+			t.Fatal("expected the request to reach the engine")
+		}
+		if engine.req.ReasoningFormat != "deepseek-legacy" {
+			t.Fatalf("reasoning format = %q, want the server default", engine.req.ReasoningFormat)
+		}
+		if engine.req.ReasoningBudget != 0 {
+			t.Fatalf("reasoning budget = %d, want the server default 0", engine.req.ReasoningBudget)
+		}
+	})
 }
 
 func TestChatCompletionsWithTemperature(t *testing.T) {

@@ -36,13 +36,19 @@ type ChatCompletionRequest struct {
 	Tools               []ChatTool          `json:"tools,omitempty"`
 	ToolChoice          any                 `json:"tool_choice,omitempty"`
 	ResponseFormat      *ChatResponseFormat `json:"response_format,omitempty"`
+	ReasoningFormat     string              `json:"reasoning_format,omitempty"`
+	ReasoningBudget     *int                `json:"reasoning_budget,omitempty"`
 }
 
 type ChatMessage struct {
-	Role       string `json:"role"`
-	Content    any    `json:"content"`
-	Name       string `json:"name,omitempty"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+	// ReasoningContent carries the model's thinking for thinking models, the
+	// same channel /v1/responses exposes separately. It is empty for models
+	// that do not emit any.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Name             string `json:"name,omitempty"`
+	ToolCallID       string `json:"tool_call_id,omitempty"`
 }
 
 type ChatTool struct {
@@ -172,7 +178,7 @@ func (s *Server) handleChatCompletionsSync(c *echo.Context, req ChatCompletionRe
 	var resultSteps int
 
 	err := s.service.provider.WithEngine(c.Request().Context(), req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
-		inferReq := chatToInferenceRequest(&req, msgs, defaults)
+		inferReq := chatToInferenceRequest(&req, msgs, defaults, s.service.defaultReasoningFormat, s.service.defaultReasoningBudget)
 		result, err := engine.Generate(c.Request().Context(), &inferReq, nil)
 		if err != nil {
 			return err
@@ -197,8 +203,9 @@ func (s *Server) handleChatCompletionsSync(c *echo.Context, req ChatCompletionRe
 			{
 				Index: 0,
 				Message: &ChatMessage{
-					Role:    "assistant",
-					Content: chatCompletionContent(resultText, resultReasoning),
+					Role:             "assistant",
+					Content:          resultText,
+					ReasoningContent: resultReasoning,
 				},
 				FinishReason: &finishReason,
 			},
@@ -211,17 +218,6 @@ func (s *Server) handleChatCompletionsSync(c *echo.Context, req ChatCompletionRe
 	}
 
 	return c.JSON(http.StatusOK, resp)
-}
-
-// chatCompletionContent returns the assistant content for a chat completion.
-// A thinking model can spend its whole token budget inside <think>...</think>
-// and emit no visible content, in which case the reasoning text is the only
-// text the completion generated.
-func chatCompletionContent(text, reasoningText string) string {
-	if text != "" {
-		return text
-	}
-	return reasoningText
 }
 
 // chatFinishReason maps the engine's stop condition to an OpenAI finish_reason.
@@ -263,8 +259,8 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 	}
 	flusher.Flush()
 
-	sendDelta := func(delta string) {
-		if delta == "" {
+	sendDelta := func(delta ChatMessage) {
+		if delta.Content == nil && delta.ReasoningContent == "" {
 			return
 		}
 		sseChunk := ChatCompletionChunk{
@@ -275,7 +271,7 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 			Choices: []ChatChoice{
 				{
 					Index: 0,
-					Delta: &ChatMessage{Content: delta},
+					Delta: &delta,
 				},
 			},
 		}
@@ -286,14 +282,16 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 	var result *inference.Result
 	var resultSteps int
 	err := s.service.provider.WithEngine(c.Request().Context(), req.Model, func(engine inference.Engine, defaults inference.GenDefaults) error {
-		inferReq := chatToInferenceRequest(&req, msgs, defaults)
+		inferReq := chatToInferenceRequest(&req, msgs, defaults, s.service.defaultReasoningFormat, s.service.defaultReasoningBudget)
 		resultSteps = inferReq.Steps
 		var genErr error
 		result, genErr = engine.Generate(c.Request().Context(), &inferReq, func(streamChunk inference.StreamChunk) {
-			if streamChunk.Type != inference.StreamChunkTextDelta && streamChunk.Type != inference.StreamChunkPromptEcho {
-				return
+			switch streamChunk.Type {
+			case inference.StreamChunkTextDelta, inference.StreamChunkPromptEcho:
+				sendDelta(ChatMessage{Content: streamChunk.Delta})
+			case inference.StreamChunkReasoningDelta:
+				sendDelta(ChatMessage{ReasoningContent: streamChunk.Delta})
 			}
-			sendDelta(streamChunk.Delta)
 		})
 		return genErr
 	})
@@ -301,12 +299,6 @@ func (s *Server) handleChatCompletionsStream(c *echo.Context, req ChatCompletion
 		// Best effort error chunk
 		_ = sendSSEChunk(res, map[string]any{"error": err.Error()})
 		flusher.Flush()
-	}
-
-	// A reasoning-only completion streamed nothing visible, so send the
-	// reasoning text once as content rather than an empty assistant message.
-	if result != nil && result.Text == "" {
-		sendDelta(result.ReasoningText)
 	}
 
 	// Send final chunk with finish_reason
@@ -373,7 +365,7 @@ func chatMessagesToTokenizerMessages(msgs []ChatMessage) ([]tokenizer.Message, e
 	return out, nil
 }
 
-func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message, defaults inference.GenDefaults) inference.Request {
+func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message, defaults inference.GenDefaults, defaultReasoningFormat string, defaultReasoningBudget int) inference.Request {
 	var opts inference.RequestOptions
 	opts.Messages = msgs
 	if images, err := extractMessageImages(msgs); err == nil && len(images) > 0 {
@@ -406,6 +398,19 @@ func chatToInferenceRequest(req *ChatCompletionRequest, msgs []tokenizer.Message
 	if req.RepeatPenalty != nil {
 		opts.RepeatPenalty = req.RepeatPenalty
 	}
+
+	// Same knobs as /v1/responses: "none" disables thinking separation, and a
+	// budget of 0 asks the template to disable thinking entirely.
+	reasoningFormat := defaultReasoningFormat
+	if req.ReasoningFormat != "" {
+		reasoningFormat = req.ReasoningFormat
+	}
+	reasoningBudget := defaultReasoningBudget
+	if req.ReasoningBudget != nil {
+		reasoningBudget = *req.ReasoningBudget
+	}
+	opts.ReasoningFormat = &reasoningFormat
+	opts.ReasoningBudget = &reasoningBudget
 
 	if len(req.Tools) > 0 {
 		tools := make([]any, 0, len(req.Tools))
