@@ -406,22 +406,23 @@ type batchPrefillChunk struct {
 	kvStride int
 	useGelu  bool
 
-	x        []float32     // [n,hidden] hidden state
-	norm     []float32     // [n,hidden] pre-norm scratch, then post-block norm
-	proj     []float32     // [n,hidden] block output, reused by the attention/conv and FFN blocks
-	q        []float32     // [n,qDim]
-	k        []float32     // [n,kvStride]
-	v        []float32     // [n,kvStride]
-	attn     []float32     // [n,qDim]
-	up       []float32     // [n,ffn]
-	gate     []float32     // [n,ffn]
-	act      []float32     // [n,ffn]
-	scProj   []float32     // [n,3*hidden] short-conv in_proj output
-	scBx     []float32     // [n,hidden] gated conv input (the future state rows)
-	scConv   []float32     // [n,hidden] conv output, then out_proj input
-	attnGate []float32     // [n,gateRows] attention gate rows
-	attnCtx  []AttnContext // [n] per-row attention context for the parallel path
-	scState  []float32     // [(maxKernelLen-1), hidden] state staging copy
+	x         []float32     // [n,hidden] hidden state
+	norm      []float32     // [n,hidden] pre-norm scratch, then post-block norm
+	proj      []float32     // [n,hidden] block output, reused by the attention/conv and FFN blocks
+	q         []float32     // [n,qDim]
+	k         []float32     // [n,kvStride]
+	v         []float32     // [n,kvStride]
+	attn      []float32     // [n,qDim]
+	up        []float32     // [n,ffn]
+	gate      []float32     // [n,ffn]
+	act       []float32     // [n,ffn]
+	scProj    []float32     // [n,3*hidden] short-conv in_proj output
+	scBx      []float32     // [n,hidden] gated conv input (the future state rows)
+	scConv    []float32     // [n,hidden] conv output, then out_proj input
+	attnGate  []float32     // [n,gateRows] attention gate rows
+	attnCtx   []AttnContext // [n] per-row attention context for the parallel path
+	attnHeads []attnTask    // [pool size] per-head tasks, reused one row at a time
+	scState   []float32     // [(maxKernelLen-1), hidden] state staging copy
 
 	// rowEmbeds, when non-nil, is parallel to tokens and overrides the input
 	// embedding of positions whose entry is non-nil (multimodal image tokens).
@@ -550,8 +551,9 @@ func newBatchPrefillChunk(m *Instance, tokens []int, startPos int) *batchPrefill
 		attnGate: scratch.BatchAttnGate[:n*qDim],
 		// One context per row so the rows can attend concurrently; the
 		// workers only read these, each writing its own output slice.
-		attnCtx: make([]AttnContext, n),
-		scState: scratch.BatchScState,
+		attnCtx:   make([]AttnContext, n),
+		attnHeads: make([]attnTask, getMatVecPool().size),
+		scState:   scratch.BatchScState,
 	}
 }
 
