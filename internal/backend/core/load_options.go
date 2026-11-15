@@ -11,6 +11,12 @@ type LoadModelOptions struct {
 	GpuLayers    int  // -1 auto, 0 all layers on CPU, N first N layers on GPU
 	UseGraph     bool // experimental: use graph-based execution
 
+	// TextOnly loads the text decoder of a multimodal checkpoint and leaves a
+	// declared vision/audio tower unbuilt, so a checkpoint whose tower this
+	// build cannot construct still runs for text. The runtime then reports no
+	// vision/audio capability and rejects image/audio requests.
+	TextOnly bool
+
 	// HiddenTapLayers is the caller-supplied list of decoder layer indices whose
 	// post-layer residual outputs are captured for the DSpark draft model's
 	// context taps. -1 selects the embedding output. Empty (the default) disables

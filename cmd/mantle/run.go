@@ -73,6 +73,7 @@ func runCmd() *cli.Command {
 
 	flags := append([]cli.Flag{}, commonModelFlags()...)
 	flags = append(flags, commonTokenizerFlags()...)
+	flags = append(flags, textOnlyFlag())
 	flags = append(flags,
 		&cli.StringFlag{
 			Name:        "prompt",
@@ -507,6 +508,7 @@ func runCmd() *cli.Command {
 				DisableSWA:          noSWA,
 				TilingConfig:        tilingCfg,
 				UseGraph:            c.Bool("use-graph"),
+				TextOnly:            textOnly,
 			}
 			loader.LoadOptions.CacheTypeK = c.String("cache-type-k")
 			loader.LoadOptions.CacheTypeV = c.String("cache-type-v")

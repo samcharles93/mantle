@@ -35,7 +35,7 @@ func serveCmd() *cli.Command {
 	return &cli.Command{
 		Name:  "serve",
 		Usage: "Serve the REST API (Responses API)",
-		Flags: append(commonModelFlags(),
+		Flags: append(commonModelFlags(), textOnlyFlag(),
 			&cli.StringFlag{
 				Name:        "addr",
 				Usage:       "listen address",
@@ -156,6 +156,7 @@ func serveCmd() *cli.Command {
 				Backend:             backend,
 			}
 			loader.LoadOptions.GpuLayers = -1
+			loader.TextOnly = textOnly
 			provider := api.NewCachedEngineProvider(api.EngineProviderConfig{
 				DefaultModelPath: modelPath,
 				ModelsPath:       modelsPath,

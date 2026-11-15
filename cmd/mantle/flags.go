@@ -19,6 +19,7 @@ var (
 	logLevel          string
 	logFormat         string
 	debug             bool
+	textOnly          bool
 )
 
 func commonModelFlags() []cli.Flag {
@@ -80,6 +81,18 @@ func parseTapLayers(s string) ([]int, error) {
 		layers = append(layers, n)
 	}
 	return layers, nil
+}
+
+// textOnlyFlag is the flag shared by the commands that load a model for
+// inference.
+func textOnlyFlag() cli.Flag {
+	return &cli.BoolFlag{
+		Name:        "text-only",
+		Category:    "Model Configuration",
+		Usage:       "load the text model only, ignoring a declared vision/audio tower; image and audio requests are rejected",
+		Sources:     cli.EnvVars("MANTLE_TEXT_ONLY"),
+		Destination: &textOnly,
+	}
 }
 
 func commonTokenizerFlags() []cli.Flag {
