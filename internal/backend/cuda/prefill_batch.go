@@ -187,13 +187,12 @@ func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
 	return true
 }
 
-// quantBatchedPrefillInt8Env opts into the quantized fast path: the
-// activations are split per 32-element block into two int8 terms
-// (x = s1*q1 + s2*q2) and both dots run on the tensor cores. That is about 12x
-// faster than the f32-activation default and, unlike a single int8 term, keeps
-// enough activation precision that the logits stay within the f32 path's band.
-// Devices without the tensor-core kernel fall back to the f32 default.
-const quantBatchedPrefillInt8Env = "MANTLE_CUDA_BATCHED_PREFILL_QUANT"
+// quantBatchedPrefillF32Env forces the f32-activation GEMM, the exact-precision
+// path, instead of the default hi/lo tensor-core kernel.
+const quantBatchedPrefillF32Env = "MANTLE_CUDA_BATCHED_PREFILL_QUANT_F32"
+
+// The pre-2026-11-12 switch, MANTLE_CUDA_BATCHED_PREFILL_QUANT, is now a no-op:
+// what it opted into is the default.
 
 // quantBatchedPrefillInt8SingleEnv selects the older single-term int8 GEMM
 // (dp4a, or the tensor-core kernel where it is supported) instead of the hi/lo
@@ -1625,13 +1624,11 @@ var quantMMASupported = sync.OnceValue(native.QuantBatchMMASupported)
 // for comparison: faster still, but it moves the logits by 0.42 on LFM3-1.7B q8
 // and can flip a greedy token.
 func (p *batchedPrefillPlan) quantGemm(qw deviceQuantMat, x, dst native.DeviceBuffer, rows, n, k int) error {
-	fast := envEnabled(quantBatchedPrefillInt8Env)
-	single := envEnabled(quantBatchedPrefillInt8SingleEnv)
-	if !fast && !single {
+	if envEnabled(quantBatchedPrefillF32Env) {
 		return native.QuantMatVecCachedBatch(qw.q, qw.scales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
 	}
 	tiled := n >= quantMMAMinRows && k == qw.blocksPerRow*32 && quantMMASupported()
-	if single {
+	if envEnabled(quantBatchedPrefillInt8SingleEnv) {
 		if tiled && native.QuantBatchMMAAligned(qw.q, p.buf.xq) {
 			return native.QuantMatVecCachedBatchMMA(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
 		}
