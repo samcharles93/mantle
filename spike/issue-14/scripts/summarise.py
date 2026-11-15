@@ -23,7 +23,11 @@ def read_tsv(path):
             parts = line.split("\t")
             if len(parts) != len(header):
                 continue
-            rows.append(dict(zip(header, parts)))
+            row = dict(zip(header, parts))
+            # bench_cpu.sh names the throughput columns prompt_tps/gen_tps.
+            row["pp_tps"] = row.get("pp_tps") or row.get("prompt_tps", "")
+            row["tg_tps"] = row.get("tg_tps") or row.get("gen_tps", "")
+            rows.append(row)
     return rows
 
 

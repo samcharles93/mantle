@@ -20,13 +20,30 @@ if [ ! -f "$OUT" ]; then
 	printf 'label\tsize_bytes\tload_s\tprompt_tps\tgen_tps\tpeak_rss_kb\n' >"$OUT"
 fi
 
-for mcf in "$@"; do
+for arg in "$@"; do
+	mcf="${arg%%:*}"
+	variant=""
+	case "$arg" in
+	*:*) variant="${arg##*:}" ;;
+	esac
+	extra=()
 	label="$(basename "$mcf" .mcf)"
+	case "$variant" in
+	no-quant-cache)
+		extra=(--no-quant-cache)
+		label="$label.nocache"
+		;;
+	"") ;;
+	*)
+		echo "unknown variant $variant in $arg" >&2
+		continue
+		;;
+	esac
 	for rep in $(seq 1 "$REPEAT"); do
 		tmp="$(mktemp)"
 		/usr/bin/time -v "$BIN" benchmark \
 			--model "$mcf" --backend cpu --prompt "$PROMPT" \
-			--steps "$STEPS" --warmup "$WARMUP" --runs "$RUNS" \
+			--steps "$STEPS" --warmup "$WARMUP" --runs "$RUNS" "${extra[@]+"${extra[@]}"}" \
 			>"$tmp" 2>&1
 		rc=$?
 		if [ "$rc" -ne 0 ]; then

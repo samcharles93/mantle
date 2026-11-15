@@ -1,0 +1,4 @@
+label	size_bytes	load_s	prompt_tps	gen_tps	peak_rss_kb
+LFM3-1.7B.q8.nocache	1855170160	0	1.52	1.25	2081548
+LFM3-1.7B.k4.nocache	950453616	0	1.47	1.30	1175260
+LFM3-1.7B.nocache	3475554272	0	12.76	8.37	3637784

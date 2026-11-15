@@ -1,0 +1,5 @@
+Default g++ major (16) exceeds nvcc's supported maximum (15); using /home/linuxbrew/.linuxbrew/bin/g++-15.
+Detected compute capability: sm_86
+Compiling CUDA kernels with: -gencode arch=compute_86,code=sm_86 -ccbin /home/linuxbrew/.linuxbrew/bin/g++-15
+CUDA kernels build complete: /work/wt/mantle-quant14/scripts/../internal/backend/cuda/native/build/libmantle_cuda_kernels.a
+CUDA_BUILD_OK
