@@ -23,12 +23,16 @@ type matVecTask struct {
 	// qj, when set, selects MatMatQuant: the worker claims weight-row
 	// tiles from the shared job until none remain.
 	qj *quantJob
+	// attn, when set, selects one attention row: the worker runs every head
+	// for that query position using its own scores buffer.
+	attn *AttnContext
 }
 
 type matVecWorker struct {
 	tasks  chan matVecTask
 	qbuf   []int8
 	scales []float32
+	scores []float32          // attention score scratch, one row at a time
 	quant  quantKernelScratch // MatMatQuant buffers
 	mu     sync.Mutex
 }
@@ -125,7 +129,9 @@ func newMatVecPool() *matVecPool {
 		p.workers[i] = worker
 		go func(w *matVecWorker) {
 			for task := range w.tasks {
-				if task.qj != nil {
+				if task.attn != nil {
+					w.runAttnRow(task.attn)
+				} else if task.qj != nil {
 					task.qj.run(w)
 				} else if task.n > 0 {
 					matMatRangeBF16(task.dst, task.w, task.x, task.xp, task.n, task.rs, task.re)
@@ -1061,4 +1067,42 @@ func matVecRangeF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 
 func matVecRangeF16(dst []float32, w *Mat, x []float32, rs, re int) {
 	matVecRangeF16Scalar(dst, w, x, rs, re)
+}
+
+// runAttnRow runs every head of one prefill query row. Each worker owns its
+// score buffer, so rows can attend concurrently without touching shared
+// scratch.
+func (w *matVecWorker) runAttnRow(ctx *AttnContext) {
+	winLen := ctx.Pos - ctx.Start + 1
+	if winLen < 1 {
+		return
+	}
+	if len(w.scores) < winLen {
+		w.scores = make([]float32, winLen)
+	}
+	RunAttnHeads(ctx, w.scores, 0, ctx.NHead)
+}
+
+// attendRows dispatches one batchPrefillChunk row per pool worker and waits
+// for all of them. Rows are independent: each writes only its own slice of the
+// attention output and only reads the KV cache, which the caller fills before
+// this runs. It reports false when no pool is available or less than two rows
+// would make the dispatch pointless, leaving the caller to run the rows itself.
+func attendRows(ctxs []AttnContext) bool {
+	if len(ctxs) < 2 {
+		return false
+	}
+	pool := getMatVecPool()
+	if pool == nil || pool.size < 2 {
+		return false
+	}
+	done := <-pool.doneSlots
+	for i := range ctxs {
+		pool.tasks <- matVecTask{attn: &ctxs[i], done: done}
+	}
+	for range ctxs {
+		<-done
+	}
+	pool.doneSlots <- done
+	return true
 }
