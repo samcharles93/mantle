@@ -131,4 +131,15 @@ authentication path are exercised only on CPU here.
    float4/char4 loads, or a two-term int8 split (hi/lo) that keeps tensor cores at ~2x the MMA work
    with f32-like precision.
 
+8. gemma-4 text: loads with `--text-only` (2026-11-15) and the q8 container generates coherently;
+   the `gemma4_vision` tower is still unimplemented, which is why the flag is needed. The k4 container
+   emits zero tokens at greedy because its first sample is the stop token: under the 30.0 softcap the
+   distribution is flat (top1 20.00 `<turn|>`, top2 19.68) and a 4-bit LM head, tied to the
+   262144-way `embed_tokens` and feeding the per-layer input table (46% of the k4 payload), reorders
+   it; q8 resolves the same prompt. Not yet proven by dequantising rows: the next step is a
+   mixed-precision file (q8 embeddings, k4 elsewhere) to confirm the attribution. Two gemma-4 config
+   flags are parsed and never read: `use_double_wide_mlp` (inert, the packed shapes already carry the
+   width) and `vocab_size_per_layer_input` (the PLE table's row count is never validated, so a
+   smaller PLE vocab would mis-index silently).
+
 CUDA build: `CUDA=1 task build -f`, then run with `LD_LIBRARY_PATH=/usr/local/cuda-13.2/targets/x86_64-linux/lib`.
