@@ -875,11 +875,43 @@ func TestBatchedPrefillParityQ8(t *testing.T) {
 	}
 }
 
-// TestBatchedPrefillParityQ8Int8OptIn covers the fast approximation: with
-// MANTLE_CUDA_BATCHED_PREFILL_QUANT=1 the activations are quantized to int8 per
-// 32-block and the tensor-core GEMM runs, which stays close to the per-token
-// result but not as close as the f32-activation default. It is opt-in for that
-// reason, and this test keeps the path runnable.
+// TestBatchedPrefillParityQ8FastPath covers the quantized fast path: with
+// MANTLE_CUDA_BATCHED_PREFILL_QUANT=1 the activations are split into two int8
+// terms per 32-block and the hi/lo tensor-core GEMM runs. The split keeps about
+// 14 bits of the activation, so the logits stay in the f32 path's band instead
+// of the 6e-3/2e-2 the single int8 term needs (see
+// TestBatchedPrefillParityQ8Int8OptIn) while costing about a seventh of the f32
+// kernel's time.
+func TestBatchedPrefillParityQ8FastPath(t *testing.T) {
+	if !cudaAvailable(t) {
+		return
+	}
+	d := defaultBatchTestDims()
+	d.q8 = true
+	d.layers = 2
+	// 20 tokens, so the 16-token tensor-core tile threshold is crossed and the
+	// kernel actually runs rather than falling back to the f32 default.
+	tokens := []int{1, 3, 7, 11, 2, 5, 9, 13, 0, 4, 8, 12, 6, 10, 14, 15, 1, 2, 3, 4}
+
+	want := sequentialOracle(t, d, tokens)
+
+	t.Setenv(quantBatchedPrefillInt8Env, "1")
+	gr, cleanup := newBatchTestRuntime(t, batchTestModel(d))
+	defer cleanup()
+	got, err := gr.PrefillTokens(tokens)
+	if err != nil {
+		t.Fatalf("hi/lo PrefillTokens: %v", err)
+	}
+	got = append([]float32(nil), got...)
+	compareBatchLogits(t, "Q8-hilo", got, want, 1e-4, 1e-3)
+}
+
+// TestBatchedPrefillParityQ8Int8OptIn covers the single-term int8 approximation,
+// which needs both env vars: with MANTLE_CUDA_BATCHED_PREFILL_QUANT=1 and
+// MANTLE_CUDA_BATCHED_PREFILL_QUANT_INT8=1 the activations are quantized to int8
+// per 32-block and the dp4a or tensor-core GEMM runs. That stays close to the
+// per-token result but not as close as the hi/lo default, which is why it is
+// kept only for comparison.
 func TestBatchedPrefillParityQ8Int8OptIn(t *testing.T) {
 	if !cudaAvailable(t) {
 		return
@@ -887,11 +919,14 @@ func TestBatchedPrefillParityQ8Int8OptIn(t *testing.T) {
 	d := defaultBatchTestDims()
 	d.q8 = true
 	d.layers = 2
-	tokens := []int{1, 3, 7, 11, 2}
+	// 20 tokens, so the 16-token tensor-core tile threshold is crossed and the
+	// kernel actually runs rather than falling back to dp4a.
+	tokens := []int{1, 3, 7, 11, 2, 5, 9, 13, 0, 4, 8, 12, 6, 10, 14, 15, 1, 2, 3, 4}
 
 	want := sequentialOracle(t, d, tokens)
 
 	t.Setenv(quantBatchedPrefillInt8Env, "1")
+	t.Setenv(quantBatchedPrefillInt8SingleEnv, "1")
 	gr, cleanup := newBatchTestRuntime(t, batchTestModel(d))
 	defer cleanup()
 	got, err := gr.PrefillTokens(tokens)

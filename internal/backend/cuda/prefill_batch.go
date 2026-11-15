@@ -187,12 +187,19 @@ func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
 	return true
 }
 
-// quantBatchedPrefillInt8Env opts into the int8-activation quant GEMM. It
-// quantizes activations per 32-element block and runs dp4a or tensor cores,
-// which is about 13x faster than the f32-activation default but returns
-// different logits: on LFM3-1.7B q8/k4 the difference reaches 0.3 to 0.5 and
-// can flip a greedy token.
+// quantBatchedPrefillInt8Env opts into the quantized fast path: the
+// activations are split per 32-element block into two int8 terms
+// (x = s1*q1 + s2*q2) and both dots run on the tensor cores. That is about 12x
+// faster than the f32-activation default and, unlike a single int8 term, keeps
+// enough activation precision that the logits stay within the f32 path's band.
+// Devices without the tensor-core kernel fall back to the f32 default.
 const quantBatchedPrefillInt8Env = "MANTLE_CUDA_BATCHED_PREFILL_QUANT"
+
+// quantBatchedPrefillInt8SingleEnv selects the older single-term int8 GEMM
+// (dp4a, or the tensor-core kernel where it is supported) instead of the hi/lo
+// fast path, for comparison. It is faster but moves LFM3-1.7B q8 logits by 0.42
+// and can flip a greedy token, so it is not the fast path.
+const quantBatchedPrefillInt8SingleEnv = "MANTLE_CUDA_BATCHED_PREFILL_QUANT_INT8"
 
 func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 	m := gr.inst
@@ -434,10 +441,13 @@ type batchedBuffers struct {
 	// inputs [N, hidden], conv output [N, hidden], state-rotate staging
 	// [(maxKlen-1), hidden], and the attention gate projection [N, qDim].
 	scProj native.DeviceBuffer
-	// int8 activation scratch for the dp4a quant GEMM: xq [N, maxK] int8,
-	// xsc [N, maxBlocksPerRow] f32 per-block scales
+	// int8 activation scratch for the quant GEMM: xq [N, maxK] int8, xsc
+	// [N, maxBlocksPerRow] f32 per-block scales, and the second term of the
+	// hi/lo activation split (xq2, xsc2) at the same sizes.
 	xq      native.DeviceBuffer
 	xsc     native.DeviceBuffer
+	xq2     native.DeviceBuffer
+	xsc2    native.DeviceBuffer
 	scBx    native.DeviceBuffer
 	scOut   native.DeviceBuffer
 	scState native.DeviceBuffer
@@ -445,7 +455,7 @@ type batchedBuffers struct {
 }
 
 func (b *batchedBuffers) all() []native.DeviceBuffer {
-	return []native.DeviceBuffer{b.x, b.normed, b.proj, b.q, b.attn, b.k, b.v, b.up, b.gate, b.act, b.down, b.conv, b.last, b.lastN, b.logits, b.scProj, b.scBx, b.scOut, b.scState, b.gateBuf, b.xq, b.xsc}
+	return []native.DeviceBuffer{b.x, b.normed, b.proj, b.q, b.attn, b.k, b.v, b.up, b.gate, b.act, b.down, b.conv, b.last, b.lastN, b.logits, b.scProj, b.scBx, b.scOut, b.scState, b.gateBuf, b.xq, b.xsc, b.xq2, b.xsc2}
 }
 
 type batchedLayerPlan struct {
@@ -702,6 +712,12 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 		return fail(err)
 	}
 	if err := allocInto(&p.buf.xsc, p.n*maxK/32, "xsc"); err != nil {
+		return fail(err)
+	}
+	if err := allocInto(&p.buf.xq2, p.n*maxK, "xq2"); err != nil {
+		return fail(err)
+	}
+	if err := allocInto(&p.buf.xsc2, p.n*maxK/32, "xsc2"); err != nil {
 		return fail(err)
 	}
 	if err := allocInto(&p.buf.normed, p.n*hidden, "normed"); err != nil {
@@ -1581,9 +1597,10 @@ func (p *batchedPrefillPlan) gemmLastW(devW deviceMat, xF32 native.DeviceBuffer,
 	return p.gemmLast(devW, xF32, k, dst, rows)
 }
 
-// quantMMAMinRows is the smallest token count sent to the tensor-core quant
-// GEMM. Below it most of each 64-token tile would be padding, and the dp4a
-// kernel, whose output is identical, is cheaper.
+// quantMMAMinRows is the smallest token count sent to a tensor-core quant
+// GEMM. Below it most of each 64-token tile would be padding; the single-term
+// path uses the dp4a kernel, whose output is identical, and the hi/lo path
+// stays on the f32 default.
 const quantMMAMinRows = 16
 
 var quantMMASupported = sync.OnceValue(native.QuantBatchMMASupported)
@@ -1596,19 +1613,40 @@ var quantMMASupported = sync.OnceValue(native.QuantBatchMMASupported)
 // tokens as the per-token path, only faster because each weight row is read
 // once per token tile instead of once per token.
 //
-// MANTLE_CUDA_BATCHED_PREFILL_QUANT=1 instead quantizes the activations to int8
-// per 32-element block and runs the dp4a or tensor-core kernel. That is about
-// 13x faster on prefill but changes the logits (0.3 to 0.5 on LFM3-1.7B q8/k4)
-// because the activations lose precision, so it is opt-in.
+// MANTLE_CUDA_BATCHED_PREFILL_QUANT=1 runs the hi/lo tensor-core GEMM instead:
+// each activation is split into two int8 terms plus per-block scales, so the
+// activation carries about 14 bits and the logits stay inside the f32 path's
+// band, at roughly twice the single-term tensor-core cost. Shapes the kernel
+// does not take fall back to the f32 default rather than to a less accurate
+// kernel.
+//
+// MANTLE_CUDA_BATCHED_PREFILL_QUANT_INT8=1 (with or without the above) selects
+// the single-term int8 GEMM (dp4a, or the tensor-core kernel where supported)
+// for comparison: faster still, but it moves the logits by 0.42 on LFM3-1.7B q8
+// and can flip a greedy token.
 func (p *batchedPrefillPlan) quantGemm(qw deviceQuantMat, x, dst native.DeviceBuffer, rows, n, k int) error {
-	if !envEnabled(quantBatchedPrefillInt8Env) {
+	fast := envEnabled(quantBatchedPrefillInt8Env)
+	single := envEnabled(quantBatchedPrefillInt8SingleEnv)
+	if !fast && !single {
 		return native.QuantMatVecCachedBatch(qw.q, qw.scales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
 	}
-	if n >= quantMMAMinRows && k == qw.blocksPerRow*32 && quantMMASupported() &&
-		native.QuantBatchMMAAligned(qw.q, p.buf.xq) {
-		return native.QuantMatVecCachedBatchMMA(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+	tiled := n >= quantMMAMinRows && k == qw.blocksPerRow*32 && quantMMASupported()
+	if single {
+		if tiled && native.QuantBatchMMAAligned(qw.q, p.buf.xq) {
+			return native.QuantMatVecCachedBatchMMA(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+		}
+		return native.QuantMatVecCachedBatchDp4a(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
 	}
-	return native.QuantMatVecCachedBatchDp4a(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+	if tiled && quantBatchHiloAligned(qw.q, p.buf.xq, p.buf.xq2) {
+		return native.QuantMatVecCachedBatchMMAHilo(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, p.buf.xq2, p.buf.xsc2, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+	}
+	return native.QuantMatVecCachedBatch(qw.q, qw.scales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+}
+
+// quantBatchHiloAligned reports whether the quant weight and both activation
+// scratch buffers meet the hi/lo tensor-core kernel's 16-byte alignment.
+func quantBatchHiloAligned(q, xq, xq2 native.DeviceBuffer) bool {
+	return (uintptr(q.Ptr())|uintptr(xq.Ptr())|uintptr(xq2.Ptr()))&15 == 0
 }
 
 func devSub(buf native.DeviceBuffer, byteOffset int) native.DeviceBuffer {

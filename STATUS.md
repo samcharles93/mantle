@@ -33,10 +33,25 @@ rather than one per element: 19.9 -> 10.6 ms for a 2048x2048x610 GEMM, which is 
 dp4a kernel. Measured and rejected: a shared f32 dequantized weight tile (slower, shared bandwidth),
 weights read straight through L1 instead of staged (no change), 64-row tiles (slower) and a
 32x32 tile (slower).
-`MANTLE_CUDA_BATCHED_PREFILL_QUANT=1` selects the int8-activation dp4a/tensor-core GEMM instead: q8
-2188 tok/s, but activations lose precision, the logits move by 0.3 to 0.5 on the real model, and a
-greedy token can flip, so it stays opt-in. Real-model worst logit difference against the sequential
-oracle: k4 0.001, q8 0.148 (identical argmax; the residue is its quantized KV cache), bf16 0.119.
+`MANTLE_CUDA_BATCHED_PREFILL_QUANT=1` now selects the hi/lo two-term tensor-core GEMM instead
+(2026-11-15): each activation is split into two int8 terms with per-32-block f32 scales
+(`x = s1*q1 + s2*q2`), both block dots run as `mma.sync m16n8k32`, and the epilogue folds both
+scales (`acc = fma(wS*sc1, dot1, fma(wS*sc2, dot2, acc))`). That costs a second dot per block but
+keeps about 14 bits of the activation: 2048x2048x610 is 1.37 ms (1.87 TMAC/s) against 0.73 ms for
+the single int8 term, 8.5 ms for dp4a and 10.5 ms for the f32 default. LFM3-1.7B q8 on the
+851-token prompt: prefill 187 -> 1361 tok/s and the 48 greedy tokens are byte-identical to the CPU
+run. The real-model worst logit difference is 0.1487 against the f32 path's 0.1480 with the same
+argmax, so the residual is q8's quantized KV cache and the split itself adds under 1e-3; synthetic
+q8 parity is 6.5e-5 and the kernel matches the per-token f32 oracle to 2.5e-5 to 3.7e-5 of the
+largest logit. The second activation tile does not fit next to the first in 48 KB of static shared
+memory at `MMA_BK` 128, so the hi/lo kernel stages 64 bytes (two quant blocks) per step: 33 KB.
+Shapes it does not take (`cols != blocksPerRow*32`, misaligned buffers, fewer than 16 tokens,
+pre-sm_80) fall back to the f32 default rather than to a less accurate kernel.
+`MANTLE_CUDA_BATCHED_PREFILL_QUANT=1` with `MANTLE_CUDA_BATCHED_PREFILL_QUANT_INT8=1` keeps the
+older single-term int8 GEMM for comparison: 2244 tok/s, but activations lose precision, the logits
+move by 0.42 on the real model, and the greedy output diverges from the CPU run (first difference
+at byte 216 of 235 on that 851-token prompt). Real-model worst logit difference against the
+sequential oracle: k4 0.001, q8 0.1480 f32 / 0.1487 hi-lo / 0.424 single-term int8, bf16 0.119.
 - CPU: k4/q8 decode 11.7/11.6 after the fused quant-dot fix (were 4.1/6.9). Quantised weights now take the batched prefill path (`MatMatQuant`, 2026-11-11): a 2x4-tiled VPSIGNB/VPMADDUBSW/VPMADDWD kernel whose output matches the per-token matvec bit for bit, and f16 KV-cache attention is vectorised (exact half-to-float conversion, bit-identical V accumulation). LFM3-1.7B.q8 on an 812-token prompt: prefill 6.5 -> 31.5 tok/s, decode at that context 5.3 -> 8.5 tok/s; bf16 prefill 15.5 tok/s on the same prompt.
 
 ## Granite
