@@ -33,8 +33,22 @@ func getQuantVec(blocks int) *QuantVec {
 	qx.Blocks = blocks
 	qx.Q = ensureInt8Slice(qx.Q, blocks*32)
 	qx.Q16 = ensureInt16Slice(qx.Q16, blocks*32)
+	qx.Q16Pair = ensureInt16Slice(qx.Q16Pair, blocks*32)
 	qx.Scales = ensureFloat32Slice(qx.Scales, blocks)
 	return qx
+}
+
+// fillQuantVec quantizes x into qx, which must come from getQuantVec(blocks).
+func fillQuantVec(qx *QuantVec, x []float32, blocks int) {
+	quantizeVecBlocksInto(x, blocks, qx.Q, qx.Q16, qx.Scales)
+	for b := range blocks {
+		src := qx.Q16[b*32 : b*32+32]
+		dst := qx.Q16Pair[b*32 : b*32+32]
+		for i := range 16 {
+			dst[i] = src[2*i]
+			dst[16+i] = src[2*i+1]
+		}
+	}
 }
 
 func putQuantVec(qx *QuantVec) {
@@ -101,6 +115,11 @@ func matVecRangeQuantWithWorker(dst []float32, w *Mat, x []float32, rs, re int, 
 	}
 	if w.Quant != nil && w.Quant.ValidFor(w) {
 		matVecRangeQuantCached(dst, w, x, rs, re, qx)
+		return true
+	}
+	if blocks := (w.C + 31) / 32; qx != nil && isPacked4DType(w.DType) &&
+		len(qx.Q16Pair) >= blocks*32 && len(qx.Scales) >= blocks {
+		matVecRangePacked4(dst, w, rs, re, qx)
 		return true
 	}
 	if mcf.IsGQDType(w.DType) {

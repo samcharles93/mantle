@@ -74,10 +74,14 @@ func (qc *QuantCache) ValidFor(m *Mat) bool {
 
 // QuantVec stores transient quantization of input vectors.
 type QuantVec struct {
-	Q      []int8
-	Q16    []int16
-	Scales []float32
-	Blocks int
+	Q   []int8
+	Q16 []int16
+	// Q16Pair is Q16 with each 32-element block reordered as its 16 even
+	// elements then its 16 odd elements, the order packed 4-bit weights
+	// unpack into (low nibbles even, high nibbles odd).
+	Q16Pair []int16
+	Scales  []float32
+	Blocks  int
 }
 
 // AttnCache holds KV cache for attention mechanism.

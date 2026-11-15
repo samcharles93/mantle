@@ -112,3 +112,9 @@ func FP16ToFloat32(h uint16) float32 {
 func fp16ToF32Table(u uint16) float32 {
 	return fp16Table[u]
 }
+
+// FP16BitsToFloat32 converts fp16 bits to float32 with a table lookup, for
+// hot loops that decode scales.
+func FP16BitsToFloat32(u uint16) float32 {
+	return fp16Table[u]
+}

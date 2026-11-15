@@ -1,9 +1,10 @@
 package simd
 
 import (
-	instance "github.com/samcharles93/mantle/internal/backend/core"
+	"math"
 	"testing"
 
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
 
@@ -354,8 +355,10 @@ func TestDotBlocksInt8Int16(t *testing.T) {
 }
 
 // TestMatVecQuantCachedMatchesUncached checks the cached (pre-decoded) quant
-// matvec against the same matrix without a quant cache, which decodes blocks
-// on the fly: same dots, same scale-combine order, so results must be exact.
+// matvec against the same matrix without a quant cache, which runs the packed
+// 4-bit kernel. Both compute identical int32 block dots; the packed kernel
+// accumulates the scaled dots in eight float lanes rather than in block
+// order, so the sums agree to float rounding, not bit for bit.
 func TestMatVecQuantCachedMatchesUncached(t *testing.T) {
 	const rows, cols = 64, 1024
 	qvals := makeQVals(rows * cols)
@@ -380,7 +383,7 @@ func TestMatVecQuantCachedMatchesUncached(t *testing.T) {
 	MatVecWithQuant(got, &cached, x, qx)
 	MatVecWithQuant(want, &uncached, x, qx)
 	for i := range got {
-		if got[i] != want[i] {
+		if d := math.Abs(float64(got[i] - want[i])); d > 1e-5*(1+math.Abs(float64(want[i]))) {
 			t.Fatalf("row %d: cached = %v, uncached = %v", i, got[i], want[i])
 		}
 	}

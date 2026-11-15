@@ -60,12 +60,17 @@ func TestMatVecGQMatchesDecodedReference(t *testing.T) {
 		ReleaseQuantVec(qx)
 
 		for r := range rows {
+			// Every path except uncached non-4-bit quantizes x to int16, so
+			// those get a looser bound than the f32 row-decode path.
 			tol := 1e-4 * (1 + math.Abs(float64(want[r])))
-			if d := math.Abs(float64(uncached[r] - want[r])); d > tol {
+			loose := 1e-2 * (1 + math.Abs(float64(want[r])))
+			uncachedTol := tol
+			if tc.bits == 4 {
+				uncachedTol = loose
+			}
+			if d := math.Abs(float64(uncached[r] - want[r])); d > uncachedTol {
 				t.Fatalf("bits=%d group=%d row %d: uncached %v, want %v", tc.bits, tc.group, r, uncached[r], want[r])
 			}
-			// The cached kernels quantize x to int16, so they get a looser bound.
-			loose := 1e-2 * (1 + math.Abs(float64(want[r])))
 			if d := math.Abs(float64(cached[r] - want[r])); d > loose {
 				t.Fatalf("bits=%d group=%d row %d: cached %v, want %v", tc.bits, tc.group, r, cached[r], want[r])
 			}
