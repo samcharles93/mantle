@@ -131,10 +131,4 @@ authentication path are exercised only on CPU here.
    float4/char4 loads, or a two-term int8 split (hi/lo) that keeps tensor cores at ~2x the MMA work
    with f32-like precision.
 
-8. gemma-4 cannot load at all: `mantle serve --model gemma-4-E2B-it.k4.mcf` fails with
-   "vision_config: patch_size/in_channels missing" because the config declares
-   `Gemma4ForConditionalGeneration` with a `gemma4_vision` tower (it spells the channel count
-   `num_channels`) and Mantle has no gemma4 vision tower. Text-only use needs either a gemma4 vision
-   tower or an explicit text-only load path that rejects image requests.
-
 CUDA build: `CUDA=1 task build -f`, then run with `LD_LIBRARY_PATH=/usr/local/cuda-13.2/targets/x86_64-linux/lib`.
