@@ -68,6 +68,7 @@ GLOBAL CONFIGURATION:
 			configCmd(),
 			pullCmd(),
 			benchmarkCmd(),
+			compareCmd(),
 			versionCmd(),
 		},
 	}
