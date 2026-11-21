@@ -1,8 +1,9 @@
 package logits
 
 import (
-	core "github.com/samcharles93/mantle/internal/backend/core"
 	"math/rand"
+
+	core "github.com/samcharles93/mantle/internal/backend/core"
 )
 
 // SamplerConfig configures the behaviour of a Sampler.

@@ -17,7 +17,8 @@ func writeSafetensors(t *testing.T, path string, tensors map[string]struct {
 	dtype string
 	shape []int64
 	data  []byte
-}) {
+},
+) {
 	t.Helper()
 	names := make([]string, 0, len(tensors))
 	for n := range tensors {

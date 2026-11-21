@@ -148,7 +148,7 @@ func writeMistralUser(b *strings.Builder, content any) error {
 }
 
 func writeMistralAssistant(b *strings.Builder, msg Message, eosToken string) error {
-	if (msg.Content == nil || msg.Content == "" || (isSliceLenZero(msg.Content))) && len(msg.ToolCalls) == 0 {
+	if (msg.Content == nil || msg.Content == "" || isSliceLenZero(msg.Content)) && len(msg.ToolCalls) == 0 {
 		return fmt.Errorf("mistral3: assistant message must have content or tool calls")
 	}
 

@@ -69,6 +69,7 @@ type fakeEngine struct {
 func (f *fakeEngine) Generate(context.Context, *inference.Request, inference.StreamFunc) (*inference.Result, error) {
 	return &inference.Result{}, nil
 }
+
 func (f *fakeEngine) Capabilities() inference.EngineCapabilities {
 	return inference.EngineCapabilities{}
 }

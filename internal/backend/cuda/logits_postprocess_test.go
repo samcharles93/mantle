@@ -42,7 +42,7 @@ func TestForwardTokenAppliesLogitPostprocessCUDA(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ForwardToken: %v", err)
 		}
-		var identical = true
+		identical := true
 		for i := range raw {
 			if got[i] != raw[i] {
 				identical = false

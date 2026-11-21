@@ -251,8 +251,10 @@ func TestDetectArchLFM3(t *testing.T) {
 		t.Fatalf("got spec %q zeroTail=%v, want lfm3 with zero-tail rope", spec.Name, spec.ZeroTailPartialRoPE)
 	}
 	n := spec.Names
-	got := []string{n.QNormCandidates(2)[0], n.KNormCandidates(2)[0], n.Wo(2), n.AttnGate(2),
-		n.PostAttnNormCandidates(2)[0], n.PostFfnNormCandidates(2)[0], n.OutputNorm}
+	got := []string{
+		n.QNormCandidates(2)[0], n.KNormCandidates(2)[0], n.Wo(2), n.AttnGate(2),
+		n.PostAttnNormCandidates(2)[0], n.PostFfnNormCandidates(2)[0], n.OutputNorm,
+	}
 	want := []string{
 		"model.layers.2.self_attn.q_norm.weight", "model.layers.2.self_attn.k_norm.weight",
 		"model.layers.2.self_attn.o_proj.weight", "model.layers.2.self_attn.gate_proj.weight",

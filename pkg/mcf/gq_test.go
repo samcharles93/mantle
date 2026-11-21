@@ -53,8 +53,10 @@ func TestGQPayloadLayout(t *testing.T) {
 	}
 	// groups per row: ceil(300/128)=3 -> 15 scales = 30 bytes -> data at 64.
 	// blocks per row: ceil(300/32)=10, 12 bytes each -> 5*10*12 = 600 bytes.
-	want := GQPayloadLayout{Bits: 3, Group: 128, GroupsPerRow: 3, BlocksPerRow: 10, BlockDataBytes: 12,
-		ScaleOff: 0, ScaleBytes: 30, DataOff: 64, DataBytes: 600, TotalBytes: 664}
+	want := GQPayloadLayout{
+		Bits: 3, Group: 128, GroupsPerRow: 3, BlocksPerRow: 10, BlockDataBytes: 12,
+		ScaleOff: 0, ScaleBytes: 30, DataOff: 64, DataBytes: 600, TotalBytes: 664,
+	}
 	if l != want {
 		t.Fatalf("layout %+v, want %+v", l, want)
 	}

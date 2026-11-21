@@ -1,8 +1,9 @@
 package simd
 
 import (
-	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"math"
+
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 )
 
 // Add adds src to dst element-wise.

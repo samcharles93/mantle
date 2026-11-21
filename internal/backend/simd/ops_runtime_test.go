@@ -1,8 +1,9 @@
 package simd
 
 import (
-	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"testing"
+
+	instance "github.com/samcharles93/mantle/internal/backend/core"
 
 	"github.com/samcharles93/mantle/internal/hostcaps"
 )
