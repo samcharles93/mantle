@@ -37,6 +37,15 @@ func (b *Backend) Name() string {
 }
 
 func (b *Backend) LoadModel(mcfFile *mcfstore.File, cfgBytes []byte, maxContext int, opts core.LoadModelOptions) (core.Runtime, error) {
+	var err error
+	opts.CacheTypeK, err = core.ResolveCUDACacheType("cache-type-k", opts.CacheTypeK)
+	if err != nil {
+		return nil, err
+	}
+	opts.CacheTypeV, err = core.ResolveCUDACacheType("cache-type-v", opts.CacheTypeV)
+	if err != nil {
+		return nil, err
+	}
 	native.ResetManagedFallbackFlag()
 	native.ResetPerfCounters()
 	simd.ResetHostPerfCounters()

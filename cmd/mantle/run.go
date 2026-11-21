@@ -603,7 +603,11 @@ func runCmd() *cli.Command {
 			}
 
 			loadDuration := time.Since(loadStart)
-			log.Info("model loaded", "duration", loadDuration)
+			log.Info("model loaded",
+				"duration", loadDuration,
+				"cache_type_k", genConfig.CacheTypeK,
+				"cache_type_v", genConfig.CacheTypeV,
+			)
 
 			if seed == -1 {
 				seed = time.Now().UnixNano()
@@ -679,6 +683,12 @@ func runCmd() *cli.Command {
 				if len(genConfig.HeadCountKV) > 0 {
 					log.Info("kv heads", "head_count_kv", genConfig.HeadCountKV)
 				}
+
+				log.Info("kv cache config",
+					"cache_type_k", genConfig.CacheTypeK,
+					"cache_type_v", genConfig.CacheTypeV,
+					"max_context", maxContext,
+				)
 
 				if runtimeModel, ok := loadResult.Runtime.(*simd.Instance); ok {
 					swaModes := make([]string, 0, len(runtimeModel.Layers))

@@ -578,15 +578,19 @@ func (o *Ops) PreloadModelWeights(m *model.Instance) error {
 	mode := currentCUDAWeightMode()
 	budgeted := false
 	uploadBudget := int64(0)
+	kvReserveBytes := estimateModelKVCacheBytes(m, o.effectiveContextLen)
+	scratchReserveBytes := int64(0)
 	if freeBytes, totalBytes, err := native.MemInfo(); err == nil && freeBytes > 0 {
-		uploadBudget = int64(float64(freeBytes) * 0.85) // reserve ~15% for KV + scratch
+		uploadBudget, scratchReserveBytes = computePreloadUploadBudget(freeBytes, kvReserveBytes)
 		budgeted = true
 		if cudaTraceEnabled() {
 			fmt.Fprintf(
 				os.Stderr,
-				"CUDA preload budget: free=%d MiB total=%d MiB budget=%d MiB\n",
+				"CUDA preload budget: free=%d MiB total=%d MiB kv_reserve=%d MiB scratch_reserve=%d MiB budget=%d MiB\n",
 				freeBytes/1024/1024,
 				totalBytes/1024/1024,
+				kvReserveBytes/1024/1024,
+				scratchReserveBytes/1024/1024,
 				uploadBudget/1024/1024,
 			)
 		}
@@ -840,10 +844,28 @@ func (o *Ops) PreloadModelWeights(m *model.Instance) error {
 		gpuLayersLoaded++
 	}
 
+	cacheTypeK, cacheTypeV := instanceCacheTypes(m)
 	if offloadedLayers > 0 || managedLayers > 0 {
-		fmt.Fprintf(os.Stderr, "CUDA layer offload active: %d/%d VRAM, %d PCIe-managed, %d CPU-offloaded\n", gpuLayersLoaded, len(m.Layers), managedLayers, offloadedLayers)
+		fmt.Fprintf(
+			os.Stderr,
+			"CUDA layer offload active: %d/%d VRAM, %d PCIe-managed, %d CPU-offloaded (kv cache: k=%s v=%s, ~%d MiB reserved)\n",
+			gpuLayersLoaded,
+			len(m.Layers),
+			managedLayers,
+			offloadedLayers,
+			cacheTypeK,
+			cacheTypeV,
+			kvReserveBytes/1024/1024,
+		)
 	} else if cudaTraceEnabled() {
-		fmt.Fprintf(os.Stderr, "CUDA layer offload: all %d layers on GPU\n", len(m.Layers))
+		fmt.Fprintf(
+			os.Stderr,
+			"CUDA layer offload: all %d layers on GPU (kv cache: k=%s v=%s, ~%d MiB reserved)\n",
+			len(m.Layers),
+			cacheTypeK,
+			cacheTypeV,
+			kvReserveBytes/1024/1024,
+		)
 	}
 	if cudaTraceEnabled() && budgeted {
 		fmt.Fprintf(os.Stderr, "CUDA preload usage estimate: %d MiB / %d MiB budget\n", usedBytes/1024/1024, uploadBudget/1024/1024)
@@ -4915,60 +4937,9 @@ func (o *Ops) StoreKV(_ int, pos, kvStride int, kDst, vDst []float32, kDst16, vD
 }
 
 func storeQ8(src []float32, dst []int8, scales []float32, pos int) {
-	// Block definitions from mcf
-	blockSize := int(mcf.QuantBlockSize)
-	blocks := (len(src) + blockSize - 1) / blockSize
-	if blocks*blockSize != len(src) {
-		panic(fmt.Sprintf("storeQ8: src length %d is not a multiple of block size %d", len(src), blockSize))
-	}
-
-	scaleOffset := pos * blocks
-	if scaleOffset+blocks > len(scales) {
-		panic(fmt.Sprintf("storeQ8: scale offset %d out of bounds for scales length %d", scaleOffset, len(scales)))
-	}
-
-	for b := 0; b < blocks; b++ {
-		start := b * blockSize
-		end := start + blockSize
-
-		blockSrc := src[start:end]
-		blockDst := dst[start:end]
-
-		// Find max abs value in block for quant scale
-		var maxAbs float32
-		for _, v := range blockSrc {
-			if v < 0 && -v > maxAbs {
-				maxAbs = -v
-			} else if v > 0 && v > maxAbs {
-				maxAbs = v
-			}
-		}
-
-		// Handle empty blocks
-		if maxAbs == 0 {
-			scales[scaleOffset+b] = 0
-			for i := range blockDst {
-				blockDst[i] = 0
-			}
-			continue
-		}
-
-		// Calculate scale and quantise
-		scale := maxAbs / 127.0
-		invScale := 127.0 / maxAbs
-		scales[scaleOffset+b] = scale
-		for i, v := range blockSrc {
-			q := int32(v*invScale + 0.5)
-			if v < 0 {
-				q = int32(v*invScale - 0.5)
-			}
-			if q > 127 {
-				q = 127
-			} else if q < -127 {
-				q = -127
-			}
-			blockDst[i] = int8(q)
-		}
+	s := quantizeQ8(src, dst)
+	if pos >= 0 && pos < len(scales) {
+		scales[pos] = s
 	}
 }
 
@@ -6275,4 +6246,114 @@ func estimateQuantCacheBytes(mat *model.Mat) (int64, bool) {
 	// int8 block payload + float32 scale per block.
 	bytes := int64(totalBlocks) * (32 + int64(unsafe.Sizeof(float32(0))))
 	return bytes, true
+}
+
+const minPreloadScratchReserveBytes = int64(128) << 20 // 128 MiB minimum for runtime scratch + UM prefetch staging
+
+func computePreloadUploadBudget(freeBytes, kvBytes int64) (budget, scratchReserve int64) {
+	if freeBytes <= 0 {
+		return 0, 0
+	}
+	if kvBytes < 0 {
+		kvBytes = 0
+	}
+	scratchReserve = max(int64(float64(freeBytes)*0.10), minPreloadScratchReserveBytes)
+	budget = max(freeBytes-kvBytes-scratchReserve, 0)
+	return budget, scratchReserve
+}
+
+func estimateModelKVCacheBytes(m *model.Instance, effectiveContextLen int) int64 {
+	if m == nil {
+		return 0
+	}
+	hidden := 0
+	if m.Config != nil {
+		hidden = m.Config.Config.EmbeddingLength
+	}
+	var total int64
+	for i := range m.Layers {
+		layer := &m.Layers[i]
+		if layer.IsRecurrent {
+			if layer.ShortConvKernel != nil && layer.ShortConvKernel.C > 1 && hidden > 0 {
+				total += int64(layer.ShortConvKernel.C-1) * int64(hidden) * 4
+			}
+			if layer.DeltaNet != nil {
+				total += int64(len(layer.DeltaNet.ConvState)+len(layer.DeltaNet.RecurrentState)) * 4
+			}
+			if layer.Mamba != nil {
+				total += int64(len(layer.Mamba.ConvState)+len(layer.Mamba.SSMState)) * 4
+			}
+			continue
+		}
+		if layer.SharedKVSource >= 0 {
+			continue
+		}
+		kvStride := layer.AttnCache.KvStride
+		if kvStride <= 0 && layer.HeadKV > 0 {
+			headDim := layer.HeadDim
+			if headDim <= 0 {
+				headDim = m.HeadDim
+			}
+			kvStride = layer.HeadKV * headDim
+		}
+		cacheLen := layer.AttnCache.CacheLen
+		if cacheLen <= 0 {
+			cacheLen = m.MaxContext
+		}
+		if effectiveContextLen > 0 && cacheLen > effectiveContextLen {
+			cacheLen = effectiveContextLen
+		}
+		if kvStride <= 0 || cacheLen <= 0 {
+			continue
+		}
+		totalElems := int64(kvStride) * int64(cacheLen)
+		blocksPerStride := max(int64(kvStride)/int64(mcf.QuantBlockSize), 1)
+		scaleBytes := int64(cacheLen) * blocksPerStride * 4
+
+		if layer.AttnCache.KQ8 != nil {
+			total += totalElems + scaleBytes
+		} else {
+			total += totalElems * 2
+		}
+		if layer.AttnCache.VQ8 != nil {
+			total += totalElems + scaleBytes
+		} else {
+			total += totalElems * 2
+		}
+	}
+	return total
+}
+
+func instanceCacheTypes(m *model.Instance) (string, string) {
+	kt := model.CacheTypeF16
+	vt := model.CacheTypeF16
+	if m == nil {
+		return kt, vt
+	}
+	if m.Config != nil {
+		if m.Config.Config.CacheTypeK != "" {
+			kt = m.Config.Config.CacheTypeK
+		}
+		if m.Config.Config.CacheTypeV != "" {
+			vt = m.Config.Config.CacheTypeV
+		}
+	}
+	for i := range m.Layers {
+		l := &m.Layers[i]
+		if l.IsRecurrent || l.SharedKVSource >= 0 {
+			continue
+		}
+		if l.AttnCache.KQ8 != nil {
+			kt = model.CacheTypeQ8_0
+		} else if l.AttnCache.K16 != nil {
+			kt = model.CacheTypeF16
+		}
+		if l.AttnCache.VQ8 != nil {
+			vt = model.CacheTypeQ8_0
+		} else if l.AttnCache.V16 != nil {
+			vt = model.CacheTypeF16
+		}
+		break
+	}
+	return kt, vt
 }

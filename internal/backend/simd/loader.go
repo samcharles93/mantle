@@ -49,6 +49,12 @@ func (s mcfSource) TensorShape(name string) ([]int, bool) {
 }
 
 func LoadModelMCF(mcfFile *mcfstore.File, configJSON []byte, maxContext int, opts LoadModelOptions) (*Instance, error) {
+	if _, err := core.ResolveCacheType("cache-type-k", opts.CacheTypeK, core.CacheTypeF32); err != nil {
+		return nil, err
+	}
+	if _, err := core.ResolveCacheType("cache-type-v", opts.CacheTypeV, core.CacheTypeF32); err != nil {
+		return nil, err
+	}
 	if mcfFile == nil {
 		return nil, fmt.Errorf("mcf: nil file")
 	}
@@ -89,6 +95,14 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	}
 	if spec == nil {
 		return nil, fmt.Errorf("nil arch spec")
+	}
+	cacheTypeK, err := core.ResolveCacheType("cache-type-k", opts.CacheTypeK, core.CacheTypeF32)
+	if err != nil {
+		return nil, err
+	}
+	cacheTypeV, err := core.ResolveCacheType("cache-type-v", opts.CacheTypeV, core.CacheTypeF32)
+	if err != nil {
+		return nil, err
 	}
 	names := spec.Names
 	if !spec.UseLayerTypes && len(cfg.LayerTypes) > 0 {
@@ -331,14 +345,10 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			LayerTypes:             layerTypes,
 			MuPEnabled:             cfg.MuPEnabled,
 			AttentionBias:          cfg.AttentionBias,
+			CacheTypeK:             cacheTypeK,
+			CacheTypeV:             cacheTypeV,
 			HiddenAct:              cfg.HiddenActivation,
 		},
-	}
-	if opts.CacheTypeK != "" {
-		modelCfg.Config.CacheTypeK = opts.CacheTypeK
-	}
-	if opts.CacheTypeV != "" {
-		modelCfg.Config.CacheTypeV = opts.CacheTypeV
 	}
 
 	layers := make([]core.Layer, blockCount)
@@ -675,33 +685,29 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 			cache := core.AttnCache{KvStride: kvStride, CacheLen: cacheLen}
 
 			// Key cache type — backing slices are lazily allocated via EnsurePos.
-			kt := modelCfg.Config.CacheTypeK
-			if kt == "" {
-				kt = core.CacheTypeF32
-			}
-			switch kt {
+			switch modelCfg.Config.CacheTypeK {
+			case core.CacheTypeF32:
+				cache.K = make([]float32, 0)
 			case core.CacheTypeF16:
 				cache.K16 = make([]uint16, 0)
 			case core.CacheTypeQ8_0:
 				cache.KQ8 = make([]int8, 0)
 				cache.KQ8S = make([]float32, 0)
 			default:
-				cache.K = make([]float32, 0)
+				return nil, fmt.Errorf("unsupported cache-type-k %q", modelCfg.Config.CacheTypeK)
 			}
 
 			// Value cache type
-			vt := modelCfg.Config.CacheTypeV
-			if vt == "" {
-				vt = core.CacheTypeF32
-			}
-			switch vt {
+			switch modelCfg.Config.CacheTypeV {
+			case core.CacheTypeF32:
+				cache.V = make([]float32, 0)
 			case core.CacheTypeF16:
 				cache.V16 = make([]uint16, 0)
 			case core.CacheTypeQ8_0:
 				cache.VQ8 = make([]int8, 0)
 				cache.VQ8S = make([]float32, 0)
 			default:
-				cache.V = make([]float32, 0)
+				return nil, fmt.Errorf("unsupported cache-type-v %q", modelCfg.Config.CacheTypeV)
 			}
 
 			layer.AttnCache = cache

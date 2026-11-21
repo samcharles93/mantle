@@ -45,3 +45,12 @@ func TestQuantCacheWantedForLoad(t *testing.T) {
 		t.Error("q8 cache wanted with cache building disabled")
 	}
 }
+
+func TestLoadModelMCFRejectsInvalidCacheType(t *testing.T) {
+	if _, err := LoadModelMCF(nil, nil, 0, LoadModelOptions{CacheTypeK: "q4_0"}); err == nil {
+		t.Fatal("LoadModelMCF accepted unsupported CacheTypeK=q4_0")
+	}
+	if _, err := LoadModelMCF(nil, nil, 0, LoadModelOptions{CacheTypeV: "q4_0"}); err == nil {
+		t.Fatal("LoadModelMCF accepted unsupported CacheTypeV=q4_0")
+	}
+}

@@ -1,6 +1,9 @@
 package core
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/samcharles93/mantle/internal/model"
 	"github.com/samcharles93/mantle/internal/tokenizer"
 )
@@ -85,6 +88,37 @@ const (
 	CacheTypeQ8_0 = "q8_0"
 	CacheTypeQ4_0 = "q4_0" // Reserved/future
 )
+
+// ResolveCacheType normalizes and validates a KV cache data type string for the
+// CPU/general runtime. An empty value defaults to defaultType.
+func ResolveCacheType(flagName, raw, defaultType string) (string, error) {
+	ct := strings.ToLower(strings.TrimSpace(raw))
+	if ct == "" {
+		ct = defaultType
+	}
+	switch ct {
+	case CacheTypeF32, CacheTypeF16, CacheTypeQ8_0:
+		return ct, nil
+	default:
+		return "", fmt.Errorf("unsupported %s %q (supported: f32, f16, q8_0)", flagName, raw)
+	}
+}
+
+// ResolveCUDACacheType normalizes and validates a KV cache data type string for
+// the CUDA backend, where device KV caches support f16 and q8_0. An empty value
+// defaults to f16.
+func ResolveCUDACacheType(flagName, raw string) (string, error) {
+	ct := strings.ToLower(strings.TrimSpace(raw))
+	if ct == "" {
+		ct = CacheTypeF16
+	}
+	switch ct {
+	case CacheTypeF16, CacheTypeQ8_0:
+		return ct, nil
+	default:
+		return "", fmt.Errorf("unsupported %s %q for cuda backend (supported: f16, q8_0)", flagName, raw)
+	}
+}
 
 // RopeScaling is the config-level rotary scaling description, shared with
 // the model package rather than mirrored.

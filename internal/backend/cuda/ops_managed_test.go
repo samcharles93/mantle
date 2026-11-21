@@ -5,6 +5,7 @@ package cuda
 import (
 	"testing"
 
+	"github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/internal/backend/cuda/native"
 )
 
@@ -56,5 +57,109 @@ func TestManagedRangesKeepsAllocationsSeparate(t *testing.T) {
 	}
 	if err := stream.Synchronize(); err != nil {
 		t.Fatalf("stream synchronize: %v", err)
+	}
+}
+
+func TestCUDALoadModelRejectsUnsupportedCacheTypes(t *testing.T) {
+	b := &Backend{}
+	for _, ct := range []string{"q4_0", "f32", "bf16", "invalid"} {
+		if _, err := b.LoadModel(nil, nil, 4096, core.LoadModelOptions{CacheTypeK: ct}); err == nil {
+			t.Fatalf("LoadModel accepted unsupported CacheTypeK=%q", ct)
+		}
+		if _, err := b.LoadModel(nil, nil, 4096, core.LoadModelOptions{CacheTypeV: ct}); err == nil {
+			t.Fatalf("LoadModel accepted unsupported CacheTypeV=%q", ct)
+		}
+	}
+}
+
+func TestEstimateModelKVCacheBytesAndPreloadBudget(t *testing.T) {
+	const (
+		numLayers = 42
+		kvStride  = 256
+		cacheLen  = 4096
+		freeBytes = int64(3363) << 20
+	)
+	buildInst := func(q8K, q8V bool) *core.Instance {
+		layers := make([]core.Layer, numLayers)
+		for i := range layers {
+			c := core.AttnCache{
+				KvStride: kvStride,
+				CacheLen: cacheLen,
+			}
+			if q8K {
+				c.KQ8 = make([]int8, 0)
+				c.KQ8S = make([]float32, 0)
+			} else {
+				c.K16 = make([]uint16, 0)
+			}
+			if q8V {
+				c.VQ8 = make([]int8, 0)
+				c.VQ8S = make([]float32, 0)
+			} else {
+				c.V16 = make([]uint16, 0)
+			}
+			layers[i] = core.Layer{
+				HeadKV:         2,
+				HeadDim:        128,
+				SharedKVSource: -1,
+				AttnCache:      c,
+			}
+		}
+		return &core.Instance{
+			MaxContext: cacheLen,
+			Layers:     layers,
+		}
+	}
+
+	f16Inst := buildInst(false, false)
+	q8Inst := buildInst(true, true)
+
+	f16KV := estimateModelKVCacheBytes(f16Inst, 0)
+	q8KV := estimateModelKVCacheBytes(q8Inst, 0)
+
+	// 42 layers * 256 stride * 4096 tokens * 2 (K+V) * 2 bytes = 168 MiB
+	wantF16 := int64(numLayers) * kvStride * cacheLen * 4
+	if f16KV != wantF16 {
+		t.Fatalf("f16 KV estimate = %d, want %d", f16KV, wantF16)
+	}
+	// 42 layers * 2 (K+V) * (256*4096 + (256/32)*4096*4) = 94.5 MiB
+	wantQ8 := int64(numLayers) * 2 * (kvStride*cacheLen + (kvStride/32)*cacheLen*4)
+	if q8KV != wantQ8 {
+		t.Fatalf("q8_0 KV estimate = %d, want %d", q8KV, wantQ8)
+	}
+	if q8KV >= f16KV {
+		t.Fatalf("expected q8_0 KV estimate (%d) < f16 KV estimate (%d)", q8KV, f16KV)
+	}
+
+	f16Budget, _ := computePreloadUploadBudget(freeBytes, f16KV)
+	q8Budget, _ := computePreloadUploadBudget(freeBytes, q8KV)
+	if q8Budget-f16Budget != f16KV-q8KV {
+		t.Fatalf("q8 budget gain = %d, want exact KV savings %d", q8Budget-f16Budget, f16KV-q8KV)
+	}
+}
+
+func TestOpsStoreKVQ8PerRowScale(t *testing.T) {
+	const kvStride = 64
+	cache := core.AttnCache{
+		KvStride: kvStride,
+		CacheLen: 64,
+		KQ8:      make([]int8, 0),
+		KQ8S:     make([]float32, 0),
+		VQ8:      make([]int8, 0),
+		VQ8S:     make([]float32, 0),
+	}
+	var ops Ops
+	k := make([]float32, kvStride)
+	v := make([]float32, kvStride)
+	for i := range kvStride {
+		k[i] = float32(i+1) * 0.25
+		v[i] = -float32(i+1) * 0.5
+	}
+	for pos := range 40 {
+		cache.EnsurePos(pos)
+		ops.StoreKV(-1, pos, kvStride, nil, nil, nil, nil, cache.KQ8, cache.VQ8, cache.KQ8S, cache.VQ8S, k, v)
+		if cache.KQ8S[pos] <= 0 || cache.VQ8S[pos] <= 0 {
+			t.Fatalf("pos %d: expected positive Q8 scales, got k=%g v=%g", pos, cache.KQ8S[pos], cache.VQ8S[pos])
+		}
 	}
 }
