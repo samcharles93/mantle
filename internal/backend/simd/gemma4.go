@@ -337,6 +337,12 @@ func markHostStateDirty(ds DeviceStateOps, x []float32) {
 	}
 }
 
+// denseFFNResidualFastPath finishes the dense FFN branch (post-FFN norm, BF16
+// round and residual add) on device in one call.
+type denseFFNResidualFastPath interface {
+	FusedDenseFFNResidual(x, src, postNorm []float32, eps float32) bool
+}
+
 type gatedProjectionResidualFastPath interface {
 	GatedProjectionResidual(x, aux []float32, gate, projection *Mat, postNorm []float32, activation string, eps float32, roundBF16 bool) bool
 }
@@ -347,7 +353,12 @@ func roundedDenseFFN(m *Instance, layer *Layer, normed []float32) []float32 {
 	}
 
 	ops := m.Ops()
-	normed = roundBF16SliceTo(m.Scratch.AttnOut[:len(normed)], normed)
+	// The caller usually rounds the pre-norm output already. Rounding it on
+	// device keeps the FFN input device resident instead of flushing it back and
+	// re-uploading it; fall back to the host round when there is no device view.
+	if !deviceRoundBF16InPlace(ops, normed) {
+		normed = roundBF16SliceTo(m.Scratch.AttnOut[:len(normed)], normed)
+	}
 	if fp, ok := ops.(ffnFastPath); ok && fp.FFNBlock(layer, normed, m.Scratch.Tmp2[:layer.FfnDown.R]) {
 		return m.Scratch.Tmp2[:layer.FfnDown.R]
 	}
@@ -377,12 +388,26 @@ func roundedDenseFFN(m *Instance, layer *Layer, normed []float32) []float32 {
 func runGemma4FFNBlock(m *Instance, layer *Layer, x, normed, perLayerInput []float32, ds DeviceStateOps, trace *gemma4FFNTrace) error {
 	ops := m.Ops()
 	denseOut := roundedDenseFFN(m, layer, normed)
-	syncDeviceSlice(ops, denseOut)
-	if err := consumeFastPathError(ops); err != nil {
-		return fmt.Errorf("rounded dense ffn sync failed: %w", err)
+
+	fusedResidual := false
+	if layer.Gemma4MoE == nil && trace == nil {
+		if fp, ok := ops.(denseFFNResidualFastPath); ok {
+			fusedResidual = fp.FusedDenseFFNResidual(x, denseOut, layer.PostFfnNorm, m.RMSEpsilon)
+		}
+	}
+	if !fusedResidual {
+		syncDeviceSlice(ops, denseOut)
+		if err := consumeFastPathError(ops); err != nil {
+			return fmt.Errorf("rounded dense ffn sync failed: %w", err)
+		}
+	} else if err := consumeFastPathError(ops); err != nil {
+		return fmt.Errorf("dense ffn residual fast path failed: %w", err)
 	}
 
-	if layer.Gemma4MoE != nil {
+	switch {
+	case fusedResidual:
+		// x stayed device resident; nothing to do on host.
+	case layer.Gemma4MoE != nil:
 		ops.RMSNorm(m.Scratch.Tmp2, denseOut, layer.Gemma4MoE.PostNorm1, m.RMSEpsilon)
 		roundBF16SliceInPlace(m.Scratch.Tmp2[:len(x)])
 		roundedX := roundBF16SliceTo(m.Scratch.AttnProj[:len(x)], x)
@@ -406,7 +431,7 @@ func runGemma4FFNBlock(m *Instance, layer *Layer, x, normed, perLayerInput []flo
 			roundBF16SliceInPlace(x)
 			markHostStateDirty(ds, x)
 		}
-	} else {
+	default:
 		ffnOut := denseOut
 		if len(layer.PostFfnNorm) > 0 {
 			ops.RMSNorm(m.Scratch.Tmp2, denseOut, layer.PostFfnNorm, m.RMSEpsilon)

@@ -384,7 +384,7 @@ func (o *Ops) flushLastResult() error {
 	done := native.RecordAttribFlushLastResult()
 	defer done()
 	bytes := int64(o.lastResultLen) * 4
-	err := native.MemcpyD2H(unsafe.Pointer(&o.lastResultHostRef[0]), o.lastResultDev, bytes)
+	err := native.MemcpyD2HStream(unsafe.Pointer(&o.lastResultHostRef[0]), o.lastResultDev, bytes, o.stream)
 	o.clearLastResult()
 	if err != nil {
 		return fmt.Errorf("cuda: flush last result D2H failed (%d bytes): %w", bytes, err)
@@ -1059,7 +1059,7 @@ func (o *Ops) EndToken(x []float32) {
 		done := native.RecordAttribEndToken()
 		defer done()
 		bytes := int64(len(x)) * int64(unsafe.Sizeof(float32(0)))
-		if err := native.MemcpyD2H(unsafe.Pointer(&x[0]), o.xPersistDev, bytes); err != nil {
+		if err := native.MemcpyD2HStream(unsafe.Pointer(&x[0]), o.xPersistDev, bytes, o.stream); err != nil {
 			panic(fmt.Errorf("cuda: failed to download x from device (%d bytes): %w", bytes, err))
 		}
 		o.xDevDirty = false
@@ -1118,7 +1118,7 @@ func (o *Ops) SyncHostState(x []float32) {
 	done := native.RecordAttribSyncHostState()
 	defer done()
 	bytes := int64(len(x)) * int64(unsafe.Sizeof(float32(0)))
-	if err := native.MemcpyD2H(unsafe.Pointer(&x[0]), o.xPersistDev, bytes); err != nil {
+	if err := native.MemcpyD2HStream(unsafe.Pointer(&x[0]), o.xPersistDev, bytes, o.stream); err != nil {
 		panic(fmt.Errorf("cuda: failed to sync x from device (%d bytes): %w", bytes, err))
 	}
 	o.xDevDirty = false
@@ -1150,7 +1150,7 @@ func (o *Ops) SyncDeviceSlice(x []float32) {
 		done := native.RecordAttribSyncDeviceSlice()
 		defer done()
 		bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
-		if err := native.MemcpyD2H(unsafe.Pointer(&x[0]), o.xPersistDev, bytes); err != nil {
+		if err := native.MemcpyD2HStream(unsafe.Pointer(&x[0]), o.xPersistDev, bytes, o.stream); err != nil {
 			panic(fmt.Errorf("cuda: failed to sync persistent device slice (%d bytes): %w", bytes, err))
 		}
 		o.xDevDirty = false
@@ -1162,7 +1162,7 @@ func (o *Ops) SyncDeviceSlice(x []float32) {
 		done := native.RecordAttribSyncDeviceSlice()
 		defer done()
 		bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
-		if err := native.MemcpyD2H(unsafe.Pointer(&x[0]), o.normDev, bytes); err != nil {
+		if err := native.MemcpyD2HStream(unsafe.Pointer(&x[0]), o.normDev, bytes, o.stream); err != nil {
 			panic(fmt.Errorf("cuda: failed to sync norm device slice (%d bytes): %w", bytes, err))
 		}
 		return
@@ -2512,6 +2512,97 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	return true
 }
 
+// FusedDenseFFNResidual finishes the dense FFN branch on device: optional
+// post-FFN RMSNorm, BF16 round, residual add into x, BF16 round of x. It
+// consumes the pending FFN block result and leaves x device resident, so the
+// layer needs no host round trip between the FFN and the residual.
+//
+// It returns false without touching host state when the chain does not apply,
+// in which case the caller runs the host path. Every allocation is resolved
+// before the first kernel launch, so a false return never leaves the device
+// state half updated.
+func (o *Ops) FusedDenseFFNResidual(x, src, postNorm []float32, eps float32) bool {
+	if o == nil {
+		return false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	n := len(x)
+	if n == 0 || o.xHostLen != n || uintptr(unsafe.Pointer(&x[0])) != o.xHostPtr {
+		return false
+	}
+	if !o.lastResultValid || o.lastResultLen != n || uintptr(unsafe.Pointer(&src[0])) != o.lastResultHostPtr {
+		return false
+	}
+	// A deferred norm over the pending result would need materialising first;
+	// the host path handles that case more simply.
+	if o.pendingNormValid {
+		return false
+	}
+	bytes := int64(n) * int64(unsafe.Sizeof(float32(0)))
+	if int64(o.lastResultLen)*4 < bytes {
+		return false
+	}
+	if o.xHostDirty {
+		if err := native.MemcpyH2D(o.xPersistDev, unsafe.Pointer(&x[0]), bytes); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: dense ffn residual x upload failed (%d bytes): %w", bytes, err))
+			return false
+		}
+		o.xHostDirty = false
+		o.xDevDirty = false
+	}
+
+	// Resolve every buffer before launching anything.
+	var wDev native.DeviceBuffer
+	if len(postNorm) == n {
+		w, err := o.deviceNormWeight(postNorm)
+		if err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: dense ffn residual norm weight upload failed (n=%d): %w", n, err))
+			return false
+		}
+		wDev = w
+	} else if len(postNorm) != 0 {
+		return false
+	}
+	sumDev := o.lastResultDev
+	if wDev.Ptr() != nil || o.normDevValid {
+		// The norm output needs its own buffer, and any stale norm view must not
+		// survive a reuse of normDev.
+		o.clearNormDeviceView()
+		if err := o.ensureNormDeviceVec(int(bytes)); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: dense ffn residual norm buffer alloc failed (%d bytes): %w", bytes, err))
+			return false
+		}
+		if wDev.Ptr() != nil {
+			if err := native.RMSNormF32(o.normDev, o.lastResultDev, wDev, eps, n, o.stream); err != nil {
+				o.recordFastPathErrorLocked(fmt.Errorf("cuda: dense ffn residual norm failed (n=%d): %w", n, err))
+				return false
+			}
+			sumDev = o.normDev
+		}
+	}
+	if err := native.RoundBF16InPlaceF32(sumDev, n, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: dense ffn residual bf16 round failed (n=%d): %w", n, err))
+		return false
+	}
+	if err := native.AddVectorsF32(o.xPersistDev, sumDev, n, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: dense ffn residual add failed (n=%d): %w", n, err))
+		return false
+	}
+	if err := native.RoundBF16InPlaceF32(o.xPersistDev, n, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: dense ffn residual x round failed (n=%d): %w", n, err))
+		return false
+	}
+	o.clearLastResult()
+	o.xHostDirty = false
+	o.xDevDirty = true
+	runtime.KeepAlive(x)
+	runtime.KeepAlive(src)
+	runtime.KeepAlive(postNorm)
+	return true
+}
+
 // quantFFNBlock runs the full FFN (Up, Gate, activation, Down) on device using quantized matvec kernels.
 // This avoids H2D transfers for intermediate results and keeps the entire FFN computation on-GPU.
 func (o *Ops) quantFFNBlock(layer *model.Layer, x []float32, out []float32, useGelu, roundBF16 bool) bool {
@@ -3742,10 +3833,10 @@ func (o *Ops) MoEBlock(ml *model.MoELayer, x, out []float32, cfg model.MoEConfig
 	}
 	hostIdx := make([]int32, topK)
 	hostWeights := make([]float32, topK)
-	if err := native.MemcpyD2H(unsafe.Pointer(&hostIdx[0]), idxDev, int64(idxBytes)); err != nil {
+	if err := native.MemcpyD2HStream(unsafe.Pointer(&hostIdx[0]), idxDev, int64(idxBytes), o.stream); err != nil {
 		return fail(fmt.Errorf("cuda: moe idx download failed: %w", err))
 	}
-	if err := native.MemcpyD2H(unsafe.Pointer(&hostWeights[0]), wDev, int64(wBytes)); err != nil {
+	if err := native.MemcpyD2HStream(unsafe.Pointer(&hostWeights[0]), wDev, int64(wBytes), o.stream); err != nil {
 		return fail(fmt.Errorf("cuda: moe weights download failed: %w", err))
 	}
 
@@ -3780,7 +3871,7 @@ func (o *Ops) MoEBlock(ml *model.MoELayer, x, out []float32, cfg model.MoEConfig
 	if err := o.stream.Synchronize(); err != nil {
 		return fail(fmt.Errorf("cuda: moe final sync failed: %w", err))
 	}
-	if err := native.MemcpyD2H(unsafe.Pointer(&out[0]), accumDev, int64(accumBytes)); err != nil {
+	if err := native.MemcpyD2HStream(unsafe.Pointer(&out[0]), accumDev, int64(accumBytes), o.stream); err != nil {
 		return fail(fmt.Errorf("cuda: moe accum download failed: %w", err))
 	}
 
@@ -4190,13 +4281,13 @@ func (o *Ops) MatVecQKV(q, k, v []float32, wq, wk, wv *model.Mat, x []float32) b
 			return false
 		}
 	} else {
-		if err := native.MemcpyD2H(qPtr, o.yDev, qBytes); err != nil {
+		if err := native.MemcpyD2HStream(qPtr, o.yDev, qBytes, o.stream); err != nil {
 			return false
 		}
-		if err := native.MemcpyD2H(kPtr, o.zDev, kBytes); err != nil {
+		if err := native.MemcpyD2HStream(kPtr, o.zDev, kBytes, o.stream); err != nil {
 			return false
 		}
-		if err := native.MemcpyD2H(vPtr, o.aDev, vBytes); err != nil {
+		if err := native.MemcpyD2HStream(vPtr, o.aDev, vBytes, o.stream); err != nil {
 			return false
 		}
 	}
@@ -5267,7 +5358,7 @@ func (o *Ops) waitForResult(hostDst unsafe.Pointer, devSrc native.DeviceBuffer, 
 		return nil
 	}
 	// Blocking D2H copy implicitly waits for producing work and avoids a separate stream sync call.
-	return native.MemcpyD2H(hostDst, devSrc, bytes)
+	return native.MemcpyD2HStream(hostDst, devSrc, bytes, o.stream)
 }
 
 func (o *Ops) ensureQuantMat(w *model.Mat) (deviceQuantMat, error) {

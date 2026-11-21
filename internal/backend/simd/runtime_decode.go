@@ -190,12 +190,16 @@ func runDecoderLayers(m *Instance, rt *tokenRuntimeState) error {
 			ops.RMSNorm(m.Scratch.Tmp, x, layer.FfnNorm, m.RMSEpsilon)
 		}
 		if usesGemma4BF16Rounding(layer) {
-			syncDeviceSlice(ops, m.Scratch.Tmp)
-			if err := consumeFastPathError(ops); err != nil {
-				return fmt.Errorf("ffn pre-norm sync failed: %w", err)
+			// Round on device when the pre-norm output is already device
+			// resident, which keeps the FFN input there and saves a flush.
+			if !deviceRoundBF16InPlace(ops, m.Scratch.Tmp[:len(x)]) {
+				syncDeviceSlice(ops, m.Scratch.Tmp)
+				if err := consumeFastPathError(ops); err != nil {
+					return fmt.Errorf("ffn pre-norm sync failed: %w", err)
+				}
+				roundBF16SliceInPlace(m.Scratch.Tmp[:len(x)])
+				markHostStateDirty(ds, m.Scratch.Tmp[:len(x)])
 			}
-			roundBF16SliceInPlace(m.Scratch.Tmp[:len(x)])
-			markHostStateDirty(ds, m.Scratch.Tmp[:len(x)])
 		}
 
 		perLayerInput := rt.perLayerInput(m, i)

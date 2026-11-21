@@ -760,6 +760,20 @@ func MemcpyD2DAsync(dst, src DeviceBuffer, bytes int64, stream Stream) error {
 	return cudaErr(C.mantleCudaMemcpyAsync(dst.ptr, src.ptr, C.ulonglong(bytes), kind, stream.ptr))
 }
 
+// MemcpyD2HStream copies device memory to host on the given stream and waits
+// for that stream. The blocking MemcpyD2H goes through the legacy default
+// stream, which synchronizes against every stream in the process and costs far
+// more per call than the copy itself.
+func MemcpyD2HStream(dst unsafe.Pointer, src DeviceBuffer, bytes int64, stream Stream) error {
+	if bytes <= 0 {
+		return nil
+	}
+	if err := MemcpyD2HAsync(dst, src, bytes, stream); err != nil {
+		return err
+	}
+	return stream.Synchronize()
+}
+
 func MemcpyH2D(dst DeviceBuffer, src unsafe.Pointer, bytes int64) error {
 	if bytes <= 0 {
 		return nil
