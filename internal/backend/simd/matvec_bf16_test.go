@@ -53,9 +53,9 @@ func TestMatVecBF16MatchesScalar(t *testing.T) {
 	}
 }
 
-// TestMatVecBF16GroupsMatchSingleRows pins the eight-row kernel to the
-// one-row path bit for bit, over ranges that leave four-, two- and one-row
-// tails and widths that do or do not split into 8-element chunks.
+// TestMatVecBF16GroupsMatchSingleRows checks that the eight-row kernel matches
+// the one-row path bit for bit, over row ranges that leave four-, two- and
+// one-row tails, and over widths that are and are not multiples of 8.
 func TestMatVecBF16GroupsMatchSingleRows(t *testing.T) {
 	if !cpu.HasAVX2 {
 		t.Skip("needs AVX2")
@@ -66,7 +66,9 @@ func TestMatVecBF16GroupsMatchSingleRows(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%dx%d/%d-%d", tc.rows, tc.cols, tc.rs, tc.re), func(t *testing.T) {
 			raw := makeBF16MatrixRaw(tc.rows, tc.cols, rng)
-			// Rows of zeros and of negative products exercise signed zeros.
+			// Row 5 is all zeros, so its products are signed zeros: this checks
+			// that the eight-row path gives a zero sum the same sign as the
+			// one-row path.
 			for i := range tc.cols * 2 {
 				raw[5*tc.cols*2+i] = 0
 			}

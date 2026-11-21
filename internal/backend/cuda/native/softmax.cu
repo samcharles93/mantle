@@ -43,13 +43,14 @@ __device__ __forceinline__ float f16_to_f32(uint16_t raw)
 }
 
 // quant_matvec_k4_f32_rows_kernel computes ROWS rows per warp. Each lane
-// takes whole 32-element blocks (block b = lane, lane+32, ...): one 16-byte
-// load of the block's nibbles per row, its two scales once, and the block's
-// 32 activations held in registers and reused for all ROWS rows, along with
-// their sum for the sign-folding correction. Each block is summed in float and
-// scaled once, then the lanes reduce per row. Only
-// whole blocks are handled here; the launcher sends widths with a partial
-// last block, or buffers not 16-byte aligned, to the per-element kernels.
+// handles whole 32-element blocks (blocks lane, lane+32, ...). It loads a
+// block's 32 activations and their sum (for the sign-folding correction) into
+// registers once and reuses them for all ROWS rows; for each row it makes one
+// 16-byte load of the block's nibbles and loads the block's two scales. Each
+// block's dot product is accumulated in float and scaled once, then the warp
+// reduces each row's partial sums. The kernel handles only whole blocks: the
+// launcher sends widths with a partial last block, and buffers not aligned to
+// 16 bytes, to the per-element kernels.
 template <int ROWS>
 __global__ void quant_matvec_k4_f32_rows_kernel(
     const uint8_t *__restrict__ q_data,
@@ -111,16 +112,16 @@ __global__ void quant_matvec_k4_f32_rows_kernel(
 #pragma unroll
         for (int k = 0; k < 8; k++)
         {
-          // 0x4B000000 | u is the float 2^23 + u, so this is u exactly,
-          // without the quarter-rate integer-to-float conversion.
+          // 0x4B000000 | u is the float 2^23 + u, so subtracting 2^23 gives
+          // u exactly, avoiding the quarter-rate integer-to-float conversion.
           const float u =
               __uint_as_float(0x4B000000u | ((wu >> (4 * k)) & 0xFu)) - 8388608.0f;
           dot = fmaf(u, xv[8 * w + k], dot);
         }
       }
       dot = fmaf(-8.0f, xsum, dot);
-      // A zero scale contributes nothing, even against non-finite x, as in
-      // the per-element kernels.
+      // A block with a zero scale contributes nothing, even when x is
+      // non-finite, matching the per-element kernels.
       if (super_scale != 0.0f && u6 != 0)
         sum[r] = fmaf(super_scale * (static_cast<float>(u6) * (1.0f / 32.0f)),
                       dot, sum[r]);
@@ -1672,9 +1673,10 @@ extern "C"
     const int threads = 256;
     const int warps_per_block = threads / WARP_SIZE;
     dim3 block(threads);
-    // Whole blocks and 16-byte aligned nibbles and activations take the
-    // vectorised kernel; four rows per warp share each activation load, unless
-    // that would leave the card with fewer warps than it has room for.
+    // Widths of whole blocks, with nibbles and activations aligned to 16
+    // bytes, take the vectorised kernel. Matrices of at least 1024 rows use
+    // four rows per warp so each activation load serves four rows; smaller
+    // ones, which would launch few warps at four rows each, use one.
     const bool aligned = (reinterpret_cast<uintptr_t>(qData) & 15) == 0 &&
                          (reinterpret_cast<uintptr_t>(x) & 15) == 0;
     if (aligned && cols == blocksPerRow * 32)

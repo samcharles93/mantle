@@ -14,10 +14,11 @@ import (
 )
 
 // TestFFNBlockBF16DeviceInput runs the dense FFN fast path on BF16 weights with
-// its input left on device by DeviceRMSNorm, as Gemma-3 decode does. It pins
-// two regressions: the host copy of the normed input is stale (NaN here), so
-// FFNBlock must read the device copy; and the result must be published as the
-// pending device result for out, not copied to out behind lastResult's back.
+// its input left on the device by DeviceRMSNorm, as Gemma-3 decode does. It
+// covers two regressions: the host copy of the normed input is stale (NaN
+// here), so FFNBlock must read the device copy; and the result must be
+// published as the pending device result for out, not copied into out while
+// lastResult still refers to an earlier result.
 func TestFFNBlockBF16DeviceInput(t *testing.T) {
 	count, err := native.DeviceCount()
 	if err != nil || count < 1 {

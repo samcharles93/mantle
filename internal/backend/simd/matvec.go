@@ -35,10 +35,11 @@ type matVecTask struct {
 	mv *matVecJob
 }
 
-// matVecJob is one MatVec call shared by every worker task. Workers claim
-// tiles of rows from next until none remain, so the faster cores of a hybrid
-// CPU take more rows than an equal static split would give them; each row's
-// result does not depend on which worker or tile computes it.
+// matVecJob holds the state of one MatVec call, shared by all of its worker
+// tasks. Workers claim tiles of rows from next until none remain, so the faster
+// cores of a hybrid CPU process more rows than an equal static split would
+// assign them. A row's result does not depend on which worker or tile computes
+// it.
 type matVecJob struct {
 	dst  []float32
 	w    *Mat
@@ -58,9 +59,9 @@ func (j *matVecJob) run(worker *matVecWorker) {
 	}
 }
 
-// matVecMinTileRows is the smallest MatVec tile. Below it the atomic claims
-// cost more than the imbalance they remove: a 512-row matrix split into 8-row
-// tiles ran 7% slower than one tile per worker.
+// matVecMinTileRows is the smallest MatVec tile. Smaller tiles cost more in
+// atomic claims than they recover in load balance: a 512-row matrix split into
+// 8-row tiles ran 7% slower than with one tile per worker.
 const matVecMinTileRows = 32
 
 // matVecTileRows sizes MatVec tiles at about four per worker, at least
@@ -537,12 +538,13 @@ func matVecRangeBF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 	}
 }
 
-// matVecBF16x8 sets out[k] to the product of x with the bf16 row starting at
-// raw[k*stride], for the eight rows k = 0..7; len(x) must be a multiple of 8.
-// Each row keeps one accumulator, fed in element order, and sumLanes8 adds its
-// lanes in the order the scalar horizontal sum uses, so every result has the
-// bits the one-, two- and four-row paths of matVecRangeBF16SIMD give the same
-// row. x is loaded once per chunk for all eight rows.
+// matVecBF16x8 sets out[k] to the dot product of x with the bf16 row starting
+// at raw[k*stride], for the eight rows k = 0..7; len(x) must be a multiple of
+// 8. Each row keeps one accumulator, fed in element order, and sumLanes8 adds
+// its lanes in the same order as the scalar horizontal sum, so each result is
+// bit-identical to what the one-, two- and four-row paths of
+// matVecRangeBF16SIMD produce for that row. Each 8-element chunk of x is
+// loaded once and shared by all eight rows.
 func matVecBF16x8(out *[8]float32, raw []uint16, stride int, x []float32) {
 	c := len(x)
 	r0 := raw[0*stride : 0*stride+c]
@@ -570,7 +572,8 @@ func matVecBF16x8(out *[8]float32, raw []uint16, stride int, x []float32) {
 		a6 = widen(r6, j).MulAdd(vx, a6)
 		a7 = widen(r7, j).MulAdd(vx, a7)
 	}
-	// The scalar paths start their sums at 0 and add the horizontal sum.
+	// The other paths compute 0 + (horizontal sum), which turns a -0 sum into
+	// +0; adding to zero here keeps the bits identical.
 	zero.Add(sumLanes8(a0, a1, a2, a3, a4, a5, a6, a7)).StoreArray(out)
 }
 
@@ -614,7 +617,7 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 		c := w.C
 		i := rs
 
-		// Eight rows at a time while whole 8-element chunks cover the row.
+		// Process eight rows at a time when the row length is a multiple of 8.
 		if c%8 == 0 && re-rs >= 8 {
 			for ; i+8 <= re; i += 8 {
 				matVecBF16x8((*[8]float32)(dst[i:i+8]), u16raw[i*w.Stride:], w.Stride, x[:c])

@@ -2364,9 +2364,10 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	intermF16Bytes := int64(interm) * 2
 	outBytes := int64(downW.rows) * 4
 
-	// A BF16 weight needs a BF16 input (see the down projection). When x is
-	// device resident (a device-side norm leaves the host copy stale), take it
-	// as F32 and convert it on device rather than upload the host slice.
+	// A BF16 weight needs a BF16 input (see the down projection below). When x
+	// is device resident, its host copy may be stale (a device-side norm does
+	// not update it), so fetch the F32 device copy and convert it on the
+	// device instead of uploading the host slice.
 	xInputType := upW.dtype
 	devDType := upW.dtype
 	if upW.dtype == native.BlasBF16 {
@@ -2483,8 +2484,9 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	}
 	// Publish the result on device, as quantFFNBlock does: the residual add
 	// or the next norm consumes it there, and FlushBlockResult makes it host
-	// visible when a host reader needs it. Copying it to out without
-	// publishing would leave lastResult describing whatever out held before.
+	// visible when a host reader needs it. Copying it into out without
+	// publishing it would leave lastResult mapping out to an earlier device
+	// result, which the next device op would then read.
 	o.setLastResult(o.zDev, out, downW.rows)
 	runtime.KeepAlive(x)
 	runtime.KeepAlive(out)

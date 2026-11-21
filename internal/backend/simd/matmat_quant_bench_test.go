@@ -15,7 +15,7 @@ import (
 // lfm3QuantShapes are the batched projections of an LFM3-1.7B layer, as
 // [rows, cols] of the weight. Every shape runs once per layer of its kind: the
 // FFN in all 24 layers, conv in 13 and attention in 11. The 16-row attention
-// gate is left out; it is a rounding error next to these.
+// gate is left out; its cost is negligible beside these.
 var lfm3QuantShapes = []struct {
 	name       string
 	rows, cols int
@@ -126,9 +126,9 @@ func BenchmarkMatMatQuantShapes(b *testing.B) {
 // enough that no cache level holds a meaningful part of it.
 const readBandwidthBytes = 512 << 20
 
-// readStripe folds every byte of buf into a checksum with four independent
-// 256-bit accumulators, so the loop is bound by loads rather than by the add
-// latency chain.
+// readStripe sums every word of buf into a checksum with four independent
+// 256-bit accumulators, so the loop is bound by loads rather than by the
+// latency of a single chain of adds.
 func readStripe(buf []uint64) uint64 {
 	var a0, a1, a2, a3 archsimd.Uint64x4
 	i := 0
@@ -147,9 +147,9 @@ func readStripe(buf []uint64) uint64 {
 	return sum
 }
 
-// BenchmarkReadBandwidth is the memory read ceiling the GEMM roofline is
-// judged against: threads goroutines each stream an equal stripe of a buffer
-// far larger than the last-level cache. Thread counts above GOMAXPROCS are
+// BenchmarkReadBandwidth measures the memory read ceiling against which the
+// GEMM roofline is judged: each of threads goroutines streams an equal stripe
+// of a buffer far larger than the last-level cache. Thread counts above GOMAXPROCS are
 // skipped; pin with taskset to choose which cores take part.
 func BenchmarkReadBandwidth(b *testing.B) {
 	buf := make([]uint64, readBandwidthBytes/8)
@@ -186,7 +186,8 @@ func BenchmarkReadBandwidth(b *testing.B) {
 
 // BenchmarkPrepareQuantVec measures the activation quantisation a quantised
 // MatVec performs before its dispatch, at the LFM3-1.7B input widths: the
-// hidden size (every projection but one) and the FFN width (ffn_down).
+// hidden size (the input width of every projection except ffn_down) and the
+// FFN width (ffn_down's input width).
 func BenchmarkPrepareQuantVec(b *testing.B) {
 	for _, cols := range []int{2048, 7680} {
 		x := quantTestActivations(1, cols)

@@ -284,8 +284,8 @@ func (gr *GraphRuntime) computeFFNBlock(
 
 	out := make([]float32, layer.FfnDown.R)
 	if gr.ops.FFNBlock(layer, x, out) {
-		// FFNBlock leaves its result on device for the decode runtime's
-		// residual add; graph nodes hand out host slices, so flush it.
+		// FFNBlock leaves its result on the device for the decode runtime's
+		// residual add; graph nodes return host slices, so flush it.
 		if err := gr.ops.FlushBlockResult(); err != nil {
 			return nil, fmt.Errorf("ffn: flush layer %d result: %w", layerIdx, err)
 		}
