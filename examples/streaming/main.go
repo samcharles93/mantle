@@ -51,7 +51,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "load: %v\n", err)
 		os.Exit(1)
 	}
-	defer engine.Close()
+	defer func() {
+		if err := engine.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "close: %v\n", err)
+		}
+	}()
 
 	caps := engine.Capabilities()
 	fmt.Printf("arch=%s  ctx=%d  vocab=%d  quant=%s\n",

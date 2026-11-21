@@ -1,7 +1,7 @@
 #include "textflag.h"
 
 // func dotU8I8(a, b *[32]uint8) [8]int32
-TEXT ·dotU8I8(SB), NOSPLIT, $0-40
+TEXT ·dotU8I8(SB), NOSPLIT, $0-48
 	MOVQ a+0(FP), AX
 	MOVQ b+8(FP), BX
 	VMOVDQU (AX), Y0

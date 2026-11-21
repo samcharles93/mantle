@@ -57,7 +57,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "load: %v\n", err)
 		os.Exit(1)
 	}
-	defer engine.Close()
+	defer func() {
+		if err := engine.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "close: %v\n", err)
+		}
+	}()
 
 	caps := engine.Capabilities()
 	fmt.Printf("arch=%s  ctx=%d  vocab=%d  quant=%s\n\n",
@@ -105,23 +109,23 @@ func runInteractive(engine *mantle.Engine, msgs []mantle.Message) {
 			break
 		}
 		input := strings.TrimSpace(scanner.Text())
-		switch {
-		case input == "":
+		switch input {
+		case "":
 			continue
-		case input == "/exit" || input == "/quit":
+		case "/exit", "/quit":
 			fmt.Println("goodbye")
 			return
-		case input == "/help":
+		case "/help":
 			fmt.Println("/exit  - quit")
 			fmt.Println("/clear - reset conversation")
 			fmt.Println("/stats - show model capabilities")
 			continue
-		case input == "/clear":
+		case "/clear":
 			msgs = msgs[:1] // keep system prompt
 			engine.ResetContext()
 			fmt.Println("conversation reset")
 			continue
-		case input == "/stats":
+		case "/stats":
 			caps := engine.Capabilities()
 			fmt.Printf("arch=%s  ctx=%d  vocab=%d  quant=%s\n",
 				caps.Arch, caps.MaxContext, caps.VocabSize, caps.Quantization)
