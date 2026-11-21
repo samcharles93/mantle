@@ -42,6 +42,100 @@ __device__ __forceinline__ float f16_to_f32(uint16_t raw)
   return __half2float(__ushort_as_half(raw));
 }
 
+// quant_matvec_k4_f32_rows_kernel computes ROWS rows per warp. Each lane
+// takes whole 32-element blocks (block b = lane, lane+32, ...): one 16-byte
+// load of the block's nibbles per row, its two scales once, and the block's
+// 32 activations held in registers and reused for all ROWS rows, along with
+// their sum for the sign-folding correction. Each block is summed in float and
+// scaled once, then the lanes reduce per row. Only
+// whole blocks are handled here; the launcher sends widths with a partial
+// last block, or buffers not 16-byte aligned, to the per-element kernels.
+template <int ROWS>
+__global__ void quant_matvec_k4_f32_rows_kernel(
+    const uint8_t *__restrict__ q_data,
+    const uint16_t *__restrict__ super_scales_f16,
+    const uint8_t *__restrict__ sub_scales,
+    const float *__restrict__ x, float *__restrict__ y,
+    int rows, int blocks_per_row)
+{
+  const int lane = threadIdx.x & (WARP_SIZE - 1);
+  const int warp = threadIdx.x / WARP_SIZE;
+  const int warps_per_block = blockDim.x / WARP_SIZE;
+  const int row0 = (blockIdx.x * warps_per_block + warp) * ROWS;
+  if (row0 >= rows)
+    return;
+  const int super_blocks_per_row = (blocks_per_row + 7) / 8;
+
+  float sum[ROWS];
+#pragma unroll
+  for (int r = 0; r < ROWS; r++)
+    sum[r] = 0.0f;
+
+  for (int b = lane; b < blocks_per_row; b += WARP_SIZE)
+  {
+    const float4 *xb = reinterpret_cast<const float4 *>(x + b * 32);
+    float xv[32];
+    float xsum = 0.0f;
+#pragma unroll
+    for (int k = 0; k < 8; k++)
+    {
+      const float4 v = __ldg(xb + k);
+      xv[4 * k] = v.x;
+      xv[4 * k + 1] = v.y;
+      xv[4 * k + 2] = v.z;
+      xv[4 * k + 3] = v.w;
+      xsum += (v.x + v.y) + (v.z + v.w);
+    }
+#pragma unroll
+    for (int r = 0; r < ROWS; r++)
+    {
+      const int row = row0 + r;
+      if (row >= rows)
+        break;
+      const int blk = row * blocks_per_row + b;
+      // All three loads issue before any of them is used: a branch on the
+      // scales here would serialise the nibble load behind them.
+      const uint8_t u6 = __ldg(sub_scales + blk) & 0x3F;
+      const float super_scale = f16_to_f32(
+          __ldg(super_scales_f16 + row * super_blocks_per_row + (b >> 3)));
+      const uint4 qv = __ldg(reinterpret_cast<const uint4 *>(q_data) + blk);
+      const uint32_t words[4] = {qv.x, qv.y, qv.z, qv.w};
+      float dot = 0.0f;
+#pragma unroll
+      for (int w = 0; w < 4; w++)
+      {
+        // Element 8w+k is nibble k of word w (low nibble first). In 4-bit
+        // two's complement, u = nib ^ 8 is the value plus 8, in [0, 15];
+        // the -8 is applied once per block as -8*sum(x) below.
+        const uint32_t wu = words[w] ^ 0x88888888u;
+#pragma unroll
+        for (int k = 0; k < 8; k++)
+        {
+          // 0x4B000000 | u is the float 2^23 + u, so this is u exactly,
+          // without the quarter-rate integer-to-float conversion.
+          const float u =
+              __uint_as_float(0x4B000000u | ((wu >> (4 * k)) & 0xFu)) - 8388608.0f;
+          dot = fmaf(u, xv[8 * w + k], dot);
+        }
+      }
+      dot = fmaf(-8.0f, xsum, dot);
+      // A zero scale contributes nothing, even against non-finite x, as in
+      // the per-element kernels.
+      if (super_scale != 0.0f && u6 != 0)
+        sum[r] = fmaf(super_scale * (static_cast<float>(u6) * (1.0f / 32.0f)),
+                      dot, sum[r]);
+    }
+  }
+
+#pragma unroll
+  for (int r = 0; r < ROWS; r++)
+  {
+    const float total = warp_reduce_sum(sum[r]);
+    if (lane == 0 && row0 + r < rows)
+      y[row0 + r] = total;
+  }
+}
+
 extern "C"
 {
 
@@ -1578,6 +1672,29 @@ extern "C"
     const int threads = 256;
     const int warps_per_block = threads / WARP_SIZE;
     dim3 block(threads);
+    // Whole blocks and 16-byte aligned nibbles and activations take the
+    // vectorised kernel; four rows per warp share each activation load, unless
+    // that would leave the card with fewer warps than it has room for.
+    const bool aligned = (reinterpret_cast<uintptr_t>(qData) & 15) == 0 &&
+                         (reinterpret_cast<uintptr_t>(x) & 15) == 0;
+    if (aligned && cols == blocksPerRow * 32)
+    {
+      constexpr int kRowsPerWarp = 4;
+      if (rows >= 1024)
+      {
+        const int rows_per_block = warps_per_block * kRowsPerWarp;
+        dim3 grid((rows + rows_per_block - 1) / rows_per_block);
+        quant_matvec_k4_f32_rows_kernel<kRowsPerWarp><<<grid, block, 0, stream>>>(
+            qData, superScalesF16, subScales, x, y, rows, blocksPerRow);
+      }
+      else
+      {
+        dim3 grid((rows + warps_per_block - 1) / warps_per_block);
+        quant_matvec_k4_f32_rows_kernel<1><<<grid, block, 0, stream>>>(
+            qData, superScalesF16, subScales, x, y, rows, blocksPerRow);
+      }
+      return (int)cudaGetLastError();
+    }
     dim3 grid((rows + warps_per_block - 1) / warps_per_block);
     const size_t shared_x_bytes = static_cast<size_t>(cols) * sizeof(float);
     const bool use_xshared =
