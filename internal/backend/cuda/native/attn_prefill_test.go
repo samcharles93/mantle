@@ -140,6 +140,7 @@ func TestAttentionPrefillMatchesPerRow(t *testing.T) {
 		{64, 8, 8, 100, 20, 40, 40, 0},  // sliding window on a ring shorter than the chunk
 		{64, 8, 2, 33, 7, 64, 16, 30},   // window inside a larger cache, softcap
 		{256, 4, 1, 12, 3, 32, 0, 0},
+		{512, 8, 1, 20, 4, 64, 0, 0},    // Gemma-4 global full attention (headDim=512)
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("hd%d_h%d_kv%d_n%d_start%d_cache%d_w%d", c.headDim, c.nHead, c.kvHeads, c.n, c.startPos, c.cacheLen, c.window), func(t *testing.T) {
@@ -218,6 +219,65 @@ func TestAttentionPrefillMatchesPerRow(t *testing.T) {
 				}
 			}
 			t.Logf("worst abs diff %g", worst)
+		})
+	}
+}
+
+func TestAttentionPrefillF16CacheOnly(t *testing.T) {
+	cases := []struct {
+		headDim, nHead, kvHeads, n, startPos, cacheLen, window int
+	}{
+		{256, 8, 1, 18, 5, 64, 12},
+		{512, 8, 1, 14, 3, 64, 0},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("hd%d_w%d", c.headDim, c.window), func(t *testing.T) {
+			if !AttentionPrefillF16Supported(c.headDim, c.nHead, c.kvHeads) {
+				t.Skip("layout not supported on this device")
+			}
+			stream, err := NewStream()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = stream.Destroy() }()
+			kvStride := c.kvHeads * c.headDim
+			qDim := c.nHead * c.headDim
+			scale := float32(1 / math.Sqrt(float64(c.headDim)))
+
+			total := c.startPos + c.n
+			allK := uploadF32(t, patternF32(total*kvStride, 7, 2))
+			allV := uploadF32(t, patternF32(total*kvStride, 9, 2))
+			ck := allocZeroed(t, c.cacheLen*kvStride*2)
+			cv := allocZeroed(t, c.cacheLen*kvStride*2)
+			for p := range total {
+				slot := p % c.cacheLen
+				if err := StoreKVF16Row(ck, sub(allK, p*kvStride*4), slot, kvStride, stream); err != nil {
+					t.Fatal(err)
+				}
+				if err := StoreKVF16Row(cv, sub(allV, p*kvStride*4), slot, kvStride, stream); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			q := uploadF32(t, patternF32(c.n*qDim, 11, 1))
+			gotBuf := allocZeroed(t, c.n*qDim*4)
+			if err := AttentionPrefillF16(q, DeviceBuffer{}, DeviceBuffer{}, ck, cv, gotBuf, c.n, c.startPos, kvStride, c.headDim, c.nHead, c.kvHeads, c.cacheLen, c.window, scale, 0, stream); err != nil {
+				t.Fatal(err)
+			}
+			got := downloadF32(t, gotBuf, c.n*qDim)
+
+			wantBuf := allocZeroed(t, c.n*qDim*4)
+			if err := AttentionInnerF16CacheF32Batch(q, ck, cv, wantBuf, c.n, c.startPos, kvStride, c.headDim, c.nHead, c.kvHeads, c.cacheLen, c.window, scale, 0, stream); err != nil {
+				t.Fatal(err)
+			}
+			want := downloadF32(t, wantBuf, c.n*qDim)
+
+			for i := range got {
+				d := math.Abs(float64(got[i] - want[i]))
+				if d > 2e-5+2e-5*math.Abs(float64(want[i])) {
+					t.Fatalf("row %d dim %d: cache-only prefill %v, batch inner %v", i/qDim, i%qDim, got[i], want[i])
+				}
+			}
 		})
 	}
 }

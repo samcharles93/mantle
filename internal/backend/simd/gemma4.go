@@ -263,8 +263,15 @@ func computeGemma4PerLayerInputs(m *Instance, tok int, x []float32, ops Ops, ds 
 			tokBuf[i] *= perLayer.EmbeddingScale
 		}
 	}
-	for i := range proj {
-		proj[i] *= perLayer.ProjectionScale
+	if perLayer.ProjectionScale != 1 {
+		if sc, ok := ops.(interface{ DeviceScaleInPlace([]float32, float32) bool }); !ok || !sc.DeviceScaleInPlace(proj, perLayer.ProjectionScale) {
+			if projFast {
+				syncDeviceSlice(ops, proj)
+			}
+			for i := range proj {
+				proj[i] *= perLayer.ProjectionScale
+			}
+		}
 	}
 	if bp, ok := ops.(batchedNormOps); !ok || !bp.RMSNormBatched(inputs, proj, perLayer.ProjectionNorm, m.RMSEpsilon, perLayer.HiddenSize, perLayer.LayerCount) {
 		for layerIdx := range perLayer.LayerCount {

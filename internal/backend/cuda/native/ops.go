@@ -27,6 +27,13 @@ extern int mantleCudaAddVectorsF32(
 	const float* src,
 	int n,
 	cudaStream_t stream);
+extern int mantleCudaTranspose3DF32(
+	float* dst,
+	const float* src,
+	int d0,
+	int d1,
+	int d2,
+	cudaStream_t stream);
 extern int mantleCudaConvertF32ToF16(
 	const float* in,
 	unsigned short* out,
@@ -320,6 +327,16 @@ static int mantleCudaRMSNormGatedF32Wrapper(
 	int norm_before_gate,
 	cudaStream_t stream) {
 	return mantleCudaRMSNormGatedF32(out, y, z, weight, eps, n, norm_before_gate, stream);
+}
+
+static int mantleCudaTranspose3DF32Wrapper(
+	float* dst,
+	const float* src,
+	int d0,
+	int d1,
+	int d2,
+	cudaStream_t stream) {
+	return mantleCudaTranspose3DF32(dst, src, d0, d1, d2, stream);
 }
 */
 import "C"
@@ -800,6 +817,34 @@ func AttnGateScaleF32(attn, gate DeviceBuffer, nRows, qDim, nHead, headDim int, 
 		C.int(nHead),
 		C.int(headDim),
 		ph,
+		stream.ptr,
+	))
+}
+
+// Transpose3DF32 transposes a contiguous [d0, d1, d2] f32 tensor into
+// [d1, d0, d2].
+func Transpose3DF32(dst, src DeviceBuffer, d0, d1, d2 int, stream Stream) error {
+	if dst.ptr == nil || src.ptr == nil {
+		return fmt.Errorf("native.Transpose3DF32: buffer is nil")
+	}
+	d0C, err := checkedPositiveCInt("d0", d0)
+	if err != nil {
+		return fmt.Errorf("native.Transpose3DF32: %w", err)
+	}
+	d1C, err := checkedPositiveCInt("d1", d1)
+	if err != nil {
+		return fmt.Errorf("native.Transpose3DF32: %w", err)
+	}
+	d2C, err := checkedPositiveCInt("d2", d2)
+	if err != nil {
+		return fmt.Errorf("native.Transpose3DF32: %w", err)
+	}
+	return cudaErr(C.mantleCudaTranspose3DF32Wrapper(
+		(*C.float)(dst.ptr),
+		(*C.float)(src.ptr),
+		d0C,
+		d1C,
+		d2C,
 		stream.ptr,
 	))
 }

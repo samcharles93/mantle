@@ -1248,6 +1248,25 @@ func (o *Ops) DeviceScaleBF16InPlace(x []float32, scale float32) bool {
 	return true
 }
 
+// DeviceScaleInPlace applies x *= scale on device when x is the current pending
+// device result, keeping it device-resident for a following RMSNormBatched.
+func (o *Ops) DeviceScaleInPlace(x []float32, scale float32) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(x) == 0 || !o.lastResultValid || o.pendingNormValid {
+		return false
+	}
+	n := len(x)
+	if n != o.lastResultLen || uintptr(unsafe.Pointer(&x[0])) != o.lastResultHostPtr {
+		return false
+	}
+	if err := native.ScaleF32InPlace(o.lastResultDev, n, scale, o.stream); err != nil {
+		o.recordFastPathErrorLocked(fmt.Errorf("cuda: device scale failed (n=%d): %w", n, err))
+		return false
+	}
+	return true
+}
+
 // DeviceAdd implements model.DeviceStateOps.
 func (o *Ops) DeviceAdd(dst, src []float32) bool {
 	o.mu.Lock()

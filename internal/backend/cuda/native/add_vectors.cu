@@ -96,5 +96,40 @@ __host__ int mantleCudaAttnGateScaleF32(
     return cudaGetLastError();
 }
 
+// Transpose [d0, d1, d2] -> [d1, d0, d2] (used to lay out batched per-layer
+// inputs [N, layers, pleDim] as contiguous [layers, N, pleDim] slices).
+__global__ void transpose_3d_f32_kernel(
+    float* __restrict__ dst,
+    const float* __restrict__ src,
+    int d0,
+    int d1,
+    int d2
+) {
+    size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    size_t total = (size_t)d0 * d1 * d2;
+    if (idx >= total) return;
+    size_t k = idx % d2;
+    size_t tmp = idx / d2;
+    size_t j = tmp % d1;
+    size_t i = tmp / d1;
+    dst[(j * d0 + i) * d2 + k] = src[idx];
+}
+
+__host__ int mantleCudaTranspose3DF32(
+    float* dst,
+    const float* src,
+    int d0,
+    int d1,
+    int d2,
+    cudaStream_t stream
+) {
+    if (!dst || !src || d0 <= 0 || d1 <= 0 || d2 <= 0) return cudaErrorInvalidValue;
+    size_t total = (size_t)d0 * d1 * d2;
+    const int blockSize = 256;
+    int gridSize = (int)((total + blockSize - 1) / blockSize);
+    transpose_3d_f32_kernel<<<gridSize, blockSize, 0, stream>>>(dst, src, d0, d1, d2);
+    return cudaGetLastError();
+}
+
 } // extern "C"
 

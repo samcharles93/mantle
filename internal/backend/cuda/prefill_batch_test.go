@@ -934,3 +934,245 @@ func TestBatchedPrefillParityQ8Int8OptIn(t *testing.T) {
 	got = append([]float32(nil), got...)
 	compareBatchLogits(t, "Q8-int8", got, want, 6e-3, 2e-2)
 }
+
+// buildGemma4BatchTestModel builds a 4-layer synthetic Gemma-4 model exercising
+// heterogeneous sliding/full headDim, ValueFromKey (Wv==nil), ApplyVNorm,
+// SharedKVSource, double-wide FFN, BF16 activation rounding, LayerScale,
+// per-layer embeddings (PLE with GeLU-tanh), and FinalLogitSoftcap.
+func buildGemma4BatchTestModel(seed uint32) *core.Instance {
+	const (
+		hidden   = 64
+		nHead    = 2
+		kvHeads  = 1
+		slideHD  = 32
+		fullHD   = 64
+		ffnSmall = 128
+		ffnWide  = 256
+		pleDim   = 32
+		vocab    = 32
+		maxCtx   = 32
+		layers   = 4
+	)
+	totalPLE := layers * pleDim
+	wmat := func(r, c int, s uint32) *core.Mat {
+		return batchTestMatQ8(r, c, s)
+	}
+	ropeTable := func(headDim, rotDim int, theta float64) []float64 {
+		half := rotDim / 2
+		tbl := make([]float64, half)
+		for i := range tbl {
+			tbl[i] = math.Pow(theta, -2*float64(i)/float64(rotDim))
+		}
+		_ = headDim
+		return tbl
+	}
+	onesVec := func(n int, bias float32) []float32 {
+		v := make([]float32, n)
+		for i := range v {
+			v[i] = 1.0 + bias*float32(i%5)
+		}
+		return v
+	}
+
+	m := &core.Instance{
+		Config: &core.ModelConfig{
+			Arch: "gemma4",
+			Config: core.Config{
+				VocabSize:           vocab,
+				EmbeddingLength:     hidden,
+				HeadCount:           nHead,
+				HeadDim:             fullHD,
+				BlockCount:          layers,
+				FFNLength:           ffnWide,
+				HiddenAct:           "gelu_pytorch_tanh",
+				FinalLogitSoftcap:   30.0,
+				EmbeddingMultiplier: math.Sqrt(hidden),
+				SlidingWindow:       6,
+			},
+		},
+		Embeddings:  batchTestMat(vocab, hidden, seed, false),
+		OutputNorm:  onesVec(hidden, 0.02),
+		Output:      wmat(vocab, hidden, seed+1),
+		Layers:      make([]core.Layer, layers),
+		HeadDim:     fullHD,
+		HeadCount:   nHead,
+		MaxKVStride: kvHeads * fullHD,
+		MaxContext:  maxCtx,
+		RMSEpsilon:  1e-6,
+		Gemma4PerLayer: &core.Gemma4PerLayerInputModel{
+			Embeddings:      batchTestMat(vocab, totalPLE, seed+50, false),
+			Projection:      wmat(totalPLE, hidden, seed+51),
+			ProjectionNorm:  onesVec(pleDim, 0.03),
+			HiddenSize:      pleDim,
+			LayerCount:      layers,
+			EmbeddingScale:  float32(math.Sqrt(pleDim)),
+			ProjectionScale: float32(1.0 / math.Sqrt(hidden)),
+			InputScale:      float32(math.Pow(2, -0.5)),
+		},
+		Scratch: core.ScratchBuffers{
+			X:             make([]float32, hidden),
+			Tmp:           make([]float32, hidden),
+			Tmp2:          make([]float32, hidden),
+			Q:             make([]float32, nHead*fullHD),
+			K:             make([]float32, kvHeads*fullHD),
+			V:             make([]float32, kvHeads*fullHD),
+			AttnOut:       make([]float32, nHead*fullHD),
+			AttnProj:      make([]float32, hidden),
+			Scores:        make([]float32, nHead*maxCtx),
+			FfnUp:         make([]float32, ffnWide),
+			FfnGate:       make([]float32, ffnWide),
+			FfnAct:        make([]float32, ffnWide),
+			Logits:        make([]float32, vocab),
+			PerLayerTok:   make([]float32, totalPLE),
+			PerLayerProj:  make([]float32, totalPLE),
+			PerLayerInput: make([]float32, totalPLE),
+		},
+	}
+
+	for li := range m.Layers {
+		l := &m.Layers[li]
+		s := seed + uint32(li+2)*7919
+		isFull := li%2 == 1
+		isConsumer := li >= 2
+		hd := slideHD
+		if isFull {
+			hd = fullHD
+		}
+		qDim := nHead * hd
+		kvStride := kvHeads * hd
+		interm := ffnSmall
+		if isConsumer {
+			interm = ffnWide
+		}
+		l.HeadKV = kvHeads
+		l.HeadDim = hd
+		l.KVHeadDim = hd
+		l.AttnScale = 1
+		l.ApplyVNorm = true
+		l.RoundActivationsBF16 = true
+		l.FFNActivation = "gelu_pytorch_tanh"
+		l.LayerScale = 1
+		if isConsumer {
+			l.SharedKVSource = li - 2
+			l.LayerScale = 0.75 + 0.1*float32(li-2)
+		} else {
+			l.SharedKVSource = -1
+			l.StoreFullKV = true
+		}
+		if isFull {
+			l.AttnType = "full_attention"
+			l.ValueFromKey = true
+			l.RopeInvFreq = ropeTable(hd, hd/4, 1000000)
+		} else {
+			l.AttnType = "sliding_attention"
+			l.AttnWindow = 6
+			l.RopeInvFreq = ropeTable(hd, hd, 10000)
+		}
+		l.RopeAttnScale = 1
+		l.AttnNorm = onesVec(hidden, 0.01)
+		l.PostAttnNorm = onesVec(hidden, 0.02)
+		l.FfnNorm = onesVec(hidden, -0.01)
+		l.PostFfnNorm = onesVec(hidden, 0.015)
+		l.AttnQNorm = onesVec(hd, 0.01)
+		l.Wq = wmat(qDim, hidden, s)
+		l.Wo = wmat(hidden, qDim, s+3)
+		if !isConsumer {
+			l.AttnKNorm = onesVec(hd, 0.01)
+			l.Wk = wmat(kvStride, hidden, s+1)
+			if !l.ValueFromKey {
+				l.Wv = wmat(kvStride, hidden, s+2)
+			}
+			l.AttnCache = core.AttnCache{
+				K16:      make([]uint16, maxCtx*kvStride),
+				V16:      make([]uint16, maxCtx*kvStride),
+				CacheLen: maxCtx,
+				KvStride: kvStride,
+			}
+		}
+		l.FfnUp = wmat(interm, hidden, s+4)
+		l.FfnGate = wmat(interm, hidden, s+5)
+		l.FfnDown = wmat(hidden, interm, s+6)
+		l.Gemma4PLE = &core.Gemma4PLELayer{
+			InputGate:  wmat(pleDim, hidden, s+10),
+			Projection: wmat(hidden, pleDim, s+11),
+			PostNorm:   onesVec(hidden, 0.01),
+		}
+	}
+	return m
+}
+
+func TestBatchedPrefillParityGemma4PLE(t *testing.T) {
+	if !cudaAvailable(t) {
+		return
+	}
+	tokens := []int{1, 5, 9, 13, 2, 7, 11, 15, 3, 6, 10, 14, 4, 8, 12, 16, 17, 19}
+
+	// Sequential oracle.
+	grSeq, cleanSeq := newBatchTestRuntime(t, buildGemma4BatchTestModel(31337))
+	defer cleanSeq()
+	want, err := grSeq.cudaRuntime.PrefillTokens(tokens)
+	if err != nil {
+		t.Fatalf("sequential PrefillTokens: %v", err)
+	}
+	want = append([]float32(nil), want...)
+	wantDecode := make([][]float32, 3)
+	tok := batchArgmax(want)
+	for step := range wantDecode {
+		lw, err := grSeq.ForwardToken(tok)
+		if err != nil {
+			t.Fatalf("sequential decode step %d: %v", step, err)
+		}
+		wantDecode[step] = append([]float32(nil), lw...)
+		tok = batchArgmax(lw)
+	}
+
+	cases := []struct {
+		name       string
+		f32OptIn   bool
+		atol, rtol float32
+	}{
+		// Exact f32-activation path: verifies every Gemma-4 op/rounding matches
+		// the sequential oracle to floating-point precision (~1e-6).
+		{name: "f32_exact", f32OptIn: true, atol: 1e-4, rtol: 1e-4},
+		// Default hi/lo 14-bit tensor-core path: a ~1e-4 activation delta can
+		// flip a 7-bit BF16 tie (1 ULP = 1/128) across 4 rounded layers.
+		{name: "hilo_mma", f32OptIn: false, atol: 3e-2, rtol: 5e-2},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.f32OptIn {
+				t.Setenv(quantBatchedPrefillF32Env, "1")
+			}
+			grBatch, cleanBatch := newBatchTestRuntime(t, buildGemma4BatchTestModel(31337))
+			defer cleanBatch()
+			if !grBatch.batchedPrefillEligible(tokens) {
+				t.Fatalf("expected Gemma-4 PLE model to be batchedPrefillEligible")
+			}
+			got, err := grBatch.PrefillTokens(tokens)
+			if err != nil {
+				t.Fatalf("batched PrefillTokens: %v", err)
+			}
+			got = append([]float32(nil), got...)
+
+			compareBatchLogits(t, tc.name+"-prefill", got, want, tc.atol, tc.rtol)
+			if batchArgmax(got) != batchArgmax(want) {
+				t.Fatalf("%s prefill argmax differs: got %d want %d", tc.name, batchArgmax(got), batchArgmax(want))
+			}
+
+			// Verify decode continuation uses the populated (and shared) KV caches identically.
+			tok := batchArgmax(want)
+			for step := range wantDecode {
+				lg, err := grBatch.ForwardToken(tok)
+				if err != nil {
+					t.Fatalf("%s decode step %d: %v", tc.name, step, err)
+				}
+				compareBatchLogits(t, fmt.Sprintf("%s-decode-%d", tc.name, step), lg, wantDecode[step], tc.atol, tc.rtol)
+				if batchArgmax(lg) != batchArgmax(wantDecode[step]) {
+					t.Fatalf("%s decode step %d argmax differs: got %d want %d", tc.name, step, batchArgmax(lg), batchArgmax(wantDecode[step]))
+				}
+				tok = batchArgmax(wantDecode[step])
+			}
+		})
+	}
+}

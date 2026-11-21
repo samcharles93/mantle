@@ -17,10 +17,6 @@
 //     attention, and a chunk longer than a sliding-window ring needs no
 //     per-row interleaving.
 
-static __device__ __forceinline__ float prefill_f16_round(float x) {
-    return __half2float(__float2half(x));
-}
-
 __global__ void apply_rope_f32_rows_kernel(
     float* __restrict__ x,
     const float* __restrict__ inv_freq,
@@ -119,19 +115,23 @@ extern "C" __host__ int mantleCudaStoreKVF16Rows(
 }
 
 #define PREFILL_WARPS 4
-#define PREFILL_QPW 8                          // query vectors per warp
-#define PREFILL_QV (PREFILL_WARPS * PREFILL_QPW) // query vectors per block
 #define PREFILL_KT 32                          // keys per tile, one per lane
 
-// One block per (row tile, kv head). The block's PREFILL_QV query vectors are
-// the group's query heads for PREFILL_QV/group consecutive rows; each warp
-// owns eight of them. Per 32-key tile, lane j scores key j against all eight
-// of its warp's vectors (each K element loaded once for eight FMAs), then each
+// One block per (row tile, kv head). The block's QV = PREFILL_WARPS * QPW
+// query vectors are the group's query heads for QV/group consecutive rows; each
+// warp owns QPW of them. Per 32-key tile, lane j scores key j against all QPW
+// of its warp's vectors (each K element loaded once for QPW FMAs), then each
 // vector updates its online softmax and accumulates V, every lane owning the
 // head dims lane, lane+32, ...
 //
-// DPL is head_dim / 32.
-template <int DPL>
+// K and V tiles are staged as f16 (uint16_t) in shared memory — bit-identical
+// to staging prefill_f16_round floats, while halving shared-memory footprint
+// so head_dim=512 (QPW=4, QV=16) fits within 99 KiB opt-in shared memory.
+// When k_new is nullptr (shared-KV consumer layers), all positions read
+// directly from cache_k/cache_v.
+//
+// DPL is head_dim / 32; QPW is query vectors per warp (8 for HD<=256, 4 for HD=512).
+template <int DPL, int QPW>
 __global__ void __launch_bounds__(PREFILL_WARPS * 32) attention_prefill_f16_kernel(
     const float* __restrict__ q,
     const float* __restrict__ k_new,
@@ -150,21 +150,23 @@ __global__ void __launch_bounds__(PREFILL_WARPS * 32) attention_prefill_f16_kern
     int window)
 {
     constexpr int HD = DPL * 32;
+    constexpr int QV = PREFILL_WARPS * QPW;
+    constexpr int KS_STRIDE = HD + 2; // 4-byte aligned, avoids bank conflicts
     extern __shared__ float smem[];
-    float* qs = smem;                          // [PREFILL_QV][HD]
-    float* ks = qs + PREFILL_QV * HD;          // [PREFILL_KT][HD + 1]
-    float* vs = ks + PREFILL_KT * (HD + 1);    // [PREFILL_KT][HD]
+    float* qs = smem;                                       // [QV][HD]
+    uint16_t* ks = reinterpret_cast<uint16_t*>(qs + QV * HD); // [PREFILL_KT][KS_STRIDE]
+    uint16_t* vs = ks + PREFILL_KT * KS_STRIDE;             // [PREFILL_KT][HD]
 
     const int tid = threadIdx.x;
     const int warp = tid >> 5;
     const int lane = tid & 31;
-    const int rowsPerBlock = PREFILL_QV / group;
+    const int rowsPerBlock = QV / group;
     const int r0 = blockIdx.x * rowsPerBlock;
     const int kvHead = blockIdx.y;
     const int qStride = n_head * HD;
 
     // Stage the block's query vectors (zero for rows past n).
-    for (int idx = tid; idx < PREFILL_QV * HD; idx += blockDim.x) {
+    for (int idx = tid; idx < QV * HD; idx += blockDim.x) {
         const int qv = idx / HD;
         const int d = idx % HD;
         const int r = r0 + qv / group;
@@ -173,11 +175,11 @@ __global__ void __launch_bounds__(PREFILL_WARPS * 32) attention_prefill_f16_kern
     }
 
     // Per-vector causal bounds and softmax state.
-    int vPos[PREFILL_QPW], vStart[PREFILL_QPW];
-    float m[PREFILL_QPW], l[PREFILL_QPW], acc[PREFILL_QPW][DPL];
+    int vPos[QPW], vStart[QPW];
+    float m[QPW], l[QPW], acc[QPW][DPL];
 #pragma unroll
-    for (int i = 0; i < PREFILL_QPW; i++) {
-        const int qv = warp * PREFILL_QPW + i;
+    for (int i = 0; i < QPW; i++) {
+        const int qv = warp * QPW + i;
         const int r = r0 + qv / group;
         if (r < n) {
             vPos[i] = start_pos + r;
@@ -203,37 +205,37 @@ __global__ void __launch_bounds__(PREFILL_WARPS * 32) attention_prefill_f16_kern
             const int j = idx / HD;
             const int d = idx % HD;
             const int t = t0 + j;
-            float kv = 0.0f, vv = 0.0f;
+            uint16_t kv = 0, vv = 0;
             if (t <= keyEnd) {
-                if (t < start_pos) {
+                if (!k_new || t < start_pos) {
                     const size_t off = (size_t)(t % cache_len) * kv_stride + headOff + d;
-                    kv = __half2float(__ushort_as_half(cache_k[off]));
-                    vv = __half2float(__ushort_as_half(cache_v[off]));
+                    kv = cache_k[off];
+                    vv = cache_v[off];
                 } else {
                     const size_t off = (size_t)(t - start_pos) * kv_stride + headOff + d;
-                    kv = prefill_f16_round(k_new[off]);
-                    vv = prefill_f16_round(v_new[off]);
+                    kv = __half_as_ushort(__float2half(k_new[off]));
+                    vv = __half_as_ushort(__float2half(v_new[off]));
                 }
             }
-            ks[j * (HD + 1) + d] = kv;
+            ks[j * KS_STRIDE + d] = kv;
             vs[j * HD + d] = vv;
         }
         __syncthreads();
 
         const int t = t0 + lane;
-        float s[PREFILL_QPW];
+        float s[QPW];
 #pragma unroll
-        for (int i = 0; i < PREFILL_QPW; i++) s[i] = 0.0f;
-        const float* qw = qs + warp * PREFILL_QPW * HD;
-        const float* kr = ks + lane * (HD + 1);
+        for (int i = 0; i < QPW; i++) s[i] = 0.0f;
+        const float* qw = qs + warp * QPW * HD;
+        const uint16_t* kr = ks + lane * KS_STRIDE;
         for (int d = 0; d < HD; d++) {
-            const float kd = kr[d];
+            const float kd = __half2float(__ushort_as_half(kr[d]));
 #pragma unroll
-            for (int i = 0; i < PREFILL_QPW; i++) s[i] = fmaf(qw[i * HD + d], kd, s[i]);
+            for (int i = 0; i < QPW; i++) s[i] = fmaf(qw[i * HD + d], kd, s[i]);
         }
 
 #pragma unroll
-        for (int i = 0; i < PREFILL_QPW; i++) {
+        for (int i = 0; i < QPW; i++) {
             if (vPos[i] < 0 || t0 > vPos[i] || t0 + PREFILL_KT <= vStart[i]) continue;
             const bool valid = t >= vStart[i] && t <= vPos[i];
             float sc = s[i] * scale;
@@ -255,15 +257,18 @@ __global__ void __launch_bounds__(PREFILL_WARPS * 32) attention_prefill_f16_kern
             for (int j = 0; j < PREFILL_KT; j++) {
                 const float pj = __shfl_sync(0xffffffffu, p, j);
 #pragma unroll
-                for (int k = 0; k < DPL; k++) acc[i][k] = fmaf(pj, vs[j * HD + lane + 32 * k], acc[i][k]);
+                for (int k = 0; k < DPL; k++) {
+                    const float vv = __half2float(__ushort_as_half(vs[j * HD + lane + 32 * k]));
+                    acc[i][k] = fmaf(pj, vv, acc[i][k]);
+                }
             }
         }
     }
 
 #pragma unroll
-    for (int i = 0; i < PREFILL_QPW; i++) {
+    for (int i = 0; i < QPW; i++) {
         if (vPos[i] < 0) continue;
-        const int qv = warp * PREFILL_QPW + i;
+        const int qv = warp * QPW + i;
         const int r = r0 + qv / group;
         const int h = kvHead * group + qv % group;
         float* oh = out + (size_t)r * qStride + (size_t)h * HD;
@@ -273,21 +278,27 @@ __global__ void __launch_bounds__(PREFILL_WARPS * 32) attention_prefill_f16_kern
     }
 }
 
-static size_t prefillSmemBytes(int headDim) {
-    return sizeof(float) * ((size_t)PREFILL_QV * headDim + (size_t)PREFILL_KT * (headDim + 1) + (size_t)PREFILL_KT * headDim);
+static int prefillQV(int headDim) {
+    return headDim == 512 ? PREFILL_WARPS * 4 : PREFILL_WARPS * 8;
 }
 
-template <int DPL>
+static size_t prefillSmemBytes(int headDim) {
+    const size_t qBytes = sizeof(float) * (size_t)prefillQV(headDim) * (size_t)headDim;
+    const size_t kvBytes = sizeof(uint16_t) * (size_t)PREFILL_KT * ((size_t)(headDim + 2) + (size_t)headDim);
+    return qBytes + kvBytes;
+}
+
+template <int DPL, int QPW>
 static int launchPrefill(const float* q, const float* kNew, const float* vNew, const uint16_t* cacheK,
                          const uint16_t* cacheV, float* out, int n, int startPos, int kvStride, int nHead,
                          int group, int cacheLen, float scale, float softcap, int window, cudaStream_t stream) {
     const size_t smem = prefillSmemBytes(DPL * 32);
-    cudaError_t e = cudaFuncSetAttribute(attention_prefill_f16_kernel<DPL>,
+    cudaError_t e = cudaFuncSetAttribute(attention_prefill_f16_kernel<DPL, QPW>,
                                          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
     if (e != cudaSuccess) return e;
-    const int rowsPerBlock = PREFILL_QV / group;
+    const int rowsPerBlock = (PREFILL_WARPS * QPW) / group;
     dim3 grid((n + rowsPerBlock - 1) / rowsPerBlock, nHead / group);
-    attention_prefill_f16_kernel<DPL><<<grid, PREFILL_WARPS * 32, smem, stream>>>(
+    attention_prefill_f16_kernel<DPL, QPW><<<grid, PREFILL_WARPS * 32, smem, stream>>>(
         q, kNew, vNew, cacheK, cacheV, out, n, startPos, kvStride, nHead, group, cacheLen, scale, softcap, window);
     return cudaGetLastError();
 }
@@ -297,9 +308,10 @@ static int launchPrefill(const float* q, const float* kNew, const float* vNew, c
 // per-block shared memory.
 extern "C" __host__ int mantleCudaAttentionPrefillF16Supported(int headDim, int nHead, int kvHeads) {
     if (headDim <= 0 || nHead <= 0 || kvHeads <= 0 || nHead % kvHeads != 0) return 0;
-    if (headDim != 32 && headDim != 64 && headDim != 128 && headDim != 256) return 0;
+    if (headDim != 32 && headDim != 64 && headDim != 128 && headDim != 256 && headDim != 512) return 0;
+    const int qv = prefillQV(headDim);
     const int group = nHead / kvHeads;
-    if (group > PREFILL_QV || PREFILL_QV % group != 0) return 0;
+    if (group > qv || qv % group != 0) return 0;
     int dev = 0, optin = 0;
     if (cudaGetDevice(&dev) != cudaSuccess) return 0;
     if (cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev) != cudaSuccess) return 0;
@@ -308,8 +320,10 @@ extern "C" __host__ int mantleCudaAttentionPrefillF16Supported(int headDim, int 
 
 // mantleCudaAttentionPrefillF16 computes attention for n query rows at
 // positions start_pos..start_pos+n-1. q and out are [n, nHead*headDim];
-// kNew and vNew are the chunk's [n, kvStride] rows after RoPE; the f16 cache
-// supplies positions below start_pos at slot t % cacheLen. Row r attends
+// kNew and vNew are the chunk's [n, kvStride] rows after RoPE (or both nullptr
+// for shared-KV consumer layers that read every position from cacheK/cacheV);
+// the f16 cache supplies positions below start_pos (or all positions when
+// kNew == nullptr) at slot t % cacheLen. Row r attends
 // [max(pos-window+1, 0), pos] (window 0 means no window).
 extern "C" __host__ int mantleCudaAttentionPrefillF16(
     const float* q,
@@ -330,20 +344,23 @@ extern "C" __host__ int mantleCudaAttentionPrefillF16(
     int window,
     cudaStream_t stream)
 {
-    if (!q || !kNew || !vNew || !cacheK || !cacheV || !out || n <= 0 || startPos < 0 || kvStride <= 0 ||
-        cacheLen <= 0 || !mantleCudaAttentionPrefillF16Supported(headDim, nHead, kvHeads)) {
+    if (!q || !cacheK || !cacheV || !out || ((kNew == nullptr) != (vNew == nullptr)) ||
+        n <= 0 || startPos < 0 || kvStride <= 0 || cacheLen <= 0 ||
+        !mantleCudaAttentionPrefillF16Supported(headDim, nHead, kvHeads)) {
         return cudaErrorInvalidValue;
     }
     const int group = nHead / kvHeads;
     switch (headDim) {
     case 32:
-        return launchPrefill<1>(q, kNew, vNew, cacheK, cacheV, out, n, startPos, kvStride, nHead, group, cacheLen, scale, softcap, window, stream);
+        return launchPrefill<1, 8>(q, kNew, vNew, cacheK, cacheV, out, n, startPos, kvStride, nHead, group, cacheLen, scale, softcap, window, stream);
     case 64:
-        return launchPrefill<2>(q, kNew, vNew, cacheK, cacheV, out, n, startPos, kvStride, nHead, group, cacheLen, scale, softcap, window, stream);
+        return launchPrefill<2, 8>(q, kNew, vNew, cacheK, cacheV, out, n, startPos, kvStride, nHead, group, cacheLen, scale, softcap, window, stream);
     case 128:
-        return launchPrefill<4>(q, kNew, vNew, cacheK, cacheV, out, n, startPos, kvStride, nHead, group, cacheLen, scale, softcap, window, stream);
+        return launchPrefill<4, 8>(q, kNew, vNew, cacheK, cacheV, out, n, startPos, kvStride, nHead, group, cacheLen, scale, softcap, window, stream);
+    case 256:
+        return launchPrefill<8, 8>(q, kNew, vNew, cacheK, cacheV, out, n, startPos, kvStride, nHead, group, cacheLen, scale, softcap, window, stream);
     default:
-        return launchPrefill<8>(q, kNew, vNew, cacheK, cacheV, out, n, startPos, kvStride, nHead, group, cacheLen, scale, softcap, window, stream);
+        return launchPrefill<16, 4>(q, kNew, vNew, cacheK, cacheV, out, n, startPos, kvStride, nHead, group, cacheLen, scale, softcap, window, stream);
     }
 }
 

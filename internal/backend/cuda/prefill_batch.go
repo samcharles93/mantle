@@ -111,9 +111,6 @@ func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
 	if m.Config == nil || m.Config.Config.EmbeddingLength <= 0 || m.Config.Config.VocabSize <= 0 {
 		return false
 	}
-	if m.Gemma4PerLayer != nil {
-		return false
-	}
 	if m.HeadCount <= 0 || m.HeadDim <= 0 {
 		return false
 	}
@@ -145,42 +142,30 @@ func (gr *GraphRuntime) batchedPrefillEligible(tokens []int) bool {
 	if len(m.Layers) == 0 {
 		return false
 	}
+	if pl := m.Gemma4PerLayer; pl != nil {
+		totalPLE := pl.LayerCount * pl.HiddenSize
+		if pl.LayerCount != len(m.Layers) || pl.HiddenSize <= 0 || totalPLE <= 0 ||
+			pl.Embeddings == nil || pl.Projection == nil ||
+			len(pl.ProjectionNorm) != pl.HiddenSize ||
+			pl.Embeddings.C != totalPLE ||
+			pl.Projection.R != totalPLE || pl.Projection.C != hidden ||
+			!batchedWeightDense(o, pl.Projection) {
+			return false
+		}
+		for _, tok := range tokens {
+			if tok < 0 || tok >= pl.Embeddings.R {
+				return false
+			}
+		}
+	}
 	for _, tok := range tokens {
 		if tok < 0 || tok >= m.Config.Config.VocabSize {
 			return false
 		}
 	}
-	// All layers must share one KV stride and FFN width: the scratch buffers
-	// are allocated as [N, max] row-major and indexed by the per-layer stride,
-	// which is only valid when every layer's stride equals the maximum.
-	headDim := m.HeadDim
-	// The KV stride comes from the first attention layer; recurrent (conv)
-	// layers carry no KV cache and may sit at index 0.
-	wantKvStride := 0
-	wantInterm := 0
 	for i := range m.Layers {
 		l := &m.Layers[i]
-		if !l.IsRecurrent && wantKvStride == 0 {
-			wantKvStride = l.HeadKV * headDim
-		}
-		if wantInterm == 0 && l.FfnUp != nil {
-			wantInterm = l.FfnUp.R
-		}
-	}
-	if wantKvStride == 0 {
-		wantKvStride = m.MaxKVStride
-	}
-	for i := range m.Layers {
-		l := &m.Layers[i]
-		// Recurrent (short-conv) layers carry no KV cache; only the FFN width
-		// must match the shared buffers.
-		if !l.IsRecurrent && l.HeadKV*headDim != wantKvStride {
-			return false
-		}
-		if l.FfnUp == nil || l.FfnUp.R != wantInterm {
-			return false
-		}
-		if !gr.batchedLayerEligible(l) {
+		if !gr.batchedLayerEligible(i, l, len(tokens)) {
 			return false
 		}
 	}
@@ -200,40 +185,39 @@ const quantBatchedPrefillF32Env = "MANTLE_CUDA_BATCHED_PREFILL_QUANT_F32"
 // and can flip a greedy token, so it is not the fast path.
 const quantBatchedPrefillInt8SingleEnv = "MANTLE_CUDA_BATCHED_PREFILL_QUANT_INT8"
 
-func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
+func (gr *GraphRuntime) batchedLayerEligible(layerIdx int, layer *instance.Layer, nTokens int) bool {
 	m := gr.inst
 	o := gr.ops
 	hidden := m.Config.Config.EmbeddingLength
-	headDim := m.HeadDim
+	headDim := layer.HeadDim
+	if headDim <= 0 {
+		headDim = m.HeadDim
+	}
 	qDim := m.HeadCount * headDim
 	kvStride := layer.HeadKV * headDim
 
 	if layer.Mamba != nil || layer.DeltaNet != nil {
 		return false
 	}
-	if layer.MoE != nil || layer.Gemma4MoE != nil || layer.Gemma4PLE != nil {
-		return false
-	}
-	if layer.LayerScale != 1 {
-		// runDecoderLayers routes any non-unit LayerScale (including the zero
-		// value) through the Gemma4 BF16-rounding FFN path, which this batched
-		// implementation does not reproduce.
-		return false
-	}
-	if layer.SharedKVSource >= 0 {
+	if layer.MoE != nil || layer.Gemma4MoE != nil {
 		return false
 	}
 	if layer.FusedQGate {
 		return false
 	}
-	if layer.ValueFromKey || layer.ApplyVNorm {
-		return false
-	}
-	if layer.RoundActivationsBF16 {
-		return false
-	}
 	if layer.AttnType != "" && layer.AttnType != "full_attention" && layer.AttnType != "sliding_attention" && !layer.IsRecurrent {
 		return false
+	}
+	if layer.Gemma4PLE != nil {
+		pl := m.Gemma4PerLayer
+		ple := layer.Gemma4PLE
+		if pl == nil || ple.InputGate == nil || ple.Projection == nil ||
+			len(ple.PostNorm) != hidden ||
+			ple.InputGate.R != pl.HiddenSize || ple.InputGate.C != hidden ||
+			ple.Projection.R != hidden || ple.Projection.C != pl.HiddenSize ||
+			!batchedWeightDense(o, ple.InputGate) || !batchedWeightDense(o, ple.Projection) {
+			return false
+		}
 	}
 	if layer.IsRecurrent {
 		// Short-conv block: in_proj [3*hidden, hidden], out_proj
@@ -254,7 +238,7 @@ func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 				return false
 			}
 		}
-	} else if layer.HeadDim != headDim || layer.HeadKV <= 0 {
+	} else if headDim <= 0 || layer.HeadKV <= 0 {
 		return false
 	}
 	if layer.NoRoPE {
@@ -282,43 +266,90 @@ func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 		if len(layer.PostFfnNorm) > 0 && len(layer.PostFfnNorm) != hidden {
 			return false
 		}
+		for _, w := range []*instance.Mat{layer.FfnUp, layer.FfnGate, layer.FfnDown} {
+			if !batchedWeightDense(o, w) {
+				return false
+			}
+		}
 		return true
 	}
-	if layer.AttnCache.KvStride != kvStride || layer.AttnCache.CacheLen <= 0 {
+
+	isConsumer := layer.SharedKVSource >= 0
+	cacheOwner := layer
+	if isConsumer {
+		if layer.SharedKVSource >= layerIdx {
+			return false
+		}
+		src := &m.Layers[layer.SharedKVSource]
+		if src.IsRecurrent || src.SharedKVSource >= 0 {
+			return false
+		}
+		srcHeadDim := src.HeadDim
+		if srcHeadDim <= 0 {
+			srcHeadDim = m.HeadDim
+		}
+		if srcHeadDim != headDim || src.HeadKV != layer.HeadKV {
+			return false
+		}
+		cacheOwner = src
+	}
+
+	if cacheOwner.AttnCache.KvStride != kvStride || cacheOwner.AttnCache.CacheLen <= 0 {
 		return false
+	}
+	if isConsumer {
+		srcCacheLen := cacheOwner.AttnCache.CacheLen
+		if o.effectiveContextLen > 0 && srcCacheLen > o.effectiveContextLen {
+			srcCacheLen = o.effectiveContextLen
+		}
+		if m.Pos+nTokens > srcCacheLen {
+			return false
+		}
 	}
 	if kvStride%int(mcf.QuantBlockSize) != 0 {
 		return false
 	}
-	if layer.Wq == nil || layer.Wk == nil || layer.Wv == nil || layer.Wo == nil {
+	if layer.Wq == nil || layer.Wo == nil {
 		return false
 	}
 	if layer.Wq.R != qDim || layer.Wq.C != hidden {
 		return false
 	}
-	if layer.Wk.R != kvStride || layer.Wv.R != kvStride {
-		return false
-	}
-	if layer.Wk.C != hidden || layer.Wv.C != hidden {
-		return false
-	}
 	if layer.Wo.R != hidden || layer.Wo.C != qDim {
 		return false
+	}
+	if !isConsumer {
+		if layer.Wk == nil {
+			return false
+		}
+		if layer.Wv == nil && !layer.ValueFromKey {
+			return false
+		}
+		if layer.Wk.R != kvStride || layer.Wk.C != hidden {
+			return false
+		}
+		if layer.Wv != nil && (layer.Wv.R != kvStride || layer.Wv.C != hidden) {
+			return false
+		}
 	}
 	if n := len(layer.WqBias); n != 0 && n != qDim {
 		return false
 	}
-	if n := len(layer.WkBias); n != 0 && n != kvStride {
-		return false
-	}
-	if n := len(layer.WvBias); n != 0 && n != kvStride {
-		return false
+	if !isConsumer {
+		if n := len(layer.WkBias); n != 0 && n != kvStride {
+			return false
+		}
+		if n := len(layer.WvBias); n != 0 && n != kvStride {
+			return false
+		}
 	}
 	if n := len(layer.AttnQNorm); n != 0 && n != headDim {
 		return false
 	}
-	if n := len(layer.AttnKNorm); n != 0 && n != headDim {
-		return false
+	if !isConsumer {
+		if n := len(layer.AttnKNorm); n != 0 && n != headDim {
+			return false
+		}
 	}
 	if layer.AttnGate != nil && (layer.AttnGate.R != qDim && layer.AttnGate.R != m.HeadCount || layer.AttnGate.C != hidden) {
 		return false
@@ -333,7 +364,11 @@ func (gr *GraphRuntime) batchedLayerEligible(layer *instance.Layer) bool {
 	if apply && (len(invFreq) == 0 || len(invFreq)*2 > headDim) {
 		return false
 	}
-	for _, w := range []*instance.Mat{layer.Wq, layer.Wk, layer.Wv, layer.Wo, layer.FfnUp, layer.FfnGate, layer.FfnDown, layer.AttnGate} {
+	weights := []*instance.Mat{layer.Wq, layer.Wo, layer.FfnUp, layer.FfnGate, layer.FfnDown, layer.AttnGate}
+	if !isConsumer {
+		weights = append(weights, layer.Wk, layer.Wv)
+	}
+	for _, w := range weights {
 		if w != nil && !batchedWeightDense(o, w) {
 			return false
 		}
@@ -451,15 +486,27 @@ type batchedBuffers struct {
 	scOut   native.DeviceBuffer
 	scState native.DeviceBuffer
 	gateBuf native.DeviceBuffer
+
+	// Gemma-4 per-layer input scratch: two [N, layers*pleDim] buffers; after
+	// prepareBatchedPLEInputs completes, pleBufA holds the transposed
+	// [layers, N, pleDim] inputs consumed by each layer's PLE block.
+	pleBufA native.DeviceBuffer
+	pleBufB native.DeviceBuffer
 }
 
 func (b *batchedBuffers) all() []native.DeviceBuffer {
-	return []native.DeviceBuffer{b.x, b.normed, b.proj, b.q, b.attn, b.k, b.v, b.up, b.gate, b.act, b.down, b.conv, b.last, b.lastN, b.logits, b.scProj, b.scBx, b.scOut, b.scState, b.gateBuf, b.xq, b.xsc, b.xq2, b.xsc2}
+	return []native.DeviceBuffer{
+		b.x, b.normed, b.proj, b.q, b.attn, b.k, b.v, b.up, b.gate, b.act, b.down, b.conv,
+		b.last, b.lastN, b.logits, b.scProj, b.scBx, b.scOut, b.scState, b.gateBuf,
+		b.xq, b.xsc, b.xq2, b.xsc2, b.pleBufA, b.pleBufB,
+	}
 }
 
 type batchedLayerPlan struct {
 	layer    *instance.Layer
 	index    int
+	headDim  int
+	qDim     int
 	kvStride int
 	kvHeads  int
 	interm   int
@@ -473,6 +520,12 @@ type batchedLayerPlan struct {
 	useQ8V       bool
 	blocksPerRow int
 	cache        deviceAttnCache
+
+	isKVConsumer bool
+	kvSourceIdx  int
+	valueFromKey bool
+	applyVNorm   bool
+	vOnesDev     native.DeviceBuffer
 
 	wq, wk, wv, wo deviceMat
 	up, gate, down deviceMat
@@ -493,6 +546,15 @@ type batchedLayerPlan struct {
 
 	scale   float32
 	useGelu bool
+
+	// Gemma-4 rounding, LayerScale, and per-layer embeddings (PLE).
+	gemma4Round    bool
+	ffnRoundBF16   bool
+	layerScale     float32
+	pleDim         int
+	pleGate        deviceMat
+	pleProj        deviceMat
+	plePostNormDev native.DeviceBuffer
 
 	// Hybrid (short-conv + attention) layer support.
 	isRecurrent bool
@@ -533,8 +595,18 @@ type batchedPrefillPlan struct {
 	eps      float32
 	softcap  float32
 
+	maxQDim     int
 	maxKvStride int
 	maxInterm   int
+
+	// Gemma-4 batched per-layer inputs (when m.Gemma4PerLayer != nil).
+	pleDim         int
+	pleLayerCount  int
+	pleProjWeight  deviceMat
+	pleProjNormDev native.DeviceBuffer
+	pleProjScale   float32
+	pleInputScale  float32
+	hostPLETok     []float32
 
 	layers []batchedLayerPlan
 	buf    batchedBuffers
@@ -685,17 +757,61 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 	}
 
 	// Determine the maximum scratch dimensions across layers.
+	hasRecurrent := false
+	hasAttnGate := false
+	maxKlen := 1
 	for i := range m.Layers {
 		l := &m.Layers[i]
-		if s := l.HeadKV * headDim; s > p.maxKvStride {
-			p.maxKvStride = s
+		if l.IsRecurrent {
+			hasRecurrent = true
+			if l.ShortConvKernel != nil && l.ShortConvKernel.C > maxKlen {
+				maxKlen = l.ShortConvKernel.C
+			}
+		} else {
+			lHeadDim := l.HeadDim
+			if lHeadDim <= 0 {
+				lHeadDim = headDim
+			}
+			if lq := nHead * lHeadDim; lq > p.maxQDim {
+				p.maxQDim = lq
+			}
+			if s := l.HeadKV * lHeadDim; s > p.maxKvStride {
+				p.maxKvStride = s
+			}
+			if l.AttnGate != nil {
+				hasAttnGate = true
+			}
 		}
 		if l.FfnUp.R > p.maxInterm {
 			p.maxInterm = l.FfnUp.R
 		}
 	}
-	if p.maxKvStride <= 0 || p.maxInterm <= 0 {
+	if p.maxQDim <= 0 {
+		p.maxQDim = qDim
+	}
+	if p.maxInterm <= 0 {
 		return fail(fmt.Errorf("cuda batched prefill: invalid layer dimensions"))
+	}
+	if !hasRecurrent && p.maxKvStride <= 0 {
+		return fail(fmt.Errorf("cuda batched prefill: invalid attention layer dimensions"))
+	}
+	if pl := m.Gemma4PerLayer; pl != nil {
+		p.pleDim = pl.HiddenSize
+		p.pleLayerCount = pl.LayerCount
+		p.pleProjScale = pl.ProjectionScale
+		p.pleInputScale = pl.InputScale
+		totalPLE := pl.LayerCount * pl.HiddenSize
+		p.hostPLETok = make([]float32, p.n*totalPLE)
+		for i, tok := range tokens {
+			row := p.hostPLETok[i*totalPLE : (i+1)*totalPLE]
+			pl.Embeddings.RowTo(row, tok)
+			if pl.EmbeddingScale != 1 {
+				s := pl.EmbeddingScale
+				for j := range row {
+					row[j] *= s
+				}
+			}
+		}
 	}
 
 	// Allocate all scratch up front.
@@ -707,24 +823,33 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 		*dst = b
 		return nil
 	}
+	allocBytesInto := func(dst *native.DeviceBuffer, bytes int64, label string) error {
+		if bytes <= 0 {
+			return nil
+		}
+		b, err := native.AllocDevice(bytes)
+		if err != nil {
+			return fmt.Errorf("cuda batched prefill: alloc %s (%d bytes): %w", label, bytes, err)
+		}
+		*dst = b
+		return nil
+	}
 	if err := allocInto(&p.buf.x, p.n*hidden, "x"); err != nil {
 		return fail(err)
 	}
-	// dp4a activation scratch sized for the widest projection (maxInterm)
-	maxK := p.maxInterm
-	if hidden > maxK {
-		maxK = hidden
-	}
-	if err := allocInto(&p.buf.xq, p.n*maxK, "xq"); err != nil {
+	// Quant GEMM activation scratch sized for the widest projection input.
+	maxK := maxInt(hidden, maxInt(p.maxInterm, maxInt(p.maxQDim, p.pleDim)))
+	maxBlocksPerRow := (maxK + 31) / 32
+	if err := allocBytesInto(&p.buf.xq, int64(p.n)*int64(maxBlocksPerRow*32), "xq"); err != nil {
 		return fail(err)
 	}
-	if err := allocInto(&p.buf.xsc, p.n*maxK/32, "xsc"); err != nil {
+	if err := allocInto(&p.buf.xsc, p.n*maxBlocksPerRow, "xsc"); err != nil {
 		return fail(err)
 	}
-	if err := allocInto(&p.buf.xq2, p.n*maxK, "xq2"); err != nil {
+	if err := allocBytesInto(&p.buf.xq2, int64(p.n)*int64(maxBlocksPerRow*32), "xq2"); err != nil {
 		return fail(err)
 	}
-	if err := allocInto(&p.buf.xsc2, p.n*maxK/32, "xsc2"); err != nil {
+	if err := allocInto(&p.buf.xsc2, p.n*maxBlocksPerRow, "xsc2"); err != nil {
 		return fail(err)
 	}
 	if err := allocInto(&p.buf.normed, p.n*hidden, "normed"); err != nil {
@@ -736,25 +861,28 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 	if err := allocInto(&p.buf.down, p.n*hidden, "down"); err != nil {
 		return fail(err)
 	}
-	if err := allocInto(&p.buf.q, p.n*qDim, "q"); err != nil {
+	if err := allocInto(&p.buf.q, p.n*p.maxQDim, "q"); err != nil {
 		return fail(err)
 	}
-	if err := allocInto(&p.buf.attn, p.n*qDim, "attn"); err != nil {
+	if err := allocInto(&p.buf.attn, p.n*p.maxQDim, "attn"); err != nil {
 		return fail(err)
 	}
-	if err := allocInto(&p.buf.k, p.n*p.maxKvStride, "k"); err != nil {
-		return fail(err)
+	if p.maxKvStride > 0 {
+		if err := allocInto(&p.buf.k, p.n*p.maxKvStride, "k"); err != nil {
+			return fail(err)
+		}
+		if err := allocInto(&p.buf.v, p.n*p.maxKvStride, "v"); err != nil {
+			return fail(err)
+		}
 	}
-	if err := allocInto(&p.buf.v, p.n*p.maxKvStride, "v"); err != nil {
-		return fail(err)
-	}
+	upGateWidth := maxInt(p.maxInterm, p.pleDim)
 	if err := allocInto(&p.buf.up, p.n*p.maxInterm, "up"); err != nil {
 		return fail(err)
 	}
-	if err := allocInto(&p.buf.gate, p.n*p.maxInterm, "gate"); err != nil {
+	if err := allocInto(&p.buf.gate, p.n*upGateWidth, "gate"); err != nil {
 		return fail(err)
 	}
-	if err := allocInto(&p.buf.act, p.n*p.maxInterm, "act"); err != nil {
+	if err := allocInto(&p.buf.act, p.n*upGateWidth, "act"); err != nil {
 		return fail(err)
 	}
 	if err := allocInto(&p.buf.last, hidden, "last"); err != nil {
@@ -766,33 +894,48 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 	if err := allocInto(&p.buf.logits, p.vocab, "logits"); err != nil {
 		return fail(err)
 	}
-	// Hybrid-layer scratch. maxKlen is the widest short-conv kernel in the model.
-	maxKlen := 1
-	for i := range m.Layers {
-		if m.Layers[i].IsRecurrent && m.Layers[i].ShortConvKernel != nil && m.Layers[i].ShortConvKernel.C > maxKlen {
-			maxKlen = m.Layers[i].ShortConvKernel.C
+	if hasRecurrent {
+		if err := allocInto(&p.buf.scProj, p.n*3*hidden, "scProj"); err != nil {
+			return fail(err)
+		}
+		if err := allocInto(&p.buf.scBx, p.n*hidden, "scBx"); err != nil {
+			return fail(err)
+		}
+		if err := allocInto(&p.buf.scOut, p.n*hidden, "scOut"); err != nil {
+			return fail(err)
+		}
+		scStateElems := (maxKlen - 1) * hidden
+		if scStateElems < 0 {
+			scStateElems = 0
+		}
+		if err := allocInto(&p.buf.scState, scStateElems, "scState"); err != nil {
+			return fail(err)
 		}
 	}
-	if err := allocInto(&p.buf.scProj, p.n*3*hidden, "scProj"); err != nil {
-		return fail(err)
+	if hasAttnGate {
+		if err := allocInto(&p.buf.gateBuf, p.n*p.maxQDim, "gateBuf"); err != nil {
+			return fail(err)
+		}
 	}
-	if err := allocInto(&p.buf.scBx, p.n*hidden, "scBx"); err != nil {
-		return fail(err)
+	if p.pleDim > 0 {
+		totalPLE := p.pleLayerCount * p.pleDim
+		if err := allocInto(&p.buf.pleBufA, p.n*totalPLE, "pleBufA"); err != nil {
+			return fail(err)
+		}
+		if err := allocInto(&p.buf.pleBufB, p.n*totalPLE, "pleBufB"); err != nil {
+			return fail(err)
+		}
+		pl := m.Gemma4PerLayer
+		var err error
+		if p.pleProjWeight, err = p.resolveWeight(pl.Projection); err != nil {
+			return fail(fmt.Errorf("cuda batched prefill: per-layer projection: %w", err))
+		}
+		p.track(p.pleProjWeight, pl.Projection)
+		if p.pleProjNormDev, err = o.deviceNormWeight(pl.ProjectionNorm); err != nil {
+			return fail(fmt.Errorf("cuda batched prefill: per-layer projection norm: %w", err))
+		}
 	}
-	if err := allocInto(&p.buf.scOut, p.n*hidden, "scOut"); err != nil {
-		return fail(err)
-	}
-	scStateElems := (maxKlen - 1) * hidden
-	if scStateElems < 0 {
-		scStateElems = 0
-	}
-	if err := allocInto(&p.buf.scState, scStateElems, "scState"); err != nil {
-		return fail(err)
-	}
-	if err := allocInto(&p.buf.gateBuf, p.n*qDim, "gateBuf"); err != nil {
-		return fail(err)
-	}
-	convElems := p.n * maxInt(hidden, p.maxInterm)
+	convElems := p.n * maxK
 	if convElems > 0 {
 		b, err := native.AllocDevice(int64(convElems) * 2)
 		if err != nil {
@@ -827,15 +970,34 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 	// Resolve every device weight, norm, RoPE table and KV cache up front.
 	for i := range m.Layers {
 		l := &m.Layers[i]
-		lp := batchedLayerPlan{
-			layer:     l,
-			index:     i,
-			kvStride:  l.HeadKV * headDim,
-			kvHeads:   l.HeadKV,
-			interm:    l.FfnUp.R,
-			moduloLen: l.AttnCache.CacheLen,
+		lHeadDim := l.HeadDim
+		if lHeadDim <= 0 {
+			lHeadDim = headDim
 		}
-		cacheLen := l.AttnCache.CacheLen
+		lqDim := nHead * lHeadDim
+		isConsumer := !l.IsRecurrent && l.SharedKVSource >= 0
+		cacheOwner := l
+		if isConsumer {
+			cacheOwner = &m.Layers[l.SharedKVSource]
+		}
+		lp := batchedLayerPlan{
+			layer:        l,
+			index:        i,
+			headDim:      lHeadDim,
+			qDim:         lqDim,
+			kvStride:     l.HeadKV * lHeadDim,
+			kvHeads:      l.HeadKV,
+			interm:       l.FfnUp.R,
+			moduloLen:    cacheOwner.AttnCache.CacheLen,
+			isKVConsumer: isConsumer,
+			kvSourceIdx:  l.SharedKVSource,
+			valueFromKey: l.ValueFromKey,
+			applyVNorm:   l.ApplyVNorm,
+			gemma4Round:  l.Gemma4MoE != nil || l.Gemma4PLE != nil || l.LayerScale != 1,
+			layerScale:   l.LayerScale,
+		}
+		lp.ffnRoundBF16 = l.RoundActivationsBF16 || lp.gemma4Round
+		cacheLen := cacheOwner.AttnCache.CacheLen
 		if o.effectiveContextLen > 0 && cacheLen > o.effectiveContextLen {
 			cacheLen = o.effectiveContextLen
 		}
@@ -877,14 +1039,23 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 				return fail(fmt.Errorf("cuda batched prefill: layer %d Wq: %w", i, err))
 			}
 			p.track(lp.wq, l.Wq)
-			if lp.wk, err = p.resolveWeight(l.Wk); err != nil {
-				return fail(fmt.Errorf("cuda batched prefill: layer %d Wk: %w", i, err))
+			if !isConsumer {
+				if lp.wk, err = p.resolveWeight(l.Wk); err != nil {
+					return fail(fmt.Errorf("cuda batched prefill: layer %d Wk: %w", i, err))
+				}
+				p.track(lp.wk, l.Wk)
+				if l.Wv != nil {
+					if lp.wv, err = p.resolveWeight(l.Wv); err != nil {
+						return fail(fmt.Errorf("cuda batched prefill: layer %d Wv: %w", i, err))
+					}
+					p.track(lp.wv, l.Wv)
+				}
+				if l.ApplyVNorm {
+					if lp.vOnesDev, err = o.ensureOnesDev(lHeadDim); err != nil {
+						return fail(fmt.Errorf("cuda batched prefill: layer %d V norm ones: %w", i, err))
+					}
+				}
 			}
-			p.track(lp.wk, l.Wk)
-			if lp.wv, err = p.resolveWeight(l.Wv); err != nil {
-				return fail(fmt.Errorf("cuda batched prefill: layer %d Wv: %w", i, err))
-			}
-			p.track(lp.wv, l.Wv)
 			if lp.wo, err = p.resolveWeight(l.Wo); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d Wo: %w", i, err))
 			}
@@ -899,7 +1070,7 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 				}
 			}
 
-			cache, err := o.ensureAttnCache(l, lp.kvStride, cacheLen)
+			cache, err := o.ensureAttnCache(cacheOwner, lp.kvStride, cacheLen)
 			if err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d attn cache: %w", i, err))
 			}
@@ -916,7 +1087,7 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 
 			lp.scale = l.AttnScale
 			if lp.scale == 0 {
-				lp.scale = float32(1.0 / math.Sqrt(float64(headDim)))
+				lp.scale = float32(1.0 / math.Sqrt(float64(lHeadDim)))
 			}
 		}
 		if lp.up, err = p.resolveWeight(l.FfnUp); err != nil {
@@ -942,7 +1113,7 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 				return fail(fmt.Errorf("cuda batched prefill: layer %d AttnQNorm: %w", i, err))
 			}
 		}
-		if len(l.AttnKNorm) > 0 && !lp.isRecurrent {
+		if len(l.AttnKNorm) > 0 && !lp.isRecurrent && !isConsumer {
 			if lp.kNormDev, err = o.deviceNormWeight(l.AttnKNorm); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d AttnKNorm: %w", i, err))
 			}
@@ -953,7 +1124,7 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 			}
 			p.track(lp.attnGate, l.AttnGate)
 			lp.gateRows = l.AttnGate.R
-			lp.gatePerHead = l.AttnGate.R == m.HeadCount && m.HeadCount != qDim
+			lp.gatePerHead = l.AttnGate.R == m.HeadCount && m.HeadCount != lqDim
 		}
 		if len(l.PostAttnNorm) > 0 {
 			if lp.postAttnNormDev, err = o.deviceNormWeight(l.PostAttnNorm); err != nil {
@@ -965,21 +1136,39 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 				return fail(fmt.Errorf("cuda batched prefill: layer %d PostFfnNorm: %w", i, err))
 			}
 		}
-		lp.useGelu = strings.Contains(l.FFNActivation, "gelu")
+		lp.useGelu = strings.Contains(l.FFNActivation, "gelu") || strings.Contains(m.Config.Config.HiddenAct, "gelu")
+
+		if l.Gemma4PLE != nil && p.pleDim > 0 {
+			ple := l.Gemma4PLE
+			lp.pleDim = p.pleDim
+			if lp.pleGate, err = p.resolveWeight(ple.InputGate); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d PLE gate: %w", i, err))
+			}
+			p.track(lp.pleGate, ple.InputGate)
+			if lp.pleProj, err = p.resolveWeight(ple.Projection); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d PLE proj: %w", i, err))
+			}
+			p.track(lp.pleProj, ple.Projection)
+			if lp.plePostNormDev, err = o.deviceNormWeight(ple.PostNorm); err != nil {
+				return fail(fmt.Errorf("cuda batched prefill: layer %d PLE post-norm: %w", i, err))
+			}
+		}
 
 		if len(l.WqBias) > 0 {
 			if lp.wqBiasDev, err = p.uploadBroadcastBias(l.WqBias); err != nil {
 				return fail(fmt.Errorf("cuda batched prefill: layer %d WqBias: %w", i, err))
 			}
 		}
-		if len(l.WkBias) > 0 {
-			if lp.wkBiasDev, err = p.uploadBroadcastBias(l.WkBias); err != nil {
-				return fail(fmt.Errorf("cuda batched prefill: layer %d WkBias: %w", i, err))
+		if !isConsumer {
+			if len(l.WkBias) > 0 {
+				if lp.wkBiasDev, err = p.uploadBroadcastBias(l.WkBias); err != nil {
+					return fail(fmt.Errorf("cuda batched prefill: layer %d WkBias: %w", i, err))
+				}
 			}
-		}
-		if len(l.WvBias) > 0 {
-			if lp.wvBiasDev, err = p.uploadBroadcastBias(l.WvBias); err != nil {
-				return fail(fmt.Errorf("cuda batched prefill: layer %d WvBias: %w", i, err))
+			if len(l.WvBias) > 0 {
+				if lp.wvBiasDev, err = p.uploadBroadcastBias(l.WvBias); err != nil {
+					return fail(fmt.Errorf("cuda batched prefill: layer %d WvBias: %w", i, err))
+				}
 			}
 		}
 
@@ -1039,6 +1228,14 @@ func (p *batchedPrefillPlan) run() ([]float32, error) {
 		}
 	}
 
+	// Compute Gemma-4 per-layer inputs for the entire batch once from the
+	// initial embeddings in p.buf.x, leaving [layers, N, pleDim] in pleBufA.
+	if p.pleDim > 0 {
+		if err := p.prepareBatchedPLEInputs(); err != nil {
+			return nil, err
+		}
+	}
+
 	for i := range p.layers {
 		if err := p.runLayer(&p.layers[i]); err != nil {
 			return nil, err
@@ -1094,9 +1291,49 @@ func (p *batchedPrefillPlan) run() ([]float32, error) {
 	return p.hostLogits, nil
 }
 
+// prepareBatchedPLEInputs mirrors simd.computeGemma4PerLayerInputs for all N
+// prompt tokens at once: projects p.buf.x -> [N, layers*pleDim], scales by
+// ProjectionScale, RMSNorms per [pleDim] block, adds host-gathered token
+// embeddings (already scaled by EmbeddingScale), scales by InputScale, and
+// transposes [N, layers, pleDim] -> [layers, N, pleDim] in p.buf.pleBufA.
+func (p *batchedPrefillPlan) prepareBatchedPLEInputs() error {
+	stream := p.o.stream
+	totalPLE := p.pleLayerCount * p.pleDim
+	totalElems := p.n * totalPLE
+
+	if err := p.gemmW(p.pleProjWeight, p.buf.x, p.hidden, p.buf.pleBufA, totalPLE); err != nil {
+		return err
+	}
+	if p.pleProjScale != 1 {
+		if err := native.ScaleF32InPlace(p.buf.pleBufA, totalElems, p.pleProjScale, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ple proj scale: %w", err)
+		}
+	}
+	if err := native.RMSNormBatchedF32(p.buf.pleBufB, p.buf.pleBufA, p.pleProjNormDev, p.eps, p.pleDim, p.n*p.pleLayerCount, stream); err != nil {
+		return fmt.Errorf("cuda batched prefill: ple proj norm: %w", err)
+	}
+	bytes := int64(totalElems) * int64(unsafe.Sizeof(float32(0)))
+	if err := native.MemcpyH2DAsync(p.buf.pleBufA, unsafe.Pointer(&p.hostPLETok[0]), bytes, stream); err != nil {
+		return fmt.Errorf("cuda batched prefill: ple tok upload: %w", err)
+	}
+	if err := native.AddVectorsF32(p.buf.pleBufB, p.buf.pleBufA, totalElems, stream); err != nil {
+		return fmt.Errorf("cuda batched prefill: ple add tok: %w", err)
+	}
+	if p.pleInputScale != 1 {
+		if err := native.ScaleF32InPlace(p.buf.pleBufB, totalElems, p.pleInputScale, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ple input scale: %w", err)
+		}
+	}
+	if err := native.Transpose3DF32(p.buf.pleBufA, p.buf.pleBufB, p.n, p.pleLayerCount, p.pleDim, stream); err != nil {
+		return fmt.Errorf("cuda batched prefill: ple transpose: %w", err)
+	}
+	return nil
+}
+
 func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 	o := p.o
 	stream := o.stream
+	hiddenElems := p.n * p.hidden
 
 	// Pre-attention norm over all rows.
 	if err := native.RMSNormBatchedF32(p.buf.normed, p.buf.x, lp.attnNormDev, p.eps, p.hidden, p.n, stream); err != nil {
@@ -1120,10 +1357,20 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 	if err := p.residualAdd(p.buf.proj); err != nil {
 		return err
 	}
+	if lp.gemma4Round {
+		if err := native.RoundBF16InPlaceF32(p.buf.x, hiddenElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: attn residual bf16 round: %w", err)
+		}
+	}
 
 	// FFN.
 	if err := native.RMSNormBatchedF32(p.buf.normed, p.buf.x, lp.ffnNormDev, p.eps, p.hidden, p.n, stream); err != nil {
 		return fmt.Errorf("cuda batched prefill: ffn norm: %w", err)
+	}
+	if lp.gemma4Round {
+		if err := native.RoundBF16InPlaceF32(p.buf.normed, hiddenElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ffn pre-norm bf16 round: %w", err)
+		}
 	}
 	if err := p.gemmW(lp.up, p.buf.normed, p.hidden, p.buf.up, lp.interm); err != nil {
 		return err
@@ -1131,28 +1378,106 @@ func (p *batchedPrefillPlan) runLayer(lp *batchedLayerPlan) error {
 	if err := p.gemmW(lp.gate, p.buf.normed, p.hidden, p.buf.gate, lp.interm); err != nil {
 		return err
 	}
+	intermElems := p.n * lp.interm
+	if lp.ffnRoundBF16 {
+		if err := native.RoundBF16InPlaceF32(p.buf.up, intermElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ffn up bf16 round: %w", err)
+		}
+		if err := native.RoundBF16InPlaceF32(p.buf.gate, intermElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ffn gate bf16 round: %w", err)
+		}
+	}
 	if lp.useGelu {
-		if err := native.GeluMulF32(p.buf.gate, p.buf.up, p.buf.act, p.n*lp.interm, stream); err != nil {
+		if err := native.GeluMulF32(p.buf.gate, p.buf.up, p.buf.act, intermElems, stream); err != nil {
 			return fmt.Errorf("cuda batched prefill: gelu mul: %w", err)
 		}
 	} else {
-		if err := native.SiluMulF32(p.buf.gate, p.buf.up, p.buf.act, p.n*lp.interm, stream); err != nil {
+		if err := native.SiluMulF32(p.buf.gate, p.buf.up, p.buf.act, intermElems, stream); err != nil {
 			return fmt.Errorf("cuda batched prefill: silu mul: %w", err)
+		}
+	}
+	if lp.ffnRoundBF16 {
+		if err := native.RoundBF16InPlaceF32(p.buf.act, intermElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ffn act bf16 round: %w", err)
 		}
 	}
 	if err := p.gemmW(lp.down, p.buf.act, lp.interm, p.buf.down, p.hidden); err != nil {
 		return err
+	}
+	if lp.ffnRoundBF16 {
+		if err := native.RoundBF16InPlaceF32(p.buf.down, hiddenElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ffn down bf16 round: %w", err)
+		}
 	}
 	if lp.postFfnNormDev.Ptr() != nil {
 		if err := native.RMSNormBatchedF32(p.buf.down, p.buf.down, lp.postFfnNormDev, p.eps, p.hidden, p.n, stream); err != nil {
 			return fmt.Errorf("cuda batched prefill: post-ffn norm: %w", err)
 		}
 	}
+	if lp.gemma4Round {
+		if err := native.RoundBF16InPlaceF32(p.buf.down, hiddenElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: post-ffn bf16 round: %w", err)
+		}
+	}
 	if err := p.residualAdd(p.buf.down); err != nil {
 		return err
 	}
+	if lp.gemma4Round {
+		if err := native.RoundBF16InPlaceF32(p.buf.x, hiddenElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ffn residual bf16 round: %w", err)
+		}
+	}
 
-	// p.buf.x is now this layer's post-FFN residual. Copy the captured rows on
+	// Gemma-4 per-layer input (PLE) gated residual block.
+	if lp.pleDim > 0 {
+		pleElems := p.n * lp.pleDim
+		pleSlice := devSub(p.buf.pleBufA, lp.index*pleElems*int(unsafe.Sizeof(float32(0))))
+		if err := p.gemmW(lp.pleGate, p.buf.x, p.hidden, p.buf.gate, lp.pleDim); err != nil {
+			return err
+		}
+		if err := native.RoundBF16InPlaceF32(p.buf.gate, pleElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ple gate bf16 round: %w", err)
+		}
+		if lp.useGelu {
+			if err := native.GeluMulF32(p.buf.gate, pleSlice, p.buf.act, pleElems, stream); err != nil {
+				return fmt.Errorf("cuda batched prefill: ple gelu mul: %w", err)
+			}
+		} else {
+			if err := native.SiluMulF32(p.buf.gate, pleSlice, p.buf.act, pleElems, stream); err != nil {
+				return fmt.Errorf("cuda batched prefill: ple silu mul: %w", err)
+			}
+		}
+		if err := native.RoundBF16InPlaceF32(p.buf.act, pleElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ple act bf16 round: %w", err)
+		}
+		if err := p.gemmW(lp.pleProj, p.buf.act, lp.pleDim, p.buf.down, p.hidden); err != nil {
+			return err
+		}
+		if err := native.RoundBF16InPlaceF32(p.buf.down, hiddenElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ple proj bf16 round: %w", err)
+		}
+		if err := native.RMSNormBatchedF32(p.buf.down, p.buf.down, lp.plePostNormDev, p.eps, p.hidden, p.n, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ple post-norm: %w", err)
+		}
+		if err := native.RoundBF16InPlaceF32(p.buf.down, hiddenElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ple post-norm bf16 round: %w", err)
+		}
+		if err := native.AddVectorsF32(p.buf.x, p.buf.down, hiddenElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ple residual: %w", err)
+		}
+		if err := native.RoundBF16InPlaceF32(p.buf.x, hiddenElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: ple residual bf16 round: %w", err)
+		}
+	}
+
+	// Gemma-4 per-layer scalar (0 and 1 are both no-ops, matching applyRoundedLayerScale).
+	if lp.layerScale != 0 && lp.layerScale != 1 {
+		if err := native.ScaleRoundBF16InPlaceF32(p.buf.x, lp.layerScale, hiddenElems, stream); err != nil {
+			return fmt.Errorf("cuda batched prefill: layer scale: %w", err)
+		}
+	}
+
+	// p.buf.x is now this layer's final hidden output. Copy the captured rows on
 	// device; the host read happens once, after the whole layer loop.
 	if p.tapRows > 0 {
 		if slot := p.inst.HiddenTaps.SlotFor(lp.index); slot >= 0 {
@@ -1224,140 +1549,209 @@ func (p *batchedPrefillPlan) runAttentionBlock(lp *batchedLayerPlan) error {
 	o := p.o
 	stream := o.stream
 
-	// Q/K/V projections.
-	if err := p.gemmW(lp.wq, p.buf.normed, p.hidden, p.buf.q, p.qDim); err != nil {
+	// Q projection (always); K/V projections only on KV source layers.
+	if err := p.gemmW(lp.wq, p.buf.normed, p.hidden, p.buf.q, lp.qDim); err != nil {
 		return err
 	}
-	if err := p.gemmW(lp.wk, p.buf.normed, p.hidden, p.buf.k, lp.kvStride); err != nil {
-		return err
-	}
-	if err := p.gemmW(lp.wv, p.buf.normed, p.hidden, p.buf.v, lp.kvStride); err != nil {
-		return err
+	if !lp.isKVConsumer {
+		if err := p.gemmW(lp.wk, p.buf.normed, p.hidden, p.buf.k, lp.kvStride); err != nil {
+			return err
+		}
+		if lp.wv.buf.Ptr() != nil {
+			if err := p.gemmW(lp.wv, p.buf.normed, p.hidden, p.buf.v, lp.kvStride); err != nil {
+				return err
+			}
+		} else if lp.valueFromKey {
+			vBytes := int64(p.n*lp.kvStride) * int64(unsafe.Sizeof(float32(0)))
+			if err := native.MemcpyD2DAsync(p.buf.v, p.buf.k, vBytes, stream); err != nil {
+				return fmt.Errorf("cuda batched prefill: value-from-key copy (layer %d): %w", lp.index, err)
+			}
+		}
 	}
 	if lp.wqBiasDev.Ptr() != nil {
-		if err := native.AddVectorsF32(p.buf.q, lp.wqBiasDev, p.n*p.qDim, stream); err != nil {
+		if err := native.AddVectorsF32(p.buf.q, lp.wqBiasDev, p.n*lp.qDim, stream); err != nil {
 			return fmt.Errorf("cuda batched prefill: q bias: %w", err)
 		}
 	}
-	if lp.wkBiasDev.Ptr() != nil {
-		if err := native.AddVectorsF32(p.buf.k, lp.wkBiasDev, p.n*lp.kvStride, stream); err != nil {
-			return fmt.Errorf("cuda batched prefill: k bias: %w", err)
+	if !lp.isKVConsumer {
+		if lp.wkBiasDev.Ptr() != nil {
+			if err := native.AddVectorsF32(p.buf.k, lp.wkBiasDev, p.n*lp.kvStride, stream); err != nil {
+				return fmt.Errorf("cuda batched prefill: k bias: %w", err)
+			}
+		}
+		if lp.wvBiasDev.Ptr() != nil {
+			if err := native.AddVectorsF32(p.buf.v, lp.wvBiasDev, p.n*lp.kvStride, stream); err != nil {
+				return fmt.Errorf("cuda batched prefill: v bias: %w", err)
+			}
 		}
 	}
-	if lp.wvBiasDev.Ptr() != nil {
-		if err := native.AddVectorsF32(p.buf.v, lp.wvBiasDev, p.n*lp.kvStride, stream); err != nil {
-			return fmt.Errorf("cuda batched prefill: v bias: %w", err)
-		}
-	}
-	// Per-head Q/K norms.
+	// Per-head Q/K/V norms.
 	if lp.qNormDev.Ptr() != nil {
-		if err := native.RMSNormBatchedF32(p.buf.q, p.buf.q, lp.qNormDev, p.eps, p.headDim, p.n*p.nHead, stream); err != nil {
+		if err := native.RMSNormBatchedF32(p.buf.q, p.buf.q, lp.qNormDev, p.eps, lp.headDim, p.n*p.nHead, stream); err != nil {
 			return fmt.Errorf("cuda batched prefill: q norm: %w", err)
 		}
 	}
-	if lp.kNormDev.Ptr() != nil {
-		if err := native.RMSNormBatchedF32(p.buf.k, p.buf.k, lp.kNormDev, p.eps, p.headDim, p.n*lp.kvHeads, stream); err != nil {
-			return fmt.Errorf("cuda batched prefill: k norm: %w", err)
+	if !lp.isKVConsumer {
+		if lp.kNormDev.Ptr() != nil {
+			if err := native.RMSNormBatchedF32(p.buf.k, p.buf.k, lp.kNormDev, p.eps, lp.headDim, p.n*lp.kvHeads, stream); err != nil {
+				return fmt.Errorf("cuda batched prefill: k norm: %w", err)
+			}
+		}
+		if lp.applyVNorm {
+			if err := native.RMSNormBatchedF32(p.buf.v, p.buf.v, lp.vOnesDev, p.eps, lp.headDim, p.n*lp.kvHeads, stream); err != nil {
+				return fmt.Errorf("cuda batched prefill: v norm: %w", err)
+			}
 		}
 	}
 
-	if p.prefillAttentionOK(lp) {
+	if lp.isKVConsumer {
+		if lp.applyRope {
+			if err := native.ApplyRoPERowsF32(p.buf.q, lp.ropeDev, p.startPos, lp.ropeScale, lp.headDim, lp.ropeHalf, p.nHead, p.n, stream); err != nil {
+				return fmt.Errorf("cuda batched prefill: consumer q rope (layer %d): %w", lp.index, err)
+			}
+		}
+		if lp.useQ8K || lp.useQ8V {
+			if err := native.AttentionInnerMixedCacheF32Batch(
+				p.buf.q, lp.cache.kF16, lp.cache.vF16,
+				lp.cache.kQ8, lp.cache.vQ8, lp.cache.kQ8Scales, lp.cache.vQ8Scales,
+				p.buf.attn, lp.useQ8K, lp.useQ8V,
+				p.n, p.startPos, lp.kvStride, lp.headDim, p.nHead, lp.kvHeads,
+				lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
+			); err != nil {
+				return fmt.Errorf("cuda batched prefill: consumer batched attention (layer %d): %w", lp.index, err)
+			}
+		} else if lp.cache.kF16.Ptr() != nil && lp.cache.vF16.Ptr() != nil &&
+			native.AttentionPrefillF16Supported(lp.headDim, p.nHead, lp.kvHeads) {
+			if err := native.AttentionPrefillF16(
+				p.buf.q, native.DeviceBuffer{}, native.DeviceBuffer{}, lp.cache.kF16, lp.cache.vF16, p.buf.attn,
+				p.n, p.startPos, lp.kvStride, lp.headDim, p.nHead, lp.kvHeads,
+				lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
+			); err != nil {
+				return fmt.Errorf("cuda batched prefill: consumer prefill attention (layer %d): %w", lp.index, err)
+			}
+		} else {
+			if err := native.AttentionInnerF16CacheF32Batch(
+				p.buf.q, lp.cache.kF16, lp.cache.vF16, p.buf.attn,
+				p.n, p.startPos, lp.kvStride, lp.headDim, p.nHead, lp.kvHeads,
+				lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
+			); err != nil {
+				return fmt.Errorf("cuda batched prefill: consumer batched attention (layer %d): %w", lp.index, err)
+			}
+		}
+	} else if p.prefillAttentionOK(lp) {
 		if err := p.runPrefillAttention(lp); err != nil {
 			return err
 		}
 	} else {
-		// Per-row RoPE and KV store.
-		//
-		// Ring constraint: the batched attention kernel needs every row resident
-		// before it reads, so store-all-then-attend is only equivalent to the
-		// sequential oracle when the batch does not wrap the cache. Once startPos+N
-		// exceeds cacheLen, later stores overwrite slots that earlier queries still
-		// read (position t lives at t%cacheLen), so those rows must interleave
-		// store-then-attend exactly as the sequential path does.
+		// Ring constraint: store-all-then-attend is equivalent to the sequential
+		// oracle whenever startPos+N <= cacheLen (no slot overwritten within the
+		// chunk). When it does not wrap and the cache is F16, batch RoPE and KV
+		// store across all N rows in 3 launches instead of 4*N.
 		wrapInBatch := p.startPos+p.n > lp.cacheLen
-		qRowBytes := p.qDim * int(unsafe.Sizeof(float32(0)))
-		kRowBytes := lp.kvStride * int(unsafe.Sizeof(float32(0)))
-		for i := range p.n {
-			pos := p.startPos + i
-			qRow := devSub(p.buf.q, i*qRowBytes)
-			kRow := devSub(p.buf.k, i*kRowBytes)
+		if !wrapInBatch && !lp.useQ8K && !lp.useQ8V && p.n <= lp.moduloLen {
 			if lp.applyRope {
-				if err := native.ApplyRoPEInplaceF32(qRow, lp.ropeDev, pos, lp.ropeScale, p.headDim, lp.ropeHalf, p.nHead, stream); err != nil {
-					return fmt.Errorf("cuda batched prefill: q rope (pos=%d): %w", pos, err)
+				if err := native.ApplyRoPERowsF32(p.buf.q, lp.ropeDev, p.startPos, lp.ropeScale, lp.headDim, lp.ropeHalf, p.nHead, p.n, stream); err != nil {
+					return fmt.Errorf("cuda batched prefill: q rope (layer %d): %w", lp.index, err)
 				}
-				if err := native.ApplyRoPEInplaceF32(kRow, lp.ropeDev, pos, lp.ropeScale, p.headDim, lp.ropeHalf, lp.kvHeads, stream); err != nil {
-					return fmt.Errorf("cuda batched prefill: k rope (pos=%d): %w", pos, err)
-				}
-			}
-			cachePos := pos % lp.moduloLen
-			if lp.useQ8K {
-				if err := native.StoreKVQ8RowBroadcast(lp.cache.kQ8, lp.cache.kQ8Scales, kRow, cachePos, lp.kvStride, lp.blocksPerRow, stream); err != nil {
-					return fmt.Errorf("cuda batched prefill: store K (pos=%d): %w", pos, err)
-				}
-			} else {
-				if err := native.StoreKVF16Row(lp.cache.kF16, kRow, cachePos, lp.kvStride, stream); err != nil {
-					return fmt.Errorf("cuda batched prefill: store K (pos=%d): %w", pos, err)
+				if err := native.ApplyRoPERowsF32(p.buf.k, lp.ropeDev, p.startPos, lp.ropeScale, lp.headDim, lp.ropeHalf, lp.kvHeads, p.n, stream); err != nil {
+					return fmt.Errorf("cuda batched prefill: k rope (layer %d): %w", lp.index, err)
 				}
 			}
-			vRow := devSub(p.buf.v, i*kRowBytes)
-			if lp.useQ8V {
-				if err := native.StoreKVQ8RowBroadcast(lp.cache.vQ8, lp.cache.vQ8Scales, vRow, cachePos, lp.kvStride, lp.blocksPerRow, stream); err != nil {
-					return fmt.Errorf("cuda batched prefill: store V (pos=%d): %w", pos, err)
-				}
-			} else {
-				if err := native.StoreKVF16Row(lp.cache.vF16, vRow, cachePos, lp.kvStride, stream); err != nil {
-					return fmt.Errorf("cuda batched prefill: store V (pos=%d): %w", pos, err)
-				}
+			if err := native.StoreKVF16Rows(lp.cache.kF16, lp.cache.vF16, p.buf.k, p.buf.v, p.startPos, 0, p.n, lp.kvStride, lp.moduloLen, stream); err != nil {
+				return fmt.Errorf("cuda batched prefill: store KV rows (layer %d): %w", lp.index, err)
 			}
-
-			if wrapInBatch {
-				attnRow := devSub(p.buf.attn, i*qRowBytes)
-				start := 0
-				if lp.window > 0 && pos-lp.window+1 > 0 {
-					start = pos - lp.window + 1
+			if err := native.AttentionInnerF16CacheF32Batch(
+				p.buf.q, lp.cache.kF16, lp.cache.vF16, p.buf.attn,
+				p.n, p.startPos, lp.kvStride, lp.headDim, p.nHead, lp.kvHeads,
+				lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
+			); err != nil {
+				return fmt.Errorf("cuda batched prefill: batched attention (layer %d): %w", lp.index, err)
+			}
+		} else {
+			qRowBytes := lp.qDim * int(unsafe.Sizeof(float32(0)))
+			kRowBytes := lp.kvStride * int(unsafe.Sizeof(float32(0)))
+			for i := range p.n {
+				pos := p.startPos + i
+				qRow := devSub(p.buf.q, i*qRowBytes)
+				kRow := devSub(p.buf.k, i*kRowBytes)
+				if lp.applyRope {
+					if err := native.ApplyRoPEInplaceF32(qRow, lp.ropeDev, pos, lp.ropeScale, lp.headDim, lp.ropeHalf, p.nHead, stream); err != nil {
+						return fmt.Errorf("cuda batched prefill: q rope (pos=%d): %w", pos, err)
+					}
+					if err := native.ApplyRoPEInplaceF32(kRow, lp.ropeDev, pos, lp.ropeScale, lp.headDim, lp.ropeHalf, lp.kvHeads, stream); err != nil {
+						return fmt.Errorf("cuda batched prefill: k rope (pos=%d): %w", pos, err)
+					}
 				}
-				if lp.useQ8K || lp.useQ8V {
-					if err := native.AttentionInnerMixedCacheF32(
-						qRow, lp.cache.kF16, lp.cache.vF16,
-						lp.cache.kQ8, lp.cache.vQ8, lp.cache.kQ8Scales, lp.cache.vQ8Scales,
-						attnRow, lp.useQ8K, lp.useQ8V,
-						pos, start, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
-						lp.cacheLen, lp.scale, p.softcap, stream,
-					); err != nil {
-						return fmt.Errorf("cuda batched prefill: attention (pos=%d): %w", pos, err)
+				cachePos := pos % lp.moduloLen
+				if lp.useQ8K {
+					if err := native.StoreKVQ8RowBroadcast(lp.cache.kQ8, lp.cache.kQ8Scales, kRow, cachePos, lp.kvStride, lp.blocksPerRow, stream); err != nil {
+						return fmt.Errorf("cuda batched prefill: store K (pos=%d): %w", pos, err)
 					}
 				} else {
-					if err := native.AttentionInnerF16CacheF32(
-						qRow, lp.cache.kF16, lp.cache.vF16, attnRow,
-						pos, start, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
-						lp.cacheLen, lp.scale, p.softcap, stream,
-					); err != nil {
-						return fmt.Errorf("cuda batched prefill: attention (pos=%d): %w", pos, err)
+					if err := native.StoreKVF16Row(lp.cache.kF16, kRow, cachePos, lp.kvStride, stream); err != nil {
+						return fmt.Errorf("cuda batched prefill: store K (pos=%d): %w", pos, err)
+					}
+				}
+				vRow := devSub(p.buf.v, i*kRowBytes)
+				if lp.useQ8V {
+					if err := native.StoreKVQ8RowBroadcast(lp.cache.vQ8, lp.cache.vQ8Scales, vRow, cachePos, lp.kvStride, lp.blocksPerRow, stream); err != nil {
+						return fmt.Errorf("cuda batched prefill: store V (pos=%d): %w", pos, err)
+					}
+				} else {
+					if err := native.StoreKVF16Row(lp.cache.vF16, vRow, cachePos, lp.kvStride, stream); err != nil {
+						return fmt.Errorf("cuda batched prefill: store V (pos=%d): %w", pos, err)
+					}
+				}
+
+				if wrapInBatch {
+					attnRow := devSub(p.buf.attn, i*qRowBytes)
+					start := 0
+					if lp.window > 0 && pos-lp.window+1 > 0 {
+						start = pos - lp.window + 1
+					}
+					if lp.useQ8K || lp.useQ8V {
+						if err := native.AttentionInnerMixedCacheF32(
+							qRow, lp.cache.kF16, lp.cache.vF16,
+							lp.cache.kQ8, lp.cache.vQ8, lp.cache.kQ8Scales, lp.cache.vQ8Scales,
+							attnRow, lp.useQ8K, lp.useQ8V,
+							pos, start, lp.kvStride, lp.headDim, p.nHead, lp.kvHeads,
+							lp.cacheLen, lp.scale, p.softcap, stream,
+						); err != nil {
+							return fmt.Errorf("cuda batched prefill: attention (pos=%d): %w", pos, err)
+						}
+					} else {
+						if err := native.AttentionInnerF16CacheF32(
+							qRow, lp.cache.kF16, lp.cache.vF16, attnRow,
+							pos, start, lp.kvStride, lp.headDim, p.nHead, lp.kvHeads,
+							lp.cacheLen, lp.scale, p.softcap, stream,
+						); err != nil {
+							return fmt.Errorf("cuda batched prefill: attention (pos=%d): %w", pos, err)
+						}
 					}
 				}
 			}
-		}
 
-		// Attention for all N rows in a single launch, valid because no row was
-		// overwritten during the stores above.
-		if !wrapInBatch {
-			if lp.useQ8K || lp.useQ8V {
-				if err := native.AttentionInnerMixedCacheF32Batch(
-					p.buf.q, lp.cache.kF16, lp.cache.vF16,
-					lp.cache.kQ8, lp.cache.vQ8, lp.cache.kQ8Scales, lp.cache.vQ8Scales,
-					p.buf.attn, lp.useQ8K, lp.useQ8V,
-					p.n, p.startPos, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
-					lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
-				); err != nil {
-					return fmt.Errorf("cuda batched prefill: batched attention: %w", err)
-				}
-			} else {
-				if err := native.AttentionInnerF16CacheF32Batch(
-					p.buf.q, lp.cache.kF16, lp.cache.vF16, p.buf.attn,
-					p.n, p.startPos, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
-					lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
-				); err != nil {
-					return fmt.Errorf("cuda batched prefill: batched attention: %w", err)
+			// Attention for all N rows in a single launch, valid because no row was
+			// overwritten during the stores above.
+			if !wrapInBatch {
+				if lp.useQ8K || lp.useQ8V {
+					if err := native.AttentionInnerMixedCacheF32Batch(
+						p.buf.q, lp.cache.kF16, lp.cache.vF16,
+						lp.cache.kQ8, lp.cache.vQ8, lp.cache.kQ8Scales, lp.cache.vQ8Scales,
+						p.buf.attn, lp.useQ8K, lp.useQ8V,
+						p.n, p.startPos, lp.kvStride, lp.headDim, p.nHead, lp.kvHeads,
+						lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
+					); err != nil {
+						return fmt.Errorf("cuda batched prefill: batched attention: %w", err)
+					}
+				} else {
+					if err := native.AttentionInnerF16CacheF32Batch(
+						p.buf.q, lp.cache.kF16, lp.cache.vF16, p.buf.attn,
+						p.n, p.startPos, lp.kvStride, lp.headDim, p.nHead, lp.kvHeads,
+						lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
+					); err != nil {
+						return fmt.Errorf("cuda batched prefill: batched attention: %w", err)
+					}
 				}
 			}
 		}
@@ -1369,20 +1763,22 @@ func (p *batchedPrefillPlan) runAttentionBlock(lp *batchedLayerPlan) error {
 		if err := p.gemmW(lp.attnGate, p.buf.normed, p.hidden, p.buf.gateBuf, lp.gateRows); err != nil {
 			return err
 		}
-		if err := native.AttnGateScaleF32(p.buf.attn, p.buf.gateBuf, p.n, p.qDim, p.nHead, p.headDim, lp.gatePerHead, stream); err != nil {
+		if err := native.AttnGateScaleF32(p.buf.attn, p.buf.gateBuf, p.n, lp.qDim, p.nHead, lp.headDim, lp.gatePerHead, stream); err != nil {
 			return fmt.Errorf("cuda batched prefill: attn gate (layer %d): %w", lp.index, err)
 		}
 	}
 
 	// Attention output projection (the residual add happens in runLayer).
-	if err := p.gemmW(lp.wo, p.buf.attn, p.qDim, p.buf.proj, p.hidden); err != nil {
+	if err := p.gemmW(lp.wo, p.buf.attn, lp.qDim, p.buf.proj, p.hidden); err != nil {
 		return err
 	}
 
 	// Record the last position written to this layer's device KV cache,
 	// exactly as the device fast paths do. The batched path always writes the
 	// whole batch, so this is startPos+N-1.
-	o.lastDevKVPos[lp.layer] = p.startPos + p.n - 1
+	if !lp.isKVConsumer {
+		o.lastDevKVPos[lp.layer] = p.startPos + p.n - 1
+	}
 	return nil
 }
 
@@ -1394,7 +1790,7 @@ func (p *batchedPrefillPlan) runAttentionBlock(lp *batchedLayerPlan) error {
 // ends within both lengths, so no slot wraps, or when a sliding window fits a
 // ring whose read and store lengths agree.
 func (p *batchedPrefillPlan) prefillAttentionOK(lp *batchedLayerPlan) bool {
-	if lp.useQ8K || lp.useQ8V || lp.cache.kF16.Ptr() == nil || lp.cache.vF16.Ptr() == nil {
+	if lp.isKVConsumer || lp.useQ8K || lp.useQ8V || lp.cache.kF16.Ptr() == nil || lp.cache.vF16.Ptr() == nil {
 		return false
 	}
 	noWrap := p.startPos+p.n <= min(lp.cacheLen, lp.moduloLen)
@@ -1402,7 +1798,7 @@ func (p *batchedPrefillPlan) prefillAttentionOK(lp *batchedLayerPlan) bool {
 	if !noWrap && !windowRing {
 		return false
 	}
-	return native.AttentionPrefillF16Supported(p.headDim, p.nHead, lp.kvHeads)
+	return native.AttentionPrefillF16Supported(lp.headDim, p.nHead, lp.kvHeads)
 }
 
 // runPrefillAttention applies RoPE to every Q and K row, attends all rows in
@@ -1413,16 +1809,16 @@ func (p *batchedPrefillPlan) prefillAttentionOK(lp *batchedLayerPlan) bool {
 func (p *batchedPrefillPlan) runPrefillAttention(lp *batchedLayerPlan) error {
 	stream := p.o.stream
 	if lp.applyRope {
-		if err := native.ApplyRoPERowsF32(p.buf.q, lp.ropeDev, p.startPos, lp.ropeScale, p.headDim, lp.ropeHalf, p.nHead, p.n, stream); err != nil {
+		if err := native.ApplyRoPERowsF32(p.buf.q, lp.ropeDev, p.startPos, lp.ropeScale, lp.headDim, lp.ropeHalf, p.nHead, p.n, stream); err != nil {
 			return fmt.Errorf("cuda batched prefill: q rope (layer %d): %w", lp.index, err)
 		}
-		if err := native.ApplyRoPERowsF32(p.buf.k, lp.ropeDev, p.startPos, lp.ropeScale, p.headDim, lp.ropeHalf, lp.kvHeads, p.n, stream); err != nil {
+		if err := native.ApplyRoPERowsF32(p.buf.k, lp.ropeDev, p.startPos, lp.ropeScale, lp.headDim, lp.ropeHalf, lp.kvHeads, p.n, stream); err != nil {
 			return fmt.Errorf("cuda batched prefill: k rope (layer %d): %w", lp.index, err)
 		}
 	}
 	if err := native.AttentionPrefillF16(
 		p.buf.q, p.buf.k, p.buf.v, lp.cache.kF16, lp.cache.vF16, p.buf.attn,
-		p.n, p.startPos, lp.kvStride, p.headDim, p.nHead, lp.kvHeads,
+		p.n, p.startPos, lp.kvStride, lp.headDim, p.nHead, lp.kvHeads,
 		lp.cacheLen, lp.window, lp.scale, p.softcap, stream,
 	); err != nil {
 		return fmt.Errorf("cuda batched prefill: prefill attention (layer %d): %w", lp.index, err)

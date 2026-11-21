@@ -98,7 +98,7 @@ func AttentionPrefillF16Supported(headDim, nHead, kvHeads int) bool {
 // Row r attends [max(pos-window+1, 0), pos], or [0, pos] when window is 0.
 // The caches are only read, so the chunk's rows can be stored afterwards.
 func AttentionPrefillF16(q, kNew, vNew, cacheK, cacheV, out DeviceBuffer, n, startPos, kvStride, headDim, nHead, kvHeads, cacheLen, window int, scale, softcap float32, stream Stream) error {
-	if q.ptr == nil || kNew.ptr == nil || vNew.ptr == nil || cacheK.ptr == nil || cacheV.ptr == nil || out.ptr == nil {
+	if q.ptr == nil || cacheK.ptr == nil || cacheV.ptr == nil || out.ptr == nil || (kNew.ptr == nil) != (vNew.ptr == nil) {
 		return fmt.Errorf("native.AttentionPrefillF16: buffer is nil")
 	}
 	if n <= 0 || startPos < 0 || kvStride <= 0 || cacheLen <= 0 {
