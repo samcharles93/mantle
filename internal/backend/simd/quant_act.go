@@ -46,12 +46,13 @@ var (
 
 // quantizeActivationBlocks quantises the first blocks*32 elements of x, reading
 // elements past len(x) as zero. It writes scales[:blocks] plus whichever
-// optional outputs are non-nil: q8 in element order, q16 widened to int16,
-// q16Pair and q8Pair with each block as its 16 even elements then its 16 odd
-// ones (the order decodePacked4RowUnsigned produces), and bias with 8 times
-// each block's exact sum of quantised int8 values (for unsigned 4-bit sign
-// folding).
-func quantizeActivationBlocks(x []float32, blocks int, scales []float32, q8 []int8, q16, q16Pair []int16, q8Pair []int8, bias []int32) {
+// optional outputs are non-nil: q8 in element order, q32 in element order
+// packed 4 int8s per little-endian int32 (for repacked 8x4 GEMM), q16 widened
+// to int16, q16Pair and q8Pair with each block as its 16 even elements then
+// its 16 odd ones (the order decodePacked4RowUnsigned produces), and bias with
+// 8 times each block's exact sum of quantised int8 values (for unsigned 4-bit
+// sign folding).
+func quantizeActivationBlocks(x []float32, blocks int, scales []float32, q8 []int8, q32 []int32, q16, q16Pair []int16, q8Pair []int8, bias []int32) {
 	if blocks <= 0 {
 		return
 	}
@@ -59,6 +60,9 @@ func quantizeActivationBlocks(x []float32, blocks int, scales []float32, q8 []in
 	scales = scales[:blocks]
 	if q8 != nil {
 		q8 = q8[:n]
+	}
+	if q32 != nil {
+		q32 = q32[:blocks*8]
 	}
 	if q16 != nil {
 		q16 = q16[:n]
@@ -79,18 +83,22 @@ func quantizeActivationBlocks(x []float32, blocks int, scales []float32, q8 []in
 		if q8 != nil {
 			q8Full = q8[:full*32]
 		}
+		var q32Full []int32
+		if q32 != nil {
+			q32Full = q32[:full*8]
+		}
 		var biasFull []int32
 		if bias != nil {
 			biasFull = bias[:full]
 		}
-		quantizeBlocksAVX2(x[:full*32], scales[:full], q8Full, q16, q16Pair, q8Pair, biasFull)
+		quantizeBlocksAVX2(x[:full*32], scales[:full], q8Full, q32Full, q16, q16Pair, q8Pair, biasFull)
 	}
 	var q [32]int8
 	for b := full; b < blocks; b++ {
 		lo := min(b*32, len(x))
 		hi := min(b*32+32, len(x))
 		scales[b] = quantizeBlockScalar(x[lo:hi], &q)
-		writeQuantBlock(&q, b, q8, q16, q16Pair, q8Pair, bias)
+		writeQuantBlock(&q, b, q8, q32, q16, q16Pair, q8Pair, bias)
 	}
 }
 
@@ -128,10 +136,19 @@ func quantizeBlockScalar(x []float32, q *[32]int8) float32 {
 }
 
 // writeQuantBlock stores block b's values q into each non-nil output.
-func writeQuantBlock(q *[32]int8, b int, q8 []int8, q16, q16Pair []int16, q8Pair []int8, bias []int32) {
+func writeQuantBlock(q *[32]int8, b int, q8 []int8, q32 []int32, q16, q16Pair []int16, q8Pair []int8, bias []int32) {
 	base := b * 32
 	if q8 != nil {
 		copy(q8[base:base+32], q[:])
+	}
+	if q32 != nil {
+		base32 := b * 8
+		for k := range 8 {
+			q32[base32+k] = int32(uint32(uint8(q[4*k])) |
+				uint32(uint8(q[4*k+1]))<<8 |
+				uint32(uint8(q[4*k+2]))<<16 |
+				uint32(uint8(q[4*k+3]))<<24)
+		}
 	}
 	var sum int32
 	for i, v := range q {
@@ -158,7 +175,7 @@ func writeQuantBlock(q *[32]int8, b int, q8 []int8, q16, q16Pair []int16, q8Pair
 // math.Round(float64(y)); for y = ±Inf, d is NaN, so r stays ±Inf and the
 // clamp saturates it. The scale and its reciprocal are the same two
 // correctly rounded divisions the scalar path performs.
-func quantizeBlocksAVX2(x []float32, scales []float32, q8 []int8, q16, q16Pair []int16, q8Pair []int8, bias []int32) {
+func quantizeBlocksAVX2(x []float32, scales []float32, q8 []int8, q32 []int32, q16, q16Pair []int16, q8Pair []int8, bias []int32) {
 	blocks := len(x) / 32
 	if blocks == 0 {
 		return
@@ -216,12 +233,18 @@ func quantizeBlocksAVX2(x []float32, scales []float32, q8 []int8, q16, q16Pair [
 			s = s.Add(s.PermuteScalarsGrouped(1, 0, 3, 2))
 			bias[b] = s.GetLo().GetElem(0) << 3
 		}
-		if q8 != nil || q16 != nil {
+		if q8 != nil || q32 != nil || q16 != nil {
 			// VPACKSSDW packs per 128-bit lane, so pair the halves first.
 			n0 := a0.SetHi(a1.GetLo()).SaturateToInt16ConcatGrouped(a1.SetLo(a0.GetHi()))
 			n1 := a2.SetHi(a3.GetLo()).SaturateToInt16ConcatGrouped(a3.SetLo(a2.GetHi()))
-			if q8 != nil {
-				narrow(n0, n1).StoreArray((*[32]int8)(q8[off : off+32]))
+			if q8 != nil || q32 != nil {
+				packed := narrow(n0, n1)
+				if q8 != nil {
+					packed.StoreArray((*[32]int8)(q8[off : off+32]))
+				}
+				if q32 != nil {
+					packed.ToBits().ReshapeToUint32s().BitsToInt32().StoreArray((*[8]int32)(q32[b*8 : b*8+8]))
+				}
 			}
 			if q16 != nil {
 				n0.StoreArray((*[16]int16)(q16[off : off+16]))

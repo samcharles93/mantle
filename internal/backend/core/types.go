@@ -72,6 +72,44 @@ func (qc *QuantCache) ValidFor(m *Mat) bool {
 	return qc.validFor(m)
 }
 
+// Packed4x8 holds a packed 4-bit weight matrix repacked into 8-row interleaved
+// groups of unsigned [0, 15] nibbles (w + 8) for AVX2 8x4 GEMM kernels.
+//
+// Only full 8-row groups (Groups = R / 8) are repacked; any trailing R%8 rows
+// remain on the per-row packed path. For group g (rows 8g..8g+7) and 32-element
+// block b, Data holds 128 bytes as four 32-byte chunks s = 0..3. Within chunk s
+// (columns 32b+8s..32b+8s+7 across all 8 rows), byte j*4+t (j in 0..7, t in 0..3)
+// stores:
+//   - low nibble:  u[8g+j, 32b+8s+t]   (columns 8s+0..3, biased +8 in [0, 15])
+//   - high nibble: u[8g+j, 32b+8s+4+t] (columns 8s+4..7, biased +8 in [0, 15])
+type Packed4x8 struct {
+	Data         []byte
+	Groups       int
+	BlocksPerRow int
+}
+
+// ValidFor reports whether the repacked 4-bit layout matches m's dimensions.
+func (p *Packed4x8) ValidFor(m *Mat) bool {
+	if p == nil || m == nil || m.Raw == nil || p.Groups <= 0 || p.BlocksPerRow <= 0 {
+		return false
+	}
+	if m.C <= 0 || m.C%32 != 0 || m.C/32 != p.BlocksPerRow {
+		return false
+	}
+	if m.R/8 != p.Groups {
+		return false
+	}
+	want, ok := MulInt(p.Groups, p.BlocksPerRow)
+	if !ok {
+		return false
+	}
+	wantBytes, ok := MulInt(want, 128)
+	if !ok {
+		return false
+	}
+	return len(p.Data) >= wantBytes
+}
+
 // QuantVec stores transient quantization of input vectors.
 type QuantVec struct {
 	Q   []int8

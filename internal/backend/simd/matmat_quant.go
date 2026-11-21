@@ -28,39 +28,58 @@ const _ = uint16(math.MaxInt16 - 8*2*packed4UnsignedMax*quantActMaxAbs)
 
 // quantRows holds n activation rows quantised exactly as matVecWithQuant
 // quantises a single input vector (int8 values and one scale per 32-element
-// block), plus the interleaved scale and sign-folding bias tables for the 2x4
-// and 2x2 kernels.
+// block), plus the interleaved activation, scale and sign-folding bias tables
+// for the repacked 8x4, packed 2x4 and cached 2x4 kernels.
 type quantRows struct {
 	// q8 holds element-order int8 activations for cached-int8 weights; empty
-	// when only packed 4-bit weights will read this quantRows.
+	// when no cached-int8 weight will read this quantRows.
 	q8 []int8 // [n, blocks*32]
 	// q8Pair is q8 with each block in pair order (16 even elements, then 16
 	// odd), matching packed 4-bit weights decoded by decodePacked4RowUnsigned.
-	// Filled only when a packed 4-bit weight will read this quantRows.
+	// Filled only when an un-repacked 4-bit weight (or R%8 tail) will read it.
 	q8Pair []int8
+	// q32 holds element-order int8 activations packed 4 bytes per little-endian
+	// int32 for repacked 8-row 4-bit kernels. Filled only when repacked weights
+	// will read this quantRows.
+	q32    []int32   // [n, blocks*8]
 	scales []float32 // [n, blocks]
 	// bias[r*blocks+b] is 8*sum(q8[r][b*32:+32]) for packed 4-bit sign
-	// folding: dot(w+8, x) - bias == dot(w, x) in exact int32. Filled only
-	// when q8Pair is filled.
+	// folding: dot(w+8, x) - bias == dot(w, x) in exact int32. Filled whenever
+	// q8Pair or q32 is filled.
 	bias []int32
 	// quadScales[(r/4)*blocks*8 + b*8 : +8] is
 	// {xs[r][b], xs[r+1][b], xs[r][b], xs[r+1][b],
 	//  xs[r+2][b], xs[r+3][b], xs[r+2][b], xs[r+3][b]}
-	// for each 4-row group with r+3 < n.
+	// for each 4-row group with r+3 < n (used by 2x4 kernels).
 	quadScales []float32
 	// quadBias mirrors quadScales for bias; filled only when q8Pair is filled.
 	quadBias []int32
 	// tailPairScales and tailPairBias hold the 4-wide interleave for the single
-	// trailing 2-row pair when n%4 >= 2.
+	// trailing 2-row pair when n%4 >= 2 (used by 2x2 kernels).
 	tailPairScales []float32 // [blocks*4]
 	tailPairBias   []int32   // [blocks*4]
-	blocks         int
+
+	// Repacked 8x4 / 8x2 / 8x1 activation tables (filled only when q32 is filled).
+	// quadAct[(r/4)*blocks*32 + b*32 + k*4 : +4] holds the 4 consecutive int8
+	// slice k (0..7) of rows r..r+3 as one contiguous stream.
+	// quadMeta[(r/4)*blocks*8 + b*8 : +8] holds Float32bits(xs[r..r+3][b]) in
+	// lanes 0..3 and uint32(bias[r..r+3][b]) in lanes 4..7 so one 256-bit load
+	// feeds both scale and bias broadcasts without creating 128-bit XMM temps.
+	quadAct  []int32  // [(n/4), blocks*32]
+	quadMeta []uint32 // [(n/4), blocks*8]
+	// Trailing 2-row pair (when n%4 >= 2) and trailing odd row (when n%2 == 1).
+	tailPairAct  []int32  // [blocks*16]
+	tailPairMeta []uint32 // [blocks*8]
+	oddRowMeta   []uint32 // [blocks*8]
+
+	blocks int
 }
 
 var quantRowsPool = sync.Pool{New: func() any { return new(quantRows) }}
 
 // quantRowsTask is a range of activation rows to quantise, rs a multiple of 4
-// so every 4-row group (and any trailing 2-row pair) is whole inside one task.
+// so every 4-row group (and any trailing 2-row pair or odd row) is whole inside
+// one task.
 type quantRowsTask struct {
 	x      []float32
 	c      int
@@ -68,57 +87,98 @@ type quantRowsTask struct {
 	rs, re int
 }
 
-// run quantises rows [rs, re) and fills the interleaved scale/bias tables for
-// every 4-row group (and the trailing 2-row pair, if this task owns it).
+// run quantises rows [rs, re) and fills the interleaved activation/scale/bias
+// tables for every 4-row group (and any trailing pair/odd row this task owns).
 func (t *quantRowsTask) run() {
 	qr, blocks := t.qr, t.qr.blocks
 	rowLen := blocks * 32
+	rowLen32 := blocks * 8
 	wantNormal := len(qr.q8) > 0
 	wantPacked := len(qr.q8Pair) > 0
+	wantRepacked := len(qr.q32) > 0
+	wantBias := wantPacked || wantRepacked
+	want2x4Scales := len(qr.quadScales) > 0
 	for r := t.rs; r < t.re; r++ {
 		var q8, q8Pair []int8
-		var bias []int32
+		var q32, bias []int32
 		if wantNormal {
 			q8 = qr.q8[r*rowLen : (r+1)*rowLen]
 		}
 		if wantPacked {
 			q8Pair = qr.q8Pair[r*rowLen : (r+1)*rowLen]
+		}
+		if wantRepacked {
+			q32 = qr.q32[r*rowLen32 : (r+1)*rowLen32]
+		}
+		if wantBias {
 			bias = qr.bias[r*blocks : (r+1)*blocks]
 		}
 		quantizeActivationBlocks(t.x[r*t.c:(r+1)*t.c], blocks, qr.scales[r*blocks:(r+1)*blocks],
-			q8, nil, nil, q8Pair, bias)
+			q8, q32, nil, nil, q8Pair, bias)
 	}
 	r := t.rs
 	for ; r+3 < t.re; r += 4 {
+		qIdx := r / 4
 		xs0 := qr.scales[r*blocks : (r+1)*blocks]
 		xs1 := qr.scales[(r+1)*blocks : (r+2)*blocks]
 		xs2 := qr.scales[(r+2)*blocks : (r+3)*blocks]
 		xs3 := qr.scales[(r+3)*blocks : (r+4)*blocks]
-		out := qr.quadScales[(r/4)*blocks*8 : (r/4+1)*blocks*8]
-		for b := range blocks {
-			s0, s1, s2, s3 := xs0[b], xs1[b], xs2[b], xs3[b]
-			out[8*b], out[8*b+1], out[8*b+2], out[8*b+3] = s0, s1, s0, s1
-			out[8*b+4], out[8*b+5], out[8*b+6], out[8*b+7] = s2, s3, s2, s3
+		if want2x4Scales {
+			out := qr.quadScales[qIdx*blocks*8 : (qIdx+1)*blocks*8]
+			for b := range blocks {
+				s0, s1, s2, s3 := xs0[b], xs1[b], xs2[b], xs3[b]
+				out[8*b], out[8*b+1], out[8*b+2], out[8*b+3] = s0, s1, s0, s1
+				out[8*b+4], out[8*b+5], out[8*b+6], out[8*b+7] = s2, s3, s2, s3
+			}
 		}
 		if wantPacked {
 			b0 := qr.bias[r*blocks : (r+1)*blocks]
 			b1 := qr.bias[(r+1)*blocks : (r+2)*blocks]
 			b2 := qr.bias[(r+2)*blocks : (r+3)*blocks]
 			b3 := qr.bias[(r+3)*blocks : (r+4)*blocks]
-			bout := qr.quadBias[(r/4)*blocks*8 : (r/4+1)*blocks*8]
+			bout := qr.quadBias[qIdx*blocks*8 : (qIdx+1)*blocks*8]
 			for b := range blocks {
 				v0, v1, v2, v3 := b0[b], b1[b], b2[b], b3[b]
 				bout[8*b], bout[8*b+1], bout[8*b+2], bout[8*b+3] = v0, v1, v0, v1
 				bout[8*b+4], bout[8*b+5], bout[8*b+6], bout[8*b+7] = v2, v3, v2, v3
 			}
 		}
+		if wantRepacked {
+			r0 := qr.q32[r*rowLen32 : (r+1)*rowLen32]
+			r1 := qr.q32[(r+1)*rowLen32 : (r+2)*rowLen32]
+			r2 := qr.q32[(r+2)*rowLen32 : (r+3)*rowLen32]
+			r3 := qr.q32[(r+3)*rowLen32 : (r+4)*rowLen32]
+			aout := qr.quadAct[qIdx*blocks*32 : (qIdx+1)*blocks*32]
+			mout := qr.quadMeta[qIdx*blocks*8 : (qIdx+1)*blocks*8]
+			b0 := qr.bias[r*blocks : (r+1)*blocks]
+			b1 := qr.bias[(r+1)*blocks : (r+2)*blocks]
+			b2 := qr.bias[(r+2)*blocks : (r+3)*blocks]
+			b3 := qr.bias[(r+3)*blocks : (r+4)*blocks]
+			for b := range blocks {
+				base := b * 8
+				ao := aout[b*32 : (b+1)*32]
+				for k := range 8 {
+					ao[4*k], ao[4*k+1], ao[4*k+2], ao[4*k+3] = r0[base+k], r1[base+k], r2[base+k], r3[base+k]
+				}
+				mout[8*b] = math.Float32bits(xs0[b])
+				mout[8*b+1] = math.Float32bits(xs1[b])
+				mout[8*b+2] = math.Float32bits(xs2[b])
+				mout[8*b+3] = math.Float32bits(xs3[b])
+				mout[8*b+4] = uint32(b0[b])
+				mout[8*b+5] = uint32(b1[b])
+				mout[8*b+6] = uint32(b2[b])
+				mout[8*b+7] = uint32(b3[b])
+			}
+		}
 	}
 	if r+1 < t.re {
 		xs0 := qr.scales[r*blocks : (r+1)*blocks]
 		xs1 := qr.scales[(r+1)*blocks : (r+2)*blocks]
-		out := qr.tailPairScales[:blocks*4]
-		for b := range blocks {
-			out[4*b], out[4*b+1], out[4*b+2], out[4*b+3] = xs0[b], xs1[b], xs0[b], xs1[b]
+		if len(qr.tailPairScales) > 0 {
+			out := qr.tailPairScales[:blocks*4]
+			for b := range blocks {
+				out[4*b], out[4*b+1], out[4*b+2], out[4*b+3] = xs0[b], xs1[b], xs0[b], xs1[b]
+			}
 		}
 		if wantPacked {
 			b0 := qr.bias[r*blocks : (r+1)*blocks]
@@ -127,6 +187,39 @@ func (t *quantRowsTask) run() {
 			for b := range blocks {
 				bout[4*b], bout[4*b+1], bout[4*b+2], bout[4*b+3] = b0[b], b1[b], b0[b], b1[b]
 			}
+		}
+		if wantRepacked {
+			r0 := qr.q32[r*rowLen32 : (r+1)*rowLen32]
+			r1 := qr.q32[(r+1)*rowLen32 : (r+2)*rowLen32]
+			aout := qr.tailPairAct[:blocks*16]
+			mout := qr.tailPairMeta[:blocks*8]
+			b0 := qr.bias[r*blocks : (r+1)*blocks]
+			b1 := qr.bias[(r+1)*blocks : (r+2)*blocks]
+			for b := range blocks {
+				base := b * 8
+				ao := aout[b*16 : (b+1)*16]
+				for k := range 8 {
+					ao[2*k], ao[2*k+1] = r0[base+k], r1[base+k]
+				}
+				mout[8*b] = math.Float32bits(xs0[b])
+				mout[8*b+1] = math.Float32bits(xs1[b])
+				mout[8*b+2], mout[8*b+3] = 0, 0
+				mout[8*b+4] = uint32(b0[b])
+				mout[8*b+5] = uint32(b1[b])
+				mout[8*b+6], mout[8*b+7] = 0, 0
+			}
+		}
+		r += 2
+	}
+	if r < t.re && wantRepacked {
+		xs := qr.scales[r*blocks : (r+1)*blocks]
+		bs := qr.bias[r*blocks : (r+1)*blocks]
+		mout := qr.oddRowMeta[:blocks*8]
+		for b := range blocks {
+			mout[8*b] = math.Float32bits(xs[b])
+			mout[8*b+1], mout[8*b+2], mout[8*b+3] = 0, 0, 0
+			mout[8*b+4] = uint32(bs[b])
+			mout[8*b+5], mout[8*b+6], mout[8*b+7] = 0, 0, 0
 		}
 	}
 }
@@ -164,18 +257,39 @@ func quantizeRows(qr *quantRows, x []float32, n, c int) {
 }
 
 func getQuantRows(x []float32, n, c int, packed bool) *quantRows {
-	return getQuantRowsLayout(x, n, c, !packed, packed)
+	return getQuantRowsLayout(x, n, c, !packed, packed, false)
 }
 
-func getQuantRowsLayout(x []float32, n, c int, needNormal, needPacked bool) *quantRows {
+func getQuantRowsForWeight(x []float32, n int, w *Mat) *quantRows {
+	var needNormal, needPacked, needRepacked bool
+	if batchWeightsRepacked4x8(w) {
+		needRepacked = true
+		if w.R%8 != 0 {
+			needPacked = true
+		}
+	} else if batchWeightsPacked(w) {
+		needPacked = true
+	} else {
+		needNormal = true
+	}
+	return getQuantRowsLayout(x, n, w.C, needNormal, needPacked, needRepacked)
+}
+
+func getQuantRowsLayout(x []float32, n, c int, needNormal, needPacked, needRepacked bool) *quantRows {
 	qr := quantRowsPool.Get().(*quantRows)
 	blocks := (c + 31) / 32
 	qr.blocks = blocks
 	qr.scales = ensureFloat32Slice(qr.scales, n*blocks)
-	qr.quadScales = ensureFloat32Slice(qr.quadScales, (n/4)*blocks*8)
-	if n%4 >= 2 {
-		qr.tailPairScales = ensureFloat32Slice(qr.tailPairScales, blocks*4)
+	need2x4Scales := needNormal || needPacked
+	if need2x4Scales {
+		qr.quadScales = ensureFloat32Slice(qr.quadScales, (n/4)*blocks*8)
+		if n%4 >= 2 {
+			qr.tailPairScales = ensureFloat32Slice(qr.tailPairScales, blocks*4)
+		} else {
+			qr.tailPairScales = qr.tailPairScales[:0]
+		}
 	} else {
+		qr.quadScales = qr.quadScales[:0]
 		qr.tailPairScales = qr.tailPairScales[:0]
 	}
 	if needNormal {
@@ -183,9 +297,13 @@ func getQuantRowsLayout(x []float32, n, c int, needNormal, needPacked bool) *qua
 	} else {
 		qr.q8 = qr.q8[:0]
 	}
+	if needPacked || needRepacked {
+		qr.bias = ensureInt32Slice(qr.bias, n*blocks)
+	} else {
+		qr.bias = qr.bias[:0]
+	}
 	if needPacked {
 		qr.q8Pair = ensureInt8Slice(qr.q8Pair, n*blocks*32)
-		qr.bias = ensureInt32Slice(qr.bias, n*blocks)
 		qr.quadBias = ensureInt32Slice(qr.quadBias, (n/4)*blocks*8)
 		if n%4 >= 2 {
 			qr.tailPairBias = ensureInt32Slice(qr.tailPairBias, blocks*4)
@@ -194,9 +312,32 @@ func getQuantRowsLayout(x []float32, n, c int, needNormal, needPacked bool) *qua
 		}
 	} else {
 		qr.q8Pair = qr.q8Pair[:0]
-		qr.bias = qr.bias[:0]
 		qr.quadBias = qr.quadBias[:0]
 		qr.tailPairBias = qr.tailPairBias[:0]
+	}
+	if needRepacked {
+		qr.q32 = ensureInt32Slice(qr.q32, n*blocks*8)
+		qr.quadAct = ensureInt32Slice(qr.quadAct, (n/4)*blocks*32)
+		qr.quadMeta = ensureUint32Slice(qr.quadMeta, (n/4)*blocks*8)
+		if n%4 >= 2 {
+			qr.tailPairAct = ensureInt32Slice(qr.tailPairAct, blocks*16)
+			qr.tailPairMeta = ensureUint32Slice(qr.tailPairMeta, blocks*8)
+		} else {
+			qr.tailPairAct = qr.tailPairAct[:0]
+			qr.tailPairMeta = qr.tailPairMeta[:0]
+		}
+		if n%2 == 1 {
+			qr.oddRowMeta = ensureUint32Slice(qr.oddRowMeta, blocks*8)
+		} else {
+			qr.oddRowMeta = qr.oddRowMeta[:0]
+		}
+	} else {
+		qr.q32 = qr.q32[:0]
+		qr.quadAct = qr.quadAct[:0]
+		qr.quadMeta = qr.quadMeta[:0]
+		qr.tailPairAct = qr.tailPairAct[:0]
+		qr.tailPairMeta = qr.tailPairMeta[:0]
+		qr.oddRowMeta = qr.oddRowMeta[:0]
 	}
 	quantizeRows(qr, x, n, c)
 	return qr
@@ -211,24 +352,29 @@ func putQuantRows(qr *quantRows) {
 // prepareBatchQuantRows quantises x once for a group of projections sharing
 // the same input block (such as Q/K/V/AttnGate or FfnUp/FfnGate). It returns
 // nil when none of weights will take MatMatQuant at batch size n. Mixed
-// weight groups (for instance packed k4 alongside cached k6) populate both
-// layouts in one pass.
+// weight groups (for instance repacked k4 alongside cached k6) populate all
+// required layouts in one pass.
 func prepareBatchQuantRows(x []float32, n, c int, weights ...*Mat) *quantRows {
-	var needNormal, needPacked bool
+	var needNormal, needPacked, needRepacked bool
 	for _, w := range weights {
 		if w == nil || !useBatchQuant(w, n) {
 			continue
 		}
-		if batchWeightsPacked(w) {
+		if batchWeightsRepacked4x8(w) {
+			needRepacked = true
+			if w.R%8 != 0 {
+				needPacked = true
+			}
+		} else if batchWeightsPacked(w) {
 			needPacked = true
 		} else {
 			needNormal = true
 		}
 	}
-	if !needNormal && !needPacked {
+	if !needNormal && !needPacked && !needRepacked {
 		return nil
 	}
-	return getQuantRowsLayout(x, n, c, needNormal, needPacked)
+	return getQuantRowsLayout(x, n, c, needNormal, needPacked, needRepacked)
 }
 
 // zeroFloat32s seeds the quantDot accumulators with VEX loads. The zero value
@@ -285,7 +431,7 @@ func MatMatQuant(dst []float32, w *Mat, x []float32, n int) {
 		panic("matmat shape mismatch")
 	}
 
-	qr := getQuantRows(x, n, w.C, batchWeightsPacked(w))
+	qr := getQuantRowsForWeight(x, n, w)
 	defer putQuantRows(qr)
 	matMatQuantWithRows(dst, w, qr, n)
 }
@@ -345,14 +491,14 @@ func (j *quantJob) run(worker *matVecWorker) {
 }
 
 // quantKernelScratch is the per-worker state of matMatRangeQuant: the block
-// scales of the current weight row pair, interleaved for the 2x4 and 2x2
-// kernels, and for packed 4-bit weights the decoded unsigned [0,15] row pair
-// and its block scales.
+// scales of the current weight row pair or 8-row repacked group, and for
+// un-repacked 4-bit weights the decoded unsigned [0,15] row pair and scales.
 type quantKernelScratch struct {
-	wQuads []float32 // [blocks, 8]: {s0, s0, s1, s1, s0, s0, s1, s1}
-	wPairs []float32 // [blocks, 4]: {s0, s0, s1, s1} for trailing 2x2
-	urows  []uint8   // [2, blocks*32] decoded packed rows in [0,15], pair order
-	scales []float32 // [2, blocks] their block scales
+	wQuads       []float32 // [blocks, 8]: {s0, s0, s1, s1, s0, s0, s1, s1}
+	wPairs       []float32 // [blocks, 4]: {s0, s0, s1, s1} for trailing 2x2
+	wGroupScales []float32 // [blocks, 8]: block-major scales for 8-row repacked group
+	urows        []uint8   // [2, blocks*32] decoded packed rows in [0,15], pair order
+	scales       []float32 // [2, blocks] their block scales
 }
 
 // matMatRangeQuant computes output columns [rs,re) for all n activation rows.
@@ -361,16 +507,22 @@ func matMatRangeQuant(dst []float32, w *Mat, qr *quantRows, n, rs, re int, worke
 	bpr := w.C / 32
 	c := bpr * 32
 	packed := batchWeightsPacked(w)
-	needQuads := n >= 4
-	needTailPair := n%4 >= 2
+	repacked := packed && w.Packed4x8 != nil && w.Packed4x8.ValidFor(w) && rs%8 == 0 && len(qr.q32) > 0
+	needTailPacked := packed && (!repacked || re%8 != 0)
+	needQuads := n >= 4 && (!repacked || needTailPacked)
+	needTailPair := n%4 >= 2 && (!repacked || needTailPacked)
 	ensure := func(s *quantKernelScratch) {
+		if repacked {
+			s.wGroupScales = ensureFloat32Slice(s.wGroupScales, 8*bpr)
+			s.scales = ensureFloat32Slice(s.scales, bpr)
+		}
 		if needQuads {
 			s.wQuads = ensureFloat32Slice(s.wQuads, 8*bpr)
 		}
 		if needTailPair {
 			s.wPairs = ensureFloat32Slice(s.wPairs, 4*bpr)
 		}
-		if packed {
+		if needTailPacked {
 			s.urows = ensureUint8Slice(s.urows, 2*c)
 			s.scales = ensureFloat32Slice(s.scales, 2*bpr)
 		}
@@ -414,6 +566,56 @@ func matMatRangeQuant(dst []float32, w *Mat, qr *quantRows, n, rs, re int, worke
 		if err != nil {
 			panic(err)
 		}
+		i := rs
+		if repacked {
+			p4 := w.Packed4x8
+			wGroupScales := scratch.wGroupScales[:8*bpr]
+			for ; i+7 < re; i += 8 {
+				packed4GroupWeightScales(wGroupScales, layout, w.Raw, i, scratch.scales)
+				g := i / 8
+				wData := p4.Data[g*bpr*128 : (g+1)*bpr*128]
+				r := 0
+				for ; r+3 < n; r += 4 {
+					qIdx := r / 4
+					var out [32]float32
+					quantDotRepacked8x4(
+						wData, wGroupScales,
+						qr.quadAct[qIdx*bpr*32:(qIdx+1)*bpr*32],
+						qr.quadMeta[qIdx*bpr*8:(qIdx+1)*bpr*8],
+						&out,
+					)
+					copy(dst[r*ld+i:r*ld+i+8], out[0:8])
+					copy(dst[(r+1)*ld+i:(r+1)*ld+i+8], out[8:16])
+					copy(dst[(r+2)*ld+i:(r+2)*ld+i+8], out[16:24])
+					copy(dst[(r+3)*ld+i:(r+3)*ld+i+8], out[24:32])
+				}
+				if r+1 < n {
+					var out [16]float32
+					quantDotRepacked8x2(
+						wData, wGroupScales,
+						qr.tailPairAct, qr.tailPairMeta,
+						&out,
+					)
+					copy(dst[r*ld+i:r*ld+i+8], out[0:8])
+					copy(dst[(r+1)*ld+i:(r+1)*ld+i+8], out[8:16])
+					r += 2
+				}
+				if r < n {
+					var out [8]float32
+					quantDotRepacked8x1(
+						wData, wGroupScales,
+						qr.q32[r*bpr*8:(r+1)*bpr*8],
+						qr.oddRowMeta,
+						&out,
+					)
+					copy(dst[r*ld+i:r*ld+i+8], out[0:8])
+				}
+			}
+			if i >= re {
+				return
+			}
+		}
+
 		data := w.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
 		act := qr.q8Pair
 		u0 := scratch.urows[:c]
@@ -421,7 +623,6 @@ func matMatRangeQuant(dst []float32, w *Mat, qr *quantRows, n, rs, re int, worke
 		s0 := scratch.scales[:bpr]
 		s1 := scratch.scales[bpr : 2*bpr]
 
-		i := rs
 		for ; i+1 < re; i += 2 {
 			decodePacked4RowUnsigned(u0, data[i*bpr*16:(i+1)*bpr*16], bpr)
 			packed4RowScales(s0, layout, w.Raw, i)
