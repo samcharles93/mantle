@@ -1,26 +1,199 @@
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
 
-extern "C" {
-
-// Batched quantized matvec (GEMM) over the cached-int8 layout used by
-// Ops.ensureQuantMat (quantMatFormatCachedInt8): q holds totalBlocks*32 int8
-// values, scales one f32 per 32-element block. Computes
-//   y[n, r] = sum_b scales[r*blocksPerRow+b] * dot(q[(r*blocksPerRow+b)*32..], x[n, b*32..])
-// for x [n, cols] row-major and y [n, rows] row-major.
+// Batched quantized matvec (GEMM) kernels supporting three on-device weight
+// layouts:
+//   - CachedInt8Weights (quantMatFormatCachedInt8): q holds totalBlocks*32
+//     int8 values, scales one f32 per 32-element block.
+//   - K4RawWeights (quantMatFormatK4Raw): packed 4-bit two's-complement nibbles
+//     (16 bytes per 32-element block) + f16 super-scales (1 per 8 blocks) +
+//     6-bit sub-scales (u6 / 32.0f).
+//   - Q4RawWeights (quantMatFormatQ4Raw): packed 4-bit two's-complement nibbles
+//     (16 bytes per 32-element block) + f16 block scales.
 //
-// Each block computes a TILE_R x TILE_N output tile, streaming K in CHUNK-wide
-// slices through double-buffered shared memory (next slice loads while the
-// current one computes), so each weight row is read from VRAM once per
-// TILE_N-wide n tile.
+// All three layouts unpack into identical int8 weight tiles and f32 per-block
+// scales in shared memory, so every kernel (f32 activations, single-term dp4a,
+// single-term sm_80+ MMA, and two-term 14-bit hi/lo sm_80+ MMA) produces
+// bit-identical results across raw K4/Q4 and cached-int8 without allocating a
+// second cached-int8 weight copy in VRAM.
+
 #define TILE_R 32
 #define TILE_N 16
 #define CHUNK 256
 #define CHUNKS_PER_BLOCK (CHUNK / 32)
 
-__global__ void quant_matvec_cached_batch_kernel(
-    const int8_t* __restrict__ q,
-    const float* __restrict__ scales,
+#define MMA_BM 64
+#define MMA_BN 64
+#define MMA_BK 128
+#define MMA_KB (MMA_BK / 32)
+#define MMA_LDS (MMA_BK + 16) // 144-byte rows: fragment loads hit 32 distinct banks
+#define MMA_THREADS 128
+
+#define MMA_HL_BM 64
+#define MMA_HL_BN 64
+#define MMA_HL_BK 64
+#define MMA_HL_KB (MMA_HL_BK / 32)
+#define MMA_HL_LDS (MMA_HL_BK + 16)
+#define MMA_HL_THREADS 128
+
+struct CachedInt8Weights {
+    const int8_t* q;
+    const float* scales;
+};
+
+struct K4RawWeights {
+    const uint8_t* q;
+    const uint16_t* superScales;
+    const uint8_t* subScales;
+    int superBlocksPerRow;
+};
+
+struct Q4RawWeights {
+    const uint8_t* q;
+    const uint16_t* scalesF16;
+};
+
+__device__ __forceinline__ float qb_f16_to_f32(uint16_t raw) {
+    return __half2float(__ushort_as_half(raw));
+}
+
+// Unpacks 4 packed bytes (8 two's-complement 4-bit nibbles, low nibble first)
+// into 8 signed int8 values in two uint32_t words.
+// For any nibble n in [0..15], u = n ^ 8 is in [0..15], and ((u + 0x78) ^ 0x80)
+// yields the exact signed int8 in [-8..+7] with zero cross-byte carries.
+__device__ __forceinline__ void qb_unpack_s4x8_to_s8x8(uint32_t w, uint32_t& out0, uint32_t& out1) {
+    const uint32_t u = w ^ 0x88888888u;
+    const uint32_t e = u & 0x0F0F0F0Fu;
+    const uint32_t o = (u >> 4) & 0x0F0F0F0Fu;
+    const uint32_t p0 = __byte_perm(e, o, 0x5140);
+    const uint32_t p1 = __byte_perm(e, o, 0x7362);
+    out0 = (p0 + 0x78787878u) ^ 0x80808080u;
+    out1 = (p1 + 0x78787878u) ^ 0x80808080u;
+}
+
+__device__ __forceinline__ void qb_zero_block32(int8_t* dst32) {
+    const uint4 z = make_uint4(0u, 0u, 0u, 0u);
+    *reinterpret_cast<uint4*>(dst32) = z;
+    *reinterpret_cast<uint4*>(dst32 + 16) = z;
+}
+
+__device__ __forceinline__ void qb_unpack_block4(const uint8_t* __restrict__ src16, int8_t* dst32) {
+    uint4 qv;
+    if ((reinterpret_cast<uintptr_t>(src16) & 15) == 0) {
+        qv = __ldg(reinterpret_cast<const uint4*>(src16));
+    } else {
+        auto loadU32 = [&](int off) -> uint32_t {
+            return (uint32_t)__ldg(src16 + off) |
+                   ((uint32_t)__ldg(src16 + off + 1) << 8) |
+                   ((uint32_t)__ldg(src16 + off + 2) << 16) |
+                   ((uint32_t)__ldg(src16 + off + 3) << 24);
+        };
+        qv = make_uint4(loadU32(0), loadU32(4), loadU32(8), loadU32(12));
+    }
+    uint4 lo, hi;
+    qb_unpack_s4x8_to_s8x8(qv.x, lo.x, lo.y);
+    qb_unpack_s4x8_to_s8x8(qv.y, lo.z, lo.w);
+    qb_unpack_s4x8_to_s8x8(qv.z, hi.x, hi.y);
+    qb_unpack_s4x8_to_s8x8(qv.w, hi.z, hi.w);
+    *reinterpret_cast<uint4*>(dst32) = lo;
+    *reinterpret_cast<uint4*>(dst32 + 16) = hi;
+}
+
+__device__ __forceinline__ void load_w_tile(
+    const CachedInt8Weights& W,
+    int8_t wsh[TILE_R][CHUNK + 16],
+    float wsc[TILE_R][CHUNKS_PER_BLOCK + 1],
+    int tid,
+    int mBase,
+    int cBase,
+    int cLen,
+    int rows,
+    int blocksPerRow
+) {
+    for (int idx = tid; idx < TILE_R * cLen; idx += blockDim.x) {
+        const int lrl = idx / cLen;
+        const int c = idx % cLen;
+        const int rr = mBase + lrl;
+        wsh[lrl][c] = (rr < rows) ? W.q[(size_t)rr * blocksPerRow * 32 + (size_t)(cBase + c)] : (int8_t)0;
+    }
+    for (int idx = tid; idx < TILE_R * CHUNKS_PER_BLOCK; idx += blockDim.x) {
+        const int lrl = idx / CHUNKS_PER_BLOCK;
+        const int b = idx % CHUNKS_PER_BLOCK;
+        const int rr = mBase + lrl;
+        const int gb = (cBase + b * 32) / 32;
+        wsc[lrl][b] = (rr < rows && gb < blocksPerRow) ? W.scales[(size_t)rr * blocksPerRow + gb] : 0.0f;
+    }
+}
+
+__device__ __forceinline__ void load_w_tile(
+    const K4RawWeights& W,
+    int8_t wsh[TILE_R][CHUNK + 16],
+    float wsc[TILE_R][CHUNKS_PER_BLOCK + 1],
+    int tid,
+    int mBase,
+    int cBase,
+    int cLen,
+    int rows,
+    int blocksPerRow
+) {
+    const int kb0 = cBase >> 5;
+    for (int idx = tid; idx < TILE_R * CHUNKS_PER_BLOCK; idx += blockDim.x) {
+        const int lrl = idx / CHUNKS_PER_BLOCK;
+        const int b = idx % CHUNKS_PER_BLOCK;
+        const int rr = mBase + lrl;
+        const int gb = kb0 + b;
+        int8_t* dst32 = &wsh[lrl][b * 32];
+        if (rr < rows && gb < blocksPerRow && b * 32 < cLen) {
+            const size_t blk = (size_t)rr * blocksPerRow + gb;
+            const uint8_t u6 = __ldg(W.subScales + blk) & 0x3Fu;
+            const float super = qb_f16_to_f32(__ldg(W.superScales + (size_t)rr * W.superBlocksPerRow + (gb >> 3)));
+            if (super != 0.0f && u6 != 0) {
+                wsc[lrl][b] = super * (static_cast<float>(u6) * (1.0f / 32.0f));
+                qb_unpack_block4(W.q + blk * 16, dst32);
+                continue;
+            }
+        }
+        wsc[lrl][b] = 0.0f;
+        qb_zero_block32(dst32);
+    }
+}
+
+__device__ __forceinline__ void load_w_tile(
+    const Q4RawWeights& W,
+    int8_t wsh[TILE_R][CHUNK + 16],
+    float wsc[TILE_R][CHUNKS_PER_BLOCK + 1],
+    int tid,
+    int mBase,
+    int cBase,
+    int cLen,
+    int rows,
+    int blocksPerRow
+) {
+    const int kb0 = cBase >> 5;
+    for (int idx = tid; idx < TILE_R * CHUNKS_PER_BLOCK; idx += blockDim.x) {
+        const int lrl = idx / CHUNKS_PER_BLOCK;
+        const int b = idx % CHUNKS_PER_BLOCK;
+        const int rr = mBase + lrl;
+        const int gb = kb0 + b;
+        int8_t* dst32 = &wsh[lrl][b * 32];
+        if (rr < rows && gb < blocksPerRow && b * 32 < cLen) {
+            const size_t blk = (size_t)rr * blocksPerRow + gb;
+            const float sc = qb_f16_to_f32(__ldg(W.scalesF16 + blk));
+            if (sc != 0.0f) {
+                wsc[lrl][b] = sc;
+                qb_unpack_block4(W.q + blk * 16, dst32);
+                continue;
+            }
+        }
+        wsc[lrl][b] = 0.0f;
+        qb_zero_block32(dst32);
+    }
+}
+
+template <typename WType>
+__global__ void quant_matvec_batch_f32_kernel(
+    WType W,
     const float* __restrict__ x,
     float* __restrict__ y,
     int rows,
@@ -28,7 +201,7 @@ __global__ void quant_matvec_cached_batch_kernel(
     int cols,
     int blocksPerRow
 ) {
-    __shared__ int8_t wsh[TILE_R][CHUNK + 16];
+    __shared__ __align__(16) int8_t wsh[TILE_R][CHUNK + 16];
     __shared__ float wsc[TILE_R][CHUNKS_PER_BLOCK + 1];
     __shared__ float xsh[TILE_N][CHUNK + 4];
 
@@ -40,27 +213,12 @@ __global__ void quant_matvec_cached_batch_kernel(
     const int nl = tid % TILE_N;
 
     const int nChunks = (cols + CHUNK - 1) / CHUNK;
-    // Eight accumulators break the fma dependency chain; the inner loop walks
-    // one 32-element quant block per iteration so the block scale stays in a
-    // register.
     float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     for (int ch = 0; ch < nChunks; ch++) {
         const int cBase = ch * CHUNK;
         const int cLen = min(CHUNK, cols - cBase);
         if (cLen <= 0) break;
-        for (int idx = tid; idx < TILE_R * cLen; idx += blockDim.x) {
-            int lrl = idx / cLen;
-            int c = idx % cLen;
-            int rr = blockIdx.x * TILE_R + lrl;
-            wsh[lrl][c] = (rr < rows) ? q[(size_t)rr * blocksPerRow * 32 + (size_t)(cBase + c)] : (int8_t)0;
-        }
-        for (int idx = tid; idx < TILE_R * CHUNKS_PER_BLOCK; idx += blockDim.x) {
-            int lrl = idx / CHUNKS_PER_BLOCK;
-            int b = idx % CHUNKS_PER_BLOCK;
-            int rr = blockIdx.x * TILE_R + lrl;
-            int gb = (cBase + b * 32) / 32;
-            wsc[lrl][b] = (rr < rows && gb < blocksPerRow) ? scales[(size_t)rr * blocksPerRow + gb] : 0.0f;
-        }
+        load_w_tile(W, wsh, wsc, tid, blockIdx.x * TILE_R, cBase, cLen, rows, blocksPerRow);
         for (int idx = tid; idx < TILE_N * cLen; idx += blockDim.x) {
             int lnl = idx / cLen;
             int c = idx % cLen;
@@ -69,11 +227,8 @@ __global__ void quant_matvec_cached_batch_kernel(
         }
         __syncthreads();
         if (active) {
-            const int8_t *wrow = wsh[rl];
-            const float *xrow = xsh[nl];
-            // One dot per 32-element quant block, then a single scale multiply:
-            // the per-element cost is a convert and an fma, not a convert, a
-            // multiply and an fma.
+            const int8_t* wrow = wsh[rl];
+            const float* xrow = xsh[nl];
             for (int b = 0; b < CHUNKS_PER_BLOCK; b++) {
                 const int c = b * 32;
                 if (c >= cLen) break;
@@ -84,10 +239,10 @@ __global__ void quant_matvec_cached_batch_kernel(
                 float d4 = 0.0f, d5 = 0.0f, d6 = 0.0f, d7 = 0.0f;
                 int i = 0;
                 for (; i + 8 <= len; i += 8) {
-                    const char4 w0 = *reinterpret_cast<const char4 *>(wrow + c + i);
-                    const char4 w1 = *reinterpret_cast<const char4 *>(wrow + c + i + 4);
-                    const float4 x0 = *reinterpret_cast<const float4 *>(xrow + c + i);
-                    const float4 x1 = *reinterpret_cast<const float4 *>(xrow + c + i + 4);
+                    const char4 w0 = *reinterpret_cast<const char4*>(wrow + c + i);
+                    const char4 w1 = *reinterpret_cast<const char4*>(wrow + c + i + 4);
+                    const float4 x0 = *reinterpret_cast<const float4*>(xrow + c + i);
+                    const float4 x1 = *reinterpret_cast<const float4*>(xrow + c + i + 4);
                     d0 = fmaf((float)w0.x, x0.x, d0);
                     d1 = fmaf((float)w0.y, x0.y, d1);
                     d2 = fmaf((float)w0.z, x0.z, d2);
@@ -141,10 +296,7 @@ __global__ void quantize_x_blocks_kernel(
 
 // Two-term variant of quantize_x_blocks_kernel: each activation value is split
 // into x = s1*q1 + s2*q2 with q1 and q2 int8 and both scales f32 per
-// 32-element block. s1 is maxAbs/127 and q1 the nearest int8 on that grid, so
-// the residual r = x - s1*q1 satisfies |r| <= s1/2; s2 is max|r|/127 and q2 the
-// nearest int8 on the residual grid. The pair represents x to roughly 14 bits,
-// which is what lets the int8-activation GEMM keep the f32 path's accuracy.
+// 32-element block.
 __global__ void quantize_x_blocks_hi_lo_kernel(
     const float* __restrict__ x,
     int8_t* __restrict__ xq,
@@ -162,9 +314,6 @@ __global__ void quantize_x_blocks_hi_lo_kernel(
     const int b = idx % blocksPerRow;
     const int base = row * cols + b * 32;
     const int len = min(32, cols - b * 32);
-    // Three streaming passes over the block rather than one pass keeping x in
-    // registers: a 32-float local array costs more than the two extra reads,
-    // which hit L1 (the block is 128 bytes).
     float maxAbs = 0.0f;
     for (int i = 0; i < len; i++) maxAbs = fmaxf(maxAbs, fabsf(x[base + i]));
     const float scale1 = maxAbs / 127.0f;
@@ -199,13 +348,9 @@ __global__ void quantize_x_blocks_hi_lo_kernel(
     }
 }
 
-// dp4a variant of the batched quant GEMM: weights and activations are both
-// int8 (per-32-block f32 scales); the per-block dot accumulates in int32 via
-// __dp4a (exact) and is scaled once in f32. Falls back to the f32 FMA loop on
-// pre-sm_61 architectures.
-__global__ void quant_matvec_cached_batch_dp4a_kernel(
-    const int8_t* __restrict__ q,
-    const float* __restrict__ scales,
+template <typename WType>
+__global__ void quant_matvec_batch_dp4a_kernel(
+    WType W,
     const int8_t* __restrict__ xq,
     const float* __restrict__ xsc,
     float* __restrict__ y,
@@ -214,8 +359,8 @@ __global__ void quant_matvec_cached_batch_dp4a_kernel(
     int cols,
     int blocksPerRow
 ) {
-    // +4 (not +1) padding keeps every row 4-byte aligned for the int32 dp4a loads
-    __shared__ int8_t wsh[TILE_R][CHUNK + 4];
+    // +16 padding keeps every row 16-byte aligned for uint4 block stores and int32 dp4a loads
+    __shared__ __align__(16) int8_t wsh[TILE_R][CHUNK + 16];
     __shared__ float wsc[TILE_R][CHUNKS_PER_BLOCK + 1];
     __shared__ int8_t xsh[TILE_N][CHUNK + 4];
     __shared__ float xscsh[TILE_N][CHUNKS_PER_BLOCK + 1];
@@ -233,19 +378,7 @@ __global__ void quant_matvec_cached_batch_dp4a_kernel(
         const int cBase = ch * CHUNK;
         const int cLen = min(CHUNK, cols - cBase);
         if (cLen <= 0) break;
-        for (int idx = tid; idx < TILE_R * cLen; idx += blockDim.x) {
-            int lrl = idx / cLen;
-            int c = idx % cLen;
-            int rr = blockIdx.x * TILE_R + lrl;
-            wsh[lrl][c] = (rr < rows) ? q[(size_t)rr * blocksPerRow * 32 + (size_t)(cBase + c)] : (int8_t)0;
-        }
-        for (int idx = tid; idx < TILE_R * CHUNKS_PER_BLOCK; idx += blockDim.x) {
-            int lrl = idx / CHUNKS_PER_BLOCK;
-            int b = idx % CHUNKS_PER_BLOCK;
-            int rr = blockIdx.x * TILE_R + lrl;
-            int gb = (cBase + b * 32) / 32;
-            wsc[lrl][b] = (rr < rows && gb < blocksPerRow) ? scales[(size_t)rr * blocksPerRow + gb] : 0.0f;
-        }
+        load_w_tile(W, wsh, wsc, tid, blockIdx.x * TILE_R, cBase, cLen, rows, blocksPerRow);
         for (int idx = tid; idx < TILE_N * cLen; idx += blockDim.x) {
             int lnl = idx / cLen;
             int c = idx % cLen;
@@ -277,7 +410,7 @@ __global__ void quant_matvec_cached_batch_dp4a_kernel(
             for (int b = 0; b < nBlocks; b++) {
                 int d = 0;
                 const int c0 = b * 32;
-                const int rem = min(32, cLen - c0); // elements in THIS 32-block
+                const int rem = min(32, cLen - c0);
                 const int n4 = min(8, (rem + 3) / 4);
                 for (int j = 0; j < n4; j++) {
                     const int c = c0 + j * 4;
@@ -285,7 +418,6 @@ __global__ void quant_matvec_cached_batch_dp4a_kernel(
                     int x4 = *(const int*)&xsh[nl][c];
                     d = __dp4a(w4, x4, d);
                 }
-                // tail elements (block not full at the row end)
                 for (int c = c0 + n4 * 4; c < c0 + rem; c++) {
                     d += (int)wsh[rl][c] * (int)xsh[nl][c];
                 }
@@ -304,80 +436,7 @@ __global__ void quant_matvec_cached_batch_dp4a_kernel(
     }
 }
 
-__host__ int mantleCudaQuantMatVecCachedBatchDp4a(
-    const int8_t* q,
-    const float* scales,
-    const float* x,
-    int8_t* xq,
-    float* xsc,
-    float* y,
-    int rows,
-    int n,
-    int cols,
-    int blocksPerRow,
-    cudaStream_t stream
-) {
-    if (!q || !scales || !x || !xq || !xsc || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
-        return cudaErrorInvalidValue;
-    }
-    const int total = n * blocksPerRow;
-    const int qThreads = 256;
-    const int qBlocks = (total + qThreads - 1) / qThreads;
-    quantize_x_blocks_kernel<<<qBlocks, qThreads, 0, stream>>>(x, xq, xsc, n, cols, blocksPerRow);
-    cudaError_t qe = cudaGetLastError();
-    if (qe != cudaSuccess) return qe;
-
-    const int blockSize = TILE_R * TILE_N; // 256
-    dim3 block(blockSize);
-    dim3 grid((rows + TILE_R - 1) / TILE_R, (n + TILE_N - 1) / TILE_N);
-    quant_matvec_cached_batch_dp4a_kernel<<<grid, block, 0, stream>>>(
-        q, scales, xq, xsc, y, rows, n, cols, blocksPerRow);
-    return cudaGetLastError();
-}
-
-__host__ int mantleCudaQuantMatVecCachedBatch(
-    const int8_t* q,
-    const float* scales,
-    const float* x,
-    float* y,
-    int rows,
-    int n,
-    int cols,
-    int blocksPerRow,
-    cudaStream_t stream
-) {
-    if (!q || !scales || !x || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
-        return cudaErrorInvalidValue;
-    }
-    const int blockSize = TILE_R * TILE_N; // 256
-    dim3 block(blockSize);
-    dim3 grid((rows + TILE_R - 1) / TILE_R, (n + TILE_N - 1) / TILE_N);
-    quant_matvec_cached_batch_kernel<<<grid, block, 0, stream>>>(
-        q, scales, x, y, rows, n, cols, blocksPerRow);
-    return cudaGetLastError();
-}
-
-} // extern "C"
-
-// Tensor-core form of quant_matvec_cached_batch_dp4a_kernel above:
-// the same cached-int8 weights with one f32 scale per 32-element block, the
-// same per-block int8 activations from quantize_x_blocks_kernel, and the same
-// per-output sum over blocks in order of fmaf(wScale*xScale, dot, acc). Only
-// the int32 block dot moves from __dp4a to mma.sync m16n8k32, whose K of 32 is
-// exactly one quant block, so the two kernels agree bit for bit.
-//
-// Each 128-thread block computes a 64 (weight rows) x 64 (tokens) tile. K is
-// staged 128 bytes (four quant blocks) at a time through double-buffered
-// shared memory filled by cp.async; each warp owns a 32x32 sub-tile, i.e. two
-// m16 by four n8 MMAs per quant block.
-
-#define MMA_BM 64
-#define MMA_BN 64
-#define MMA_BK 128
-#define MMA_KB (MMA_BK / 32)
-#define MMA_LDS (MMA_BK + 16) // 144-byte rows: fragment loads hit 32 distinct banks
-#define MMA_THREADS 128
-
+#if __CUDA_ARCH__ >= 800
 __device__ __forceinline__ void mma_cp_async16(void* smem, const void* gmem, bool valid) {
     unsigned s = static_cast<unsigned>(__cvta_generic_to_shared(smem));
     int size = valid ? 16 : 0;
@@ -390,9 +449,110 @@ __device__ __forceinline__ void mma_cp_async4(void* smem, const void* gmem, bool
     asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n" ::"r"(s), "l"(gmem), "r"(size));
 }
 
-__global__ void __launch_bounds__(MMA_THREADS) quant_matmul_cached_mma_kernel(
-    const int8_t* __restrict__ q,
-    const float* __restrict__ scales,
+template <int BM, int BK, int KB, int LDS, int THREADS>
+__device__ __forceinline__ void load_mma_w_stage(
+    const CachedInt8Weights& W,
+    int8_t ws[BM][LDS],
+    float wsc[BM][KB],
+    int tid,
+    int mBase,
+    int kb0,
+    int rows,
+    int cols,
+    int blocksPerRow
+) {
+    const int kByte = kb0 * 32;
+    const size_t wRowBytes = (size_t)blocksPerRow * 32;
+    constexpr int chunksPerRow = BK / 16;
+    for (int c = tid; c < BM * chunksPerRow; c += THREADS) {
+        const int r = c / chunksPerRow;
+        const int off = (c % chunksPerRow) * 16;
+        const bool inK = kByte + off < cols;
+        const int gr = mBase + r;
+        const bool wv = inK && gr < rows;
+        mma_cp_async16(&ws[r][off], wv ? W.q + (size_t)gr * wRowBytes + kByte + off : W.q, wv);
+    }
+    for (int c = tid; c < BM * KB; c += THREADS) {
+        const int r = c / KB;
+        const int j = c % KB;
+        const bool inK = kb0 + j < blocksPerRow;
+        const int gr = mBase + r;
+        const bool wv = inK && gr < rows;
+        mma_cp_async4(&wsc[r][j], wv ? W.scales + (size_t)gr * blocksPerRow + kb0 + j : W.scales, wv);
+    }
+}
+
+template <int BM, int BK, int KB, int LDS, int THREADS>
+__device__ __forceinline__ void load_mma_w_stage(
+    const K4RawWeights& W,
+    int8_t ws[BM][LDS],
+    float wsc[BM][KB],
+    int tid,
+    int mBase,
+    int kb0,
+    int rows,
+    int cols,
+    int blocksPerRow
+) {
+    (void)cols;
+    for (int c = tid; c < BM * KB; c += THREADS) {
+        const int r = c / KB;
+        const int j = c % KB;
+        const int gr = mBase + r;
+        const int gb = kb0 + j;
+        int8_t* dst32 = &ws[r][j * 32];
+        if (gr < rows && gb < blocksPerRow) {
+            const size_t blk = (size_t)gr * blocksPerRow + gb;
+            const uint8_t u6 = __ldg(W.subScales + blk) & 0x3Fu;
+            const float super = qb_f16_to_f32(__ldg(W.superScales + (size_t)gr * W.superBlocksPerRow + (gb >> 3)));
+            if (super != 0.0f && u6 != 0) {
+                wsc[r][j] = super * (static_cast<float>(u6) * (1.0f / 32.0f));
+                qb_unpack_block4(W.q + blk * 16, dst32);
+                continue;
+            }
+        }
+        wsc[r][j] = 0.0f;
+        qb_zero_block32(dst32);
+    }
+}
+
+template <int BM, int BK, int KB, int LDS, int THREADS>
+__device__ __forceinline__ void load_mma_w_stage(
+    const Q4RawWeights& W,
+    int8_t ws[BM][LDS],
+    float wsc[BM][KB],
+    int tid,
+    int mBase,
+    int kb0,
+    int rows,
+    int cols,
+    int blocksPerRow
+) {
+    (void)cols;
+    for (int c = tid; c < BM * KB; c += THREADS) {
+        const int r = c / KB;
+        const int j = c % KB;
+        const int gr = mBase + r;
+        const int gb = kb0 + j;
+        int8_t* dst32 = &ws[r][j * 32];
+        if (gr < rows && gb < blocksPerRow) {
+            const size_t blk = (size_t)gr * blocksPerRow + gb;
+            const float sc = qb_f16_to_f32(__ldg(W.scalesF16 + blk));
+            if (sc != 0.0f) {
+                wsc[r][j] = sc;
+                qb_unpack_block4(W.q + blk * 16, dst32);
+                continue;
+            }
+        }
+        wsc[r][j] = 0.0f;
+        qb_zero_block32(dst32);
+    }
+}
+#endif
+
+template <typename WType>
+__global__ void __launch_bounds__(MMA_THREADS) quant_matmul_mma_kernel(
+    WType W,
     const int8_t* __restrict__ xq,
     const float* __restrict__ xsc,
     float* __restrict__ y,
@@ -417,30 +577,24 @@ __global__ void __launch_bounds__(MMA_THREADS) quant_matmul_cached_mma_kernel(
     const int mBase = blockIdx.x * MMA_BM;
     const int nBase = blockIdx.y * MMA_BN;
     const int nTiles = (blocksPerRow + MMA_KB - 1) / MMA_KB;
-    const size_t wRowBytes = (size_t)blocksPerRow * 32;
 
     auto loadStage = [&](int stage, int kt) {
         const int kb0 = kt * MMA_KB;
         const int kByte = kb0 * 32;
-        // 64 rows x 8 sixteen-byte chunks, four chunks per thread, per operand.
-        for (int c = tid; c < MMA_BM * (MMA_BK / 16); c += MMA_THREADS) {
+        load_mma_w_stage<MMA_BM, MMA_BK, MMA_KB, MMA_LDS, MMA_THREADS>(
+            W, ws[stage], wsc[stage], tid, mBase, kb0, rows, cols, blocksPerRow);
+        for (int c = tid; c < MMA_BN * (MMA_BK / 16); c += MMA_THREADS) {
             const int r = c >> 3;
             const int off = (c & 7) * 16;
             const bool inK = kByte + off < cols;
-            const int gr = mBase + r;
-            const bool wv = inK && gr < rows;
-            mma_cp_async16(&ws[stage][r][off], wv ? q + (size_t)gr * wRowBytes + kByte + off : q, wv);
             const int gn = nBase + r;
             const bool xv = inK && gn < n;
             mma_cp_async16(&xs[stage][r][off], xv ? xq + (size_t)gn * cols + kByte + off : xq, xv);
         }
-        for (int c = tid; c < MMA_BM * MMA_KB; c += MMA_THREADS) {
+        for (int c = tid; c < MMA_BN * MMA_KB; c += MMA_THREADS) {
             const int r = c / MMA_KB;
             const int j = c % MMA_KB;
             const bool inK = kb0 + j < blocksPerRow;
-            const int gr = mBase + r;
-            const bool wv = inK && gr < rows;
-            mma_cp_async4(&wsc[stage][r][j], wv ? scales + (size_t)gr * blocksPerRow + kb0 + j : scales, wv);
             const int gn = nBase + r;
             const bool xv = inK && gn < n;
             mma_cp_async4(&xss[stage][r][j], xv ? xsc + (size_t)gn * blocksPerRow + kb0 + j : xsc, xv);
@@ -530,23 +684,9 @@ __global__ void __launch_bounds__(MMA_THREADS) quant_matmul_cached_mma_kernel(
 #endif
 }
 
-// Two-term form of quant_matmul_cached_mma_kernel above: the same tile and warp
-// layout, the same epilogue, and per output element and quant block
-//   acc = fma(wS*sc1, dot(q1, w), fma(wS*sc2, dot(q2, w), acc))
-// with both block dots taken on the tensor cores. K is staged 64 bytes (two
-// quant blocks) at a time instead of 128 so the second activation tile and its
-// scales still fit the 48 KB static shared-memory budget:
-//   3 x 2 x 64 x 80 int8 + 3 x 2 x 64 x 2 f32 = 33 KB.
-#define MMA_HL_BM 64
-#define MMA_HL_BN 64
-#define MMA_HL_BK 64
-#define MMA_HL_KB (MMA_HL_BK / 32)
-#define MMA_HL_LDS (MMA_HL_BK + 16)
-#define MMA_HL_THREADS 128
-
-__global__ void __launch_bounds__(MMA_HL_THREADS) quant_matmul_cached_mma_hilo_kernel(
-    const int8_t* __restrict__ q,
-    const float* __restrict__ scales,
+template <typename WType>
+__global__ void __launch_bounds__(MMA_HL_THREADS) quant_matmul_mma_hilo_kernel(
+    WType W,
     const int8_t* __restrict__ xq,
     const float* __restrict__ xsc,
     const int8_t* __restrict__ xq2,
@@ -575,31 +715,25 @@ __global__ void __launch_bounds__(MMA_HL_THREADS) quant_matmul_cached_mma_hilo_k
     const int mBase = blockIdx.x * MMA_HL_BM;
     const int nBase = blockIdx.y * MMA_HL_BN;
     const int nTiles = (blocksPerRow + MMA_HL_KB - 1) / MMA_HL_KB;
-    const size_t wRowBytes = (size_t)blocksPerRow * 32;
 
     auto loadStage = [&](int stage, int kt) {
         const int kb0 = kt * MMA_HL_KB;
         const int kByte = kb0 * 32;
-        // 64 rows x 4 sixteen-byte chunks, two chunks per thread, per operand.
-        for (int c = tid; c < MMA_HL_BM * (MMA_HL_BK / 16); c += MMA_HL_THREADS) {
+        load_mma_w_stage<MMA_HL_BM, MMA_HL_BK, MMA_HL_KB, MMA_HL_LDS, MMA_HL_THREADS>(
+            W, ws[stage], wsc[stage], tid, mBase, kb0, rows, cols, blocksPerRow);
+        for (int c = tid; c < MMA_HL_BN * (MMA_HL_BK / 16); c += MMA_HL_THREADS) {
             const int r = c >> 2;
             const int off = (c & 3) * 16;
             const bool inK = kByte + off < cols;
-            const int gr = mBase + r;
-            const bool wv = inK && gr < rows;
-            mma_cp_async16(&ws[stage][r][off], wv ? q + (size_t)gr * wRowBytes + kByte + off : q, wv);
             const int gn = nBase + r;
             const bool xv = inK && gn < n;
             mma_cp_async16(&xs[stage][r][off], xv ? xq + (size_t)gn * cols + kByte + off : xq, xv);
             mma_cp_async16(&xs2[stage][r][off], xv ? xq2 + (size_t)gn * cols + kByte + off : xq2, xv);
         }
-        for (int c = tid; c < MMA_HL_BM * MMA_HL_KB; c += MMA_HL_THREADS) {
+        for (int c = tid; c < MMA_HL_BN * MMA_HL_KB; c += MMA_HL_THREADS) {
             const int r = c / MMA_HL_KB;
             const int j = c % MMA_HL_KB;
             const bool inK = kb0 + j < blocksPerRow;
-            const int gr = mBase + r;
-            const bool wv = inK && gr < rows;
-            mma_cp_async4(&wsc[stage][r][j], wv ? scales + (size_t)gr * blocksPerRow + kb0 + j : scales, wv);
             const int gn = nBase + r;
             const bool xv = inK && gn < n;
             mma_cp_async4(&xss[stage][r][j], xv ? xsc + (size_t)gn * blocksPerRow + kb0 + j : xsc, xv);
@@ -701,6 +835,30 @@ __global__ void __launch_bounds__(MMA_HL_THREADS) quant_matmul_cached_mma_hilo_k
 #endif
 }
 
+template <typename WType>
+static int launchBatchF32(WType W, const float* x, float* y, int rows, int n, int cols, int blocksPerRow, cudaStream_t stream) {
+    const int blockSize = TILE_R * TILE_N;
+    dim3 block(blockSize);
+    dim3 grid((rows + TILE_R - 1) / TILE_R, (n + TILE_N - 1) / TILE_N);
+    quant_matvec_batch_f32_kernel<<<grid, block, 0, stream>>>(W, x, y, rows, n, cols, blocksPerRow);
+    return cudaGetLastError();
+}
+
+template <typename WType>
+static int launchBatchDp4a(WType W, const float* x, int8_t* xq, float* xsc, float* y, int rows, int n, int cols, int blocksPerRow, cudaStream_t stream) {
+    const int total = n * blocksPerRow;
+    const int qThreads = 256;
+    quantize_x_blocks_kernel<<<(total + qThreads - 1) / qThreads, qThreads, 0, stream>>>(x, xq, xsc, n, cols, blocksPerRow);
+    cudaError_t qe = cudaGetLastError();
+    if (qe != cudaSuccess) return qe;
+
+    const int blockSize = TILE_R * TILE_N;
+    dim3 block(blockSize);
+    dim3 grid((rows + TILE_R - 1) / TILE_R, (n + TILE_N - 1) / TILE_N);
+    quant_matvec_batch_dp4a_kernel<<<grid, block, 0, stream>>>(W, xq, xsc, y, rows, n, cols, blocksPerRow);
+    return cudaGetLastError();
+}
+
 extern "C" {
 
 // mantleCudaQuantBatchMMASupported reports whether the current device runs the
@@ -713,11 +871,85 @@ __host__ int mantleCudaQuantBatchMMASupported(void) {
     return major >= 8 ? 1 : 0;
 }
 
-// mantleCudaQuantMatVecCachedBatchMMA has the contract of
-// mantleCudaQuantMatVecCachedBatchDp4a, restricted to the shapes the
-// tensor-core kernel takes: cols a whole number of quant blocks
-// (cols == blocksPerRow*32) and 16-byte aligned q and xq. It returns
-// cudaErrorNotSupported otherwise, or on a pre-sm_80 device.
+} // extern "C"
+
+template <typename WType>
+static int launchBatchMMA(WType W, const void* wPtr, const float* x, int8_t* xq, float* xsc, float* y, int rows, int n, int cols, int blocksPerRow, cudaStream_t stream) {
+    if (cols != blocksPerRow * 32 || ((reinterpret_cast<uintptr_t>(wPtr) | reinterpret_cast<uintptr_t>(xq)) & 15) != 0 ||
+        !mantleCudaQuantBatchMMASupported()) {
+        return cudaErrorNotSupported;
+    }
+    const int total = n * blocksPerRow;
+    const int qThreads = 256;
+    quantize_x_blocks_kernel<<<(total + qThreads - 1) / qThreads, qThreads, 0, stream>>>(x, xq, xsc, n, cols, blocksPerRow);
+    cudaError_t qe = cudaGetLastError();
+    if (qe != cudaSuccess) return qe;
+
+    dim3 grid((rows + MMA_BM - 1) / MMA_BM, (n + MMA_BN - 1) / MMA_BN);
+    quant_matmul_mma_kernel<<<grid, MMA_THREADS, 0, stream>>>(W, xq, xsc, y, rows, n, cols, blocksPerRow);
+    return cudaGetLastError();
+}
+
+template <typename WType>
+static int launchBatchMMAHilo(WType W, const void* wPtr, const float* x, int8_t* xq, float* xsc, int8_t* xq2, float* xsc2, float* y, int rows, int n, int cols, int blocksPerRow, cudaStream_t stream) {
+    if (cols != blocksPerRow * 32 ||
+        ((reinterpret_cast<uintptr_t>(wPtr) | reinterpret_cast<uintptr_t>(xq) | reinterpret_cast<uintptr_t>(xq2)) & 15) != 0 ||
+        !mantleCudaQuantBatchMMASupported()) {
+        return cudaErrorNotSupported;
+    }
+    const int total = n * blocksPerRow;
+    const int qThreads = 256;
+    quantize_x_blocks_hi_lo_kernel<<<(total + qThreads - 1) / qThreads, qThreads, 0, stream>>>(
+        x, xq, xsc, xq2, xsc2, n, cols, blocksPerRow);
+    cudaError_t qe = cudaGetLastError();
+    if (qe != cudaSuccess) return qe;
+
+    dim3 grid((rows + MMA_HL_BM - 1) / MMA_HL_BM, (n + MMA_HL_BN - 1) / MMA_HL_BN);
+    quant_matmul_mma_hilo_kernel<<<grid, MMA_HL_THREADS, 0, stream>>>(
+        W, xq, xsc, xq2, xsc2, y, rows, n, cols, blocksPerRow);
+    return cudaGetLastError();
+}
+
+extern "C" {
+
+// --- Cached-int8 batched launchers ---
+
+__host__ int mantleCudaQuantMatVecCachedBatch(
+    const int8_t* q,
+    const float* scales,
+    const float* x,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!q || !scales || !x || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    return launchBatchF32(CachedInt8Weights{q, scales}, x, y, rows, n, cols, blocksPerRow, stream);
+}
+
+__host__ int mantleCudaQuantMatVecCachedBatchDp4a(
+    const int8_t* q,
+    const float* scales,
+    const float* x,
+    int8_t* xq,
+    float* xsc,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!q || !scales || !x || !xq || !xsc || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    return launchBatchDp4a(CachedInt8Weights{q, scales}, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
 __host__ int mantleCudaQuantMatVecCachedBatchMMA(
     const int8_t* q,
     const float* scales,
@@ -734,28 +966,9 @@ __host__ int mantleCudaQuantMatVecCachedBatchMMA(
     if (!q || !scales || !x || !xq || !xsc || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
         return cudaErrorInvalidValue;
     }
-    if (cols != blocksPerRow * 32 || ((reinterpret_cast<uintptr_t>(q) | reinterpret_cast<uintptr_t>(xq)) & 15) != 0 ||
-        !mantleCudaQuantBatchMMASupported()) {
-        return cudaErrorNotSupported;
-    }
-    const int total = n * blocksPerRow;
-    const int qThreads = 256;
-    quantize_x_blocks_kernel<<<(total + qThreads - 1) / qThreads, qThreads, 0, stream>>>(x, xq, xsc, n, cols, blocksPerRow);
-    cudaError_t qe = cudaGetLastError();
-    if (qe != cudaSuccess) return qe;
-
-    dim3 grid((rows + MMA_BM - 1) / MMA_BM, (n + MMA_BN - 1) / MMA_BN);
-    quant_matmul_cached_mma_kernel<<<grid, MMA_THREADS, 0, stream>>>(q, scales, xq, xsc, y, rows, n, cols, blocksPerRow);
-    return cudaGetLastError();
+    return launchBatchMMA(CachedInt8Weights{q, scales}, q, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
 }
 
-// mantleCudaQuantMatVecCachedBatchMMAHilo is the two-term form of
-// mantleCudaQuantMatVecCachedBatchMMA: the activations are quantized as
-// x = s1*q1 + s2*q2 (see quantize_x_blocks_hi_lo_kernel), which costs a second
-// tensor-core dot per quant block but keeps roughly 14 bits of the activation,
-// so the result tracks the f32-activation kernel instead of losing 0.3 to 0.5
-// on the logits. The shape, alignment and device requirements are the same as
-// mantleCudaQuantMatVecCachedBatchMMA.
 __host__ int mantleCudaQuantMatVecCachedBatchMMAHilo(
     const int8_t* q,
     const float* scales,
@@ -775,22 +988,173 @@ __host__ int mantleCudaQuantMatVecCachedBatchMMAHilo(
         blocksPerRow <= 0) {
         return cudaErrorInvalidValue;
     }
-    if (cols != blocksPerRow * 32 ||
-        ((reinterpret_cast<uintptr_t>(q) | reinterpret_cast<uintptr_t>(xq) | reinterpret_cast<uintptr_t>(xq2)) & 15) != 0 ||
-        !mantleCudaQuantBatchMMASupported()) {
-        return cudaErrorNotSupported;
-    }
-    const int total = n * blocksPerRow;
-    const int qThreads = 256;
-    quantize_x_blocks_hi_lo_kernel<<<(total + qThreads - 1) / qThreads, qThreads, 0, stream>>>(
-        x, xq, xsc, xq2, xsc2, n, cols, blocksPerRow);
-    cudaError_t qe = cudaGetLastError();
-    if (qe != cudaSuccess) return qe;
+    return launchBatchMMAHilo(CachedInt8Weights{q, scales}, q, x, xq, xsc, xq2, xsc2, y, rows, n, cols, blocksPerRow, stream);
+}
 
-    dim3 grid((rows + MMA_HL_BM - 1) / MMA_HL_BM, (n + MMA_HL_BN - 1) / MMA_HL_BN);
-    quant_matmul_cached_mma_hilo_kernel<<<grid, MMA_HL_THREADS, 0, stream>>>(
-        q, scales, xq, xsc, xq2, xsc2, y, rows, n, cols, blocksPerRow);
-    return cudaGetLastError();
+// --- Raw K4 batched launchers ---
+
+__host__ int mantleCudaQuantMatVecK4Batch(
+    const uint8_t* qData,
+    const uint16_t* superScalesF16,
+    const uint8_t* subScales,
+    const float* x,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!qData || !superScalesF16 || !subScales || !x || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    const K4RawWeights W{qData, superScalesF16, subScales, (blocksPerRow + 7) / 8};
+    return launchBatchF32(W, x, y, rows, n, cols, blocksPerRow, stream);
+}
+
+__host__ int mantleCudaQuantMatVecK4BatchDp4a(
+    const uint8_t* qData,
+    const uint16_t* superScalesF16,
+    const uint8_t* subScales,
+    const float* x,
+    int8_t* xq,
+    float* xsc,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!qData || !superScalesF16 || !subScales || !x || !xq || !xsc || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    const K4RawWeights W{qData, superScalesF16, subScales, (blocksPerRow + 7) / 8};
+    return launchBatchDp4a(W, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+__host__ int mantleCudaQuantMatVecK4BatchMMA(
+    const uint8_t* qData,
+    const uint16_t* superScalesF16,
+    const uint8_t* subScales,
+    const float* x,
+    int8_t* xq,
+    float* xsc,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!qData || !superScalesF16 || !subScales || !x || !xq || !xsc || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    const K4RawWeights W{qData, superScalesF16, subScales, (blocksPerRow + 7) / 8};
+    return launchBatchMMA(W, qData, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+__host__ int mantleCudaQuantMatVecK4BatchMMAHilo(
+    const uint8_t* qData,
+    const uint16_t* superScalesF16,
+    const uint8_t* subScales,
+    const float* x,
+    int8_t* xq,
+    float* xsc,
+    int8_t* xq2,
+    float* xsc2,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!qData || !superScalesF16 || !subScales || !x || !xq || !xsc || !xq2 || !xsc2 || !y ||
+        rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    const K4RawWeights W{qData, superScalesF16, subScales, (blocksPerRow + 7) / 8};
+    return launchBatchMMAHilo(W, qData, x, xq, xsc, xq2, xsc2, y, rows, n, cols, blocksPerRow, stream);
+}
+
+// --- Raw Q4 batched launchers ---
+
+__host__ int mantleCudaQuantMatVecQ4Batch(
+    const uint8_t* qData,
+    const uint16_t* scalesF16,
+    const float* x,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!qData || !scalesF16 || !x || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    return launchBatchF32(Q4RawWeights{qData, scalesF16}, x, y, rows, n, cols, blocksPerRow, stream);
+}
+
+__host__ int mantleCudaQuantMatVecQ4BatchDp4a(
+    const uint8_t* qData,
+    const uint16_t* scalesF16,
+    const float* x,
+    int8_t* xq,
+    float* xsc,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!qData || !scalesF16 || !x || !xq || !xsc || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    return launchBatchDp4a(Q4RawWeights{qData, scalesF16}, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+__host__ int mantleCudaQuantMatVecQ4BatchMMA(
+    const uint8_t* qData,
+    const uint16_t* scalesF16,
+    const float* x,
+    int8_t* xq,
+    float* xsc,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!qData || !scalesF16 || !x || !xq || !xsc || !y || rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    return launchBatchMMA(Q4RawWeights{qData, scalesF16}, qData, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+__host__ int mantleCudaQuantMatVecQ4BatchMMAHilo(
+    const uint8_t* qData,
+    const uint16_t* scalesF16,
+    const float* x,
+    int8_t* xq,
+    float* xsc,
+    int8_t* xq2,
+    float* xsc2,
+    float* y,
+    int rows,
+    int n,
+    int cols,
+    int blocksPerRow,
+    cudaStream_t stream
+) {
+    if (!qData || !scalesF16 || !x || !xq || !xsc || !xq2 || !xsc2 || !y ||
+        rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0) {
+        return cudaErrorInvalidValue;
+    }
+    return launchBatchMMAHilo(Q4RawWeights{qData, scalesF16}, qData, x, xq, xsc, xq2, xsc2, y, rows, n, cols, blocksPerRow, stream);
 }
 
 } // extern "C"

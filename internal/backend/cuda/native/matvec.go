@@ -114,6 +114,106 @@ extern int mantleCudaQuantMatVecCachedBatch(
 	int cols,
 	int blocksPerRow,
 	cudaStream_t stream);
+extern int mantleCudaQuantMatVecK4Batch(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	const float* x,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream);
+extern int mantleCudaQuantMatVecK4BatchDp4a(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream);
+extern int mantleCudaQuantMatVecK4BatchMMA(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream);
+extern int mantleCudaQuantMatVecK4BatchMMAHilo(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	signed char* xq2,
+	float* xsc2,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream);
+extern int mantleCudaQuantMatVecQ4Batch(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	const float* x,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream);
+extern int mantleCudaQuantMatVecQ4BatchDp4a(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream);
+extern int mantleCudaQuantMatVecQ4BatchMMA(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream);
+extern int mantleCudaQuantMatVecQ4BatchMMAHilo(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	signed char* xq2,
+	float* xsc2,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream);
 extern int mantleCudaQuantMatVecK4F32(
 	const unsigned char* qData,
 	const unsigned short* superScalesF16,
@@ -281,6 +381,130 @@ static int mantleCudaQuantMatVecCachedBatchWrapper(
 	int blocksPerRow,
 	cudaStream_t stream) {
 	return mantleCudaQuantMatVecCachedBatch(q, scales, x, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantMatVecK4BatchWrapper(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	const float* x,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecK4Batch(qData, superScalesF16, subScales, x, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantMatVecK4BatchDp4aWrapper(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecK4BatchDp4a(qData, superScalesF16, subScales, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantMatVecK4BatchMMAWrapper(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecK4BatchMMA(qData, superScalesF16, subScales, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantMatVecK4BatchMMAHiloWrapper(
+	const unsigned char* qData,
+	const unsigned short* superScalesF16,
+	const unsigned char* subScales,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	signed char* xq2,
+	float* xsc2,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecK4BatchMMAHilo(qData, superScalesF16, subScales, x, xq, xsc, xq2, xsc2, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantMatVecQ4BatchWrapper(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	const float* x,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecQ4Batch(qData, scalesF16, x, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantMatVecQ4BatchDp4aWrapper(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecQ4BatchDp4a(qData, scalesF16, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantMatVecQ4BatchMMAWrapper(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecQ4BatchMMA(qData, scalesF16, x, xq, xsc, y, rows, n, cols, blocksPerRow, stream);
+}
+
+static int mantleCudaQuantMatVecQ4BatchMMAHiloWrapper(
+	const unsigned char* qData,
+	const unsigned short* scalesF16,
+	const float* x,
+	signed char* xq,
+	float* xsc,
+	signed char* xq2,
+	float* xsc2,
+	float* y,
+	int rows,
+	int n,
+	int cols,
+	int blocksPerRow,
+	cudaStream_t stream) {
+	return mantleCudaQuantMatVecQ4BatchMMAHilo(qData, scalesF16, x, xq, xsc, xq2, xsc2, y, rows, n, cols, blocksPerRow, stream);
 }
 
 static int mantleCudaQuantMatVecQ4F32Wrapper(
@@ -575,6 +799,202 @@ func QuantMatVecCachedBatch(q, scales, x, y DeviceBuffer, rows, n, cols, blocksP
 		(*C.schar)(q.ptr),
 		(*C.float)(scales.ptr),
 		(*C.float)(x.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecK4Batch computes y[n, rows] = x[n, cols] * W^T directly from a
+// raw K4 device payload (f32 activations).
+func QuantMatVecK4Batch(qData, superScalesF16, subScales, x, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if qData.ptr == nil || superScalesF16.ptr == nil || subScales.ptr == nil || x.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("k4 batch matvec buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("k4 batch matvec dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecK4BatchWrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(superScalesF16.ptr),
+		(*C.uchar)(subScales.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecK4BatchDp4a computes y[n, rows] = x[n, cols] * W^T directly from
+// a raw K4 device payload using single-term int8 activation quantization and dp4a.
+func QuantMatVecK4BatchDp4a(qData, superScalesF16, subScales, x, xq, xsc, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if qData.ptr == nil || superScalesF16.ptr == nil || subScales.ptr == nil || x.ptr == nil || xq.ptr == nil || xsc.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("k4 batch dp4a buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("k4 batch dp4a dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecK4BatchDp4aWrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(superScalesF16.ptr),
+		(*C.uchar)(subScales.ptr),
+		(*C.float)(x.ptr),
+		(*C.schar)(xq.ptr),
+		(*C.float)(xsc.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecK4BatchMMA computes y[n, rows] = x[n, cols] * W^T directly from
+// a raw K4 device payload using sm_80+ single-term int8 tensor cores.
+func QuantMatVecK4BatchMMA(qData, superScalesF16, subScales, x, xq, xsc, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if qData.ptr == nil || superScalesF16.ptr == nil || subScales.ptr == nil || x.ptr == nil || xq.ptr == nil || xsc.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("k4 batch mma buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("k4 batch mma dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecK4BatchMMAWrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(superScalesF16.ptr),
+		(*C.uchar)(subScales.ptr),
+		(*C.float)(x.ptr),
+		(*C.schar)(xq.ptr),
+		(*C.float)(xsc.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecK4BatchMMAHilo computes y[n, rows] = x[n, cols] * W^T directly
+// from a raw K4 device payload using sm_80+ two-term (14-bit) int8 tensor cores.
+func QuantMatVecK4BatchMMAHilo(qData, superScalesF16, subScales, x, xq, xsc, xq2, xsc2, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if qData.ptr == nil || superScalesF16.ptr == nil || subScales.ptr == nil || x.ptr == nil || xq.ptr == nil || xsc.ptr == nil || xq2.ptr == nil || xsc2.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("k4 batch mma hilo buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("k4 batch mma hilo dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecK4BatchMMAHiloWrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(superScalesF16.ptr),
+		(*C.uchar)(subScales.ptr),
+		(*C.float)(x.ptr),
+		(*C.schar)(xq.ptr),
+		(*C.float)(xsc.ptr),
+		(*C.schar)(xq2.ptr),
+		(*C.float)(xsc2.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecQ4Batch computes y[n, rows] = x[n, cols] * W^T directly from a
+// raw Q4 device payload (f32 activations).
+func QuantMatVecQ4Batch(qData, scalesF16, x, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if qData.ptr == nil || scalesF16.ptr == nil || x.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("q4 batch matvec buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("q4 batch matvec dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecQ4BatchWrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(scalesF16.ptr),
+		(*C.float)(x.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecQ4BatchDp4a computes y[n, rows] = x[n, cols] * W^T directly from
+// a raw Q4 device payload using single-term int8 activation quantization and dp4a.
+func QuantMatVecQ4BatchDp4a(qData, scalesF16, x, xq, xsc, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if qData.ptr == nil || scalesF16.ptr == nil || x.ptr == nil || xq.ptr == nil || xsc.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("q4 batch dp4a buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("q4 batch dp4a dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecQ4BatchDp4aWrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(scalesF16.ptr),
+		(*C.float)(x.ptr),
+		(*C.schar)(xq.ptr),
+		(*C.float)(xsc.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecQ4BatchMMA computes y[n, rows] = x[n, cols] * W^T directly from
+// a raw Q4 device payload using sm_80+ single-term int8 tensor cores.
+func QuantMatVecQ4BatchMMA(qData, scalesF16, x, xq, xsc, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if qData.ptr == nil || scalesF16.ptr == nil || x.ptr == nil || xq.ptr == nil || xsc.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("q4 batch mma buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("q4 batch mma dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecQ4BatchMMAWrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(scalesF16.ptr),
+		(*C.float)(x.ptr),
+		(*C.schar)(xq.ptr),
+		(*C.float)(xsc.ptr),
+		(*C.float)(y.ptr),
+		C.int(rows),
+		C.int(n),
+		C.int(cols),
+		C.int(blocksPerRow),
+		stream.ptr,
+	))
+}
+
+// QuantMatVecQ4BatchMMAHilo computes y[n, rows] = x[n, cols] * W^T directly
+// from a raw Q4 device payload using sm_80+ two-term (14-bit) int8 tensor cores.
+func QuantMatVecQ4BatchMMAHilo(qData, scalesF16, x, xq, xsc, xq2, xsc2, y DeviceBuffer, rows, n, cols, blocksPerRow int, stream Stream) error {
+	if qData.ptr == nil || scalesF16.ptr == nil || x.ptr == nil || xq.ptr == nil || xsc.ptr == nil || xq2.ptr == nil || xsc2.ptr == nil || y.ptr == nil {
+		return fmt.Errorf("q4 batch mma hilo buffer is nil")
+	}
+	if rows <= 0 || n <= 0 || cols <= 0 || blocksPerRow <= 0 {
+		return fmt.Errorf("q4 batch mma hilo dims must be > 0")
+	}
+	return cudaErr(C.mantleCudaQuantMatVecQ4BatchMMAHiloWrapper(
+		(*C.uchar)(qData.ptr),
+		(*C.ushort)(scalesF16.ptr),
+		(*C.float)(x.ptr),
+		(*C.schar)(xq.ptr),
+		(*C.float)(xsc.ptr),
+		(*C.schar)(xq2.ptr),
+		(*C.float)(xsc2.ptr),
 		(*C.float)(y.ptr),
 		C.int(rows),
 		C.int(n),

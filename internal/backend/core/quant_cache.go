@@ -2,6 +2,8 @@ package core
 
 import (
 	"errors"
+	"runtime"
+	"sync"
 
 	"github.com/samcharles93/mantle/pkg/mcf"
 )
@@ -76,10 +78,31 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 	if layout.Family == 'g' {
 		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
 		data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
-		for r := 0; r < m.R; r++ {
-			for b := 0; b < layout.BlocksPerRow; b++ {
-				blockIdx := r*layout.BlocksPerRow + b
-				scale := bf16ScaleAtRawLE(scalesRaw, r*layout.GroupsPerRow+b*32/layout.Group)
+		parallelQuantRange(m.R, totalBlocks, func(rs, re int) {
+			for r := rs; r < re; r++ {
+				for b := range layout.BlocksPerRow {
+					blockIdx := r*layout.BlocksPerRow + b
+					scale := bf16ScaleAtRawLE(scalesRaw, r*layout.GroupsPerRow+b*32/layout.Group)
+					scales[blockIdx] = scale
+					if scale == 0 {
+						continue
+					}
+					dataOff := blockIdx * layout.BlockDataBytes
+					off := blockIdx * 32
+					decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
+				}
+			}
+		})
+		return &QuantCache{Q: q, Scales: scales, BlocksPerRow: layout.BlocksPerRow}, nil
+	}
+
+	if layout.Family == 'q' {
+		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
+		data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
+
+		parallelQuantRange(totalBlocks, totalBlocks, func(bs, be int) {
+			for blockIdx := bs; blockIdx < be; blockIdx++ {
+				scale := ScaleAtRawLE(scalesRaw, blockIdx)
 				scales[blockIdx] = scale
 				if scale == 0 {
 					continue
@@ -88,24 +111,7 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 				off := blockIdx * 32
 				decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
 			}
-		}
-		return &QuantCache{Q: q, Scales: scales, BlocksPerRow: layout.BlocksPerRow}, nil
-	}
-
-	if layout.Family == 'q' {
-		scalesRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
-		data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
-
-		for blockIdx := range totalBlocks {
-			scale := ScaleAtRawLE(scalesRaw, blockIdx)
-			scales[blockIdx] = scale
-			if scale == 0 {
-				continue
-			}
-			dataOff := blockIdx * layout.BlockDataBytes
-			off := blockIdx * 32
-			decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
-		}
+		})
 		return &QuantCache{Q: q, Scales: scales, BlocksPerRow: layout.BlocksPerRow}, nil
 	}
 
@@ -113,26 +119,49 @@ func BuildQuantCache(m *Mat) (*QuantCache, error) {
 	subRaw := m.Raw[layout.SubScaleOff : layout.SubScaleOff+layout.SubScaleCount]
 	data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
 
-	for r := 0; r < m.R; r++ {
-		blockBase := r * layout.BlocksPerRow
-		superBase := r * layout.SuperBlocksPerRow
-		for b := 0; b < layout.BlocksPerRow; b++ {
-			blockIdx := blockBase + b
-			superIdx := superBase + (b / 8)
-			superScale := ScaleAtRawLE(superRaw, superIdx)
-			u6 := subRaw[blockIdx] & 0x3F
-			if superScale == 0 || u6 == 0 {
-				continue
+	parallelQuantRange(m.R, totalBlocks, func(rs, re int) {
+		for r := rs; r < re; r++ {
+			blockBase := r * layout.BlocksPerRow
+			superBase := r * layout.SuperBlocksPerRow
+			for b := range layout.BlocksPerRow {
+				blockIdx := blockBase + b
+				superIdx := superBase + (b / 8)
+				superScale := ScaleAtRawLE(superRaw, superIdx)
+				u6 := subRaw[blockIdx] & 0x3F
+				if superScale == 0 || u6 == 0 {
+					continue
+				}
+				scale := superScale * (float32(u6) / 32.0)
+				scales[blockIdx] = scale
+				dataOff := blockIdx * layout.BlockDataBytes
+				off := blockIdx * 32
+				decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
 			}
-			scale := superScale * (float32(u6) / 32.0)
-			scales[blockIdx] = scale
-			dataOff := blockIdx * layout.BlockDataBytes
-			off := blockIdx * 32
-			decodeBlock((*[32]int8)(q[off:off+32]), data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
 		}
-	}
+	})
 
 	return &QuantCache{Q: q, Scales: scales, BlocksPerRow: layout.BlocksPerRow}, nil
+}
+
+func parallelQuantRange(n, totalBlocks int, fn func(start, end int)) {
+	workers := runtime.GOMAXPROCS(0)
+	if workers <= 1 || totalBlocks < 4096 || n < 16 {
+		fn(0, n)
+		return
+	}
+	if workers > n {
+		workers = n
+	}
+	var wg sync.WaitGroup
+	for w := range workers {
+		s := w * n / workers
+		e := (w + 1) * n / workers
+		if s >= e {
+			continue
+		}
+		wg.Go(func() { fn(s, e) })
+	}
+	wg.Wait()
 }
 
 func QuantLayoutForMat(rows, cols int, dt mcf.TensorDType, rawLen int) (QuantLayout, error) {

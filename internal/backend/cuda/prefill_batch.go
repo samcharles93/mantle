@@ -546,6 +546,10 @@ type batchedPrefillPlan struct {
 	// so gemmW can route quantized weights to the batched quant kernel.
 	matByBuf map[uintptr]*instance.Mat
 
+	// newQWeights tracks quant weights uploaded during plan construction so a
+	// pre-flight failure (e.g. OOM) rolls them back before sequential fallback.
+	newQWeights []*instance.Mat
+
 	// tapRows is the number of hidden-tap rows this forward captures (0 when tap
 	// capture is disabled or the buffer is too small). tapDev holds the compact
 	// [taps, tapRows, hidden] device copy, laid out like core.HiddenTaps.Host.
@@ -640,6 +644,10 @@ func (gr *GraphRuntime) newBatchedPrefillPlanEmbeds(tokens []int, embeds [][]flo
 		p.softcap = m.Config.Config.AttnLogitSoftcap
 	}
 	fail := func(err error) (*batchedPrefillPlan, error) {
+		for _, w := range p.newQWeights {
+			o.releaseQuantMat(w)
+		}
+		p.newQWeights = nil
 		p.free()
 		return nil, err
 	}
@@ -1545,13 +1553,17 @@ func (p *batchedPrefillPlan) track(devW deviceMat, w *instance.Mat) {
 }
 
 // resolveWeight resolves a model weight for the batched plan: supported
-// quantized weights get their cached-int8 device copy (no dequant), dense
-// weights the usual deviceMat upload.
+// quantized weights reuse their existing device quant payload (cached-int8,
+// raw K4, or raw Q4 — no duplicate VRAM copy), dense weights use deviceMat.
 func (p *batchedPrefillPlan) resolveWeight(w *instance.Mat) (deviceMat, error) {
 	if batchedQuantSupported(p.o, w) {
-		qw, err := p.o.ensureBatchQuantMat(w)
+		_, existed := p.o.qweights[w]
+		qw, err := p.o.ensureQuantMat(w)
 		if err != nil {
 			return deviceMat{}, err
+		}
+		if !existed {
+			p.newQWeights = append(p.newQWeights, w)
 		}
 		devW := deviceMat{buf: qw.q, dtype: native.BlasF32, rows: w.R, cols: w.C}
 		p.track(devW, w)
@@ -1569,7 +1581,7 @@ func (p *batchedPrefillPlan) resolveWeight(w *instance.Mat) (deviceMat, error) {
 // when the source matrix is a supported quantized weight.
 func (p *batchedPrefillPlan) gemmW(devW deviceMat, xF32 native.DeviceBuffer, k int, dst native.DeviceBuffer, rows int) error {
 	if w, ok := p.matByBuf[uintptr(devW.buf.Ptr())]; ok && batchedQuantSupported(p.o, w) {
-		qw, err := p.o.ensureBatchQuantMat(w)
+		qw, err := p.o.ensureQuantMat(w)
 		if err != nil {
 			return fmt.Errorf("cuda batched prefill: quant weight upload: %w", err)
 		}
@@ -1584,7 +1596,7 @@ func (p *batchedPrefillPlan) gemmW(devW deviceMat, xF32 native.DeviceBuffer, k i
 // gemmLastW is the n=1 output-head variant of gemmW.
 func (p *batchedPrefillPlan) gemmLastW(devW deviceMat, xF32 native.DeviceBuffer, k int, dst native.DeviceBuffer, rows int) error {
 	if w, ok := p.matByBuf[uintptr(devW.buf.Ptr())]; ok && batchedQuantSupported(p.o, w) {
-		qw, err := p.o.ensureBatchQuantMat(w)
+		qw, err := p.o.ensureQuantMat(w)
 		if err != nil {
 			return fmt.Errorf("cuda batched prefill: quant output upload: %w", err)
 		}
@@ -1624,20 +1636,59 @@ var quantMMASupported = sync.OnceValue(native.QuantBatchMMASupported)
 // for comparison: faster still, but it moves the logits by 0.42 on LFM3-1.7B q8
 // and can flip a greedy token.
 func (p *batchedPrefillPlan) quantGemm(qw deviceQuantMat, x, dst native.DeviceBuffer, rows, n, k int) error {
-	if envEnabled(quantBatchedPrefillF32Env) {
-		return native.QuantMatVecCachedBatch(qw.q, qw.scales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
-	}
 	tiled := n >= quantMMAMinRows && k == qw.blocksPerRow*32 && quantMMASupported()
-	if envEnabled(quantBatchedPrefillInt8SingleEnv) {
-		if tiled && native.QuantBatchMMAAligned(qw.q, p.buf.xq) {
-			return native.QuantMatVecCachedBatchMMA(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+	f32Only := envEnabled(quantBatchedPrefillF32Env)
+	int8Single := envEnabled(quantBatchedPrefillInt8SingleEnv)
+
+	switch qw.format {
+	case quantMatFormatCachedInt8:
+		if f32Only {
+			return native.QuantMatVecCachedBatch(qw.q, qw.scales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
 		}
-		return native.QuantMatVecCachedBatchDp4a(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+		if int8Single {
+			if tiled && native.QuantBatchMMAAligned(qw.q, p.buf.xq) {
+				return native.QuantMatVecCachedBatchMMA(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+			}
+			return native.QuantMatVecCachedBatchDp4a(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+		}
+		if tiled && quantBatchHiloAligned(qw.q, p.buf.xq, p.buf.xq2) {
+			return native.QuantMatVecCachedBatchMMAHilo(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, p.buf.xq2, p.buf.xsc2, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+		}
+		return native.QuantMatVecCachedBatch(qw.q, qw.scales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+
+	case quantMatFormatK4Raw:
+		if f32Only {
+			return native.QuantMatVecK4Batch(qw.q, qw.superScales, qw.subScales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+		}
+		if int8Single {
+			if tiled && native.QuantBatchMMAAligned(qw.q, p.buf.xq) {
+				return native.QuantMatVecK4BatchMMA(qw.q, qw.superScales, qw.subScales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+			}
+			return native.QuantMatVecK4BatchDp4a(qw.q, qw.superScales, qw.subScales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+		}
+		if tiled && quantBatchHiloAligned(qw.q, p.buf.xq, p.buf.xq2) {
+			return native.QuantMatVecK4BatchMMAHilo(qw.q, qw.superScales, qw.subScales, x, p.buf.xq, p.buf.xsc, p.buf.xq2, p.buf.xsc2, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+		}
+		return native.QuantMatVecK4Batch(qw.q, qw.superScales, qw.subScales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+
+	case quantMatFormatQ4Raw:
+		if f32Only {
+			return native.QuantMatVecQ4Batch(qw.q, qw.scales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+		}
+		if int8Single {
+			if tiled && native.QuantBatchMMAAligned(qw.q, p.buf.xq) {
+				return native.QuantMatVecQ4BatchMMA(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+			}
+			return native.QuantMatVecQ4BatchDp4a(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+		}
+		if tiled && quantBatchHiloAligned(qw.q, p.buf.xq, p.buf.xq2) {
+			return native.QuantMatVecQ4BatchMMAHilo(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, p.buf.xq2, p.buf.xsc2, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+		}
+		return native.QuantMatVecQ4Batch(qw.q, qw.scales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
+
+	default:
+		return fmt.Errorf("unsupported quant batch format %d", qw.format)
 	}
-	if tiled && quantBatchHiloAligned(qw.q, p.buf.xq, p.buf.xq2) {
-		return native.QuantMatVecCachedBatchMMAHilo(qw.q, qw.scales, x, p.buf.xq, p.buf.xsc, p.buf.xq2, p.buf.xsc2, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
-	}
-	return native.QuantMatVecCachedBatch(qw.q, qw.scales, x, dst, rows, n, k, qw.blocksPerRow, p.o.stream)
 }
 
 // quantBatchHiloAligned reports whether the quant weight and both activation

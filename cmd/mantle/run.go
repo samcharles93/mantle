@@ -961,7 +961,9 @@ func runCmd() *cli.Command {
 				}
 
 				writer := cliux.NewStreamWriter(log, mode, rawOutput)
+				sawReasoning := false
 				reasoningOpen := false
+				reasoningEndedNL := false
 				assistantStarted := false
 				result, err := loadResult.Engine.Generate(ctx, &req, func(chunk inference.StreamChunk) {
 					switch chunk.Type {
@@ -969,12 +971,21 @@ func runCmd() *cli.Command {
 						if chunk.Delta == "" {
 							return
 						}
+						sawReasoning = true
+						delta := chunk.Delta
+						if !rawOutput && !reasoningOpen {
+							delta = strings.TrimLeft(delta, "\r\n")
+							if delta == "" {
+								return
+							}
+						}
 						if !reasoningOpen {
 							fmt.Print("\x1b[2m")
 							reasoningOpen = true
 						}
-						fmt.Print(chunk.Delta)
-					case inference.StreamChunkPromptEcho, inference.StreamChunkTextDelta:
+						fmt.Print(delta)
+						reasoningEndedNL = strings.HasSuffix(delta, "\n")
+					case inference.StreamChunkPromptEcho:
 						if chunk.Delta == "" {
 							return
 						}
@@ -982,11 +993,28 @@ func runCmd() *cli.Command {
 							fmt.Print("\x1b[0m")
 							reasoningOpen = false
 						}
-						if !assistantStarted && !rawOutput {
-							fmt.Print("\n")
-							assistantStarted = true
-						}
 						writer.Write(chunk.Delta)
+					case inference.StreamChunkTextDelta:
+						if chunk.Delta == "" {
+							return
+						}
+						delta := chunk.Delta
+						if !rawOutput && !assistantStarted && sawReasoning {
+							delta = strings.TrimLeft(delta, "\r\n")
+							if delta == "" {
+								return
+							}
+						}
+						if reasoningOpen {
+							if reasoningEndedNL {
+								fmt.Print("\x1b[0m\n")
+							} else {
+								fmt.Print("\x1b[0m\n\n")
+							}
+							reasoningOpen = false
+						}
+						assistantStarted = true
+						writer.Write(delta)
 					}
 				})
 				if reasoningOpen {
