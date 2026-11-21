@@ -345,7 +345,7 @@ func TestDotBlocksInt8Int16(t *testing.T) {
 	}
 	out := make([]int32, blocks)
 	dotBlocksInt8Int16(q, x, out, blocks)
-	for b := 0; b < blocks; b++ {
+	for b := range blocks {
 		want := dotInt8Int16SIMD(q[b*32:b*32+32], x[b*32:b*32+32], 32)
 		if out[b] != want {
 			t.Fatalf("block %d: dotBlocks = %d, per-block SIMD = %d", b, out[b], want)

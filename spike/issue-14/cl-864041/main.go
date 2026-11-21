@@ -18,9 +18,9 @@ func main() {
 	got := dotU8I8(&a, &b)
 	fmt.Println("lanes:", got)
 	var acc [8]int32
-	for lane := 0; lane < 8; lane++ {
+	for lane := range 8 {
 		var sum int32
-		for k := 0; k < 4; k++ {
+		for k := range 4 {
 			i := lane*4 + k
 			sum += int32(a[i]) * int32(int8(b[i]))
 		}

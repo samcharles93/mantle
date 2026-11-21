@@ -59,7 +59,7 @@ func rowToQuant(dst []float32, m *Mat, row int) error {
 			scale := bf16ScaleAtRawLE(scalesRaw, row*layout.GroupsPerRow+col/layout.Group)
 			dataOff := blockIdx * layout.BlockDataBytes
 			decodeBlock(&qbuf, data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
-			for i := 0; i < n; i++ {
+			for i := range n {
 				dst[col+i] = float32(qbuf[i]) * scale
 			}
 		}

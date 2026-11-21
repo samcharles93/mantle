@@ -218,10 +218,10 @@ func (e *Engine) Generate(ctx context.Context, req Request, stream StreamFunc) (
 		MinP:            &req.MinP,
 		RepeatPenalty:   &req.RepeatPenalty,
 		RepeatLastN:     &req.RepeatLastN,
-		NoTemplate:      boolPtr(false),
-		EchoPrompt:      boolPtr(false),
-		ReasoningFormat: strPtr("auto"),
-		ReasoningBudget: intPtr(-1),
+		NoTemplate:      new(false),
+		EchoPrompt:      new(false),
+		ReasoningFormat: new("auto"),
+		ReasoningBudget: new(-1),
 	}
 
 	infReq := inference.ResolveRequest(opts, e.def)
@@ -264,6 +264,11 @@ func (e *Engine) SectionBytes(section mcf.SectionType) []byte {
 
 // --- helpers ---
 
-func boolPtr(b bool) *bool    { return &b }
-func strPtr(s string) *string { return &s }
-func intPtr(i int) *int       { return &i }
+//go:fix inline
+func boolPtr(b bool) *bool { return new(b) }
+
+//go:fix inline
+func strPtr(s string) *string { return new(s) }
+
+//go:fix inline
+func intPtr(i int) *int { return new(i) }

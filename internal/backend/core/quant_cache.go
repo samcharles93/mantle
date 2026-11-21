@@ -397,7 +397,7 @@ func Align64Int(n int) (int, bool) {
 func buildUQCache(m *Mat, layout QuantLayout, totalBlocks, qLen int) (*QuantCache, error) {
 	scales := make([]float32, totalBlocks)
 	scaleRaw := m.Raw[layout.ScaleOff : layout.ScaleOff+layout.ScaleCount*2]
-	for b := 0; b < totalBlocks; b++ {
+	for b := range totalBlocks {
 		scales[b] = ScaleAtRawLE(scaleRaw, b)
 	}
 
@@ -410,7 +410,7 @@ func buildUQCache(m *Mat, layout QuantLayout, totalBlocks, qLen int) (*QuantCach
 	indices := make([]uint8, qLen)
 	data := m.Raw[layout.DataOff : layout.DataOff+layout.DataBytes]
 	var ibuf [32]uint8
-	for blockIdx := 0; blockIdx < totalBlocks; blockIdx++ {
+	for blockIdx := range totalBlocks {
 		dataOff := blockIdx * layout.BlockDataBytes
 		unpackBlockIndices(&ibuf, data[dataOff:dataOff+layout.BlockDataBytes], layout.Bits)
 		copy(indices[blockIdx*32:blockIdx*32+32], ibuf[:])
@@ -433,7 +433,7 @@ func unpackBlockIndices(dst *[32]uint8, src []byte, bits int) {
 	bitPos := 0
 	for i := range 32 {
 		var v uint8
-		for b := 0; b < bits; b++ {
+		for b := range bits {
 			if (src[bitPos>>3]>>uint(bitPos&7))&1 == 1 {
 				v |= 1 << uint(b)
 			}

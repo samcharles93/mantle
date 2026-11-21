@@ -47,11 +47,11 @@ func TestUQCodecRoundTrip(t *testing.T) {
 
 		// Reference decode: w = blockScale(f16) * codebook(f16)[idx].
 		dst := make([]float32, cols)
-		for r := uint64(0); r < rows; r++ {
+		for r := range rows {
 			if err := DecodeUQRow(payload, layout, int(r), int(cols), dst); err != nil {
 				t.Fatalf("%v: decode row %d: %v", dt, r, err)
 			}
-			for c := uint64(0); c < cols; c++ {
+			for c := range cols {
 				b := r*layout.BlocksPerRow + c/32
 				super := r*layout.SuperBlocksPerRow + (c/32)/8
 				idx := indices[r*cols+c]

@@ -104,9 +104,9 @@ func TestParseGGUFAndTranscodeQ8_0(t *testing.T) {
 	blocks := rows * (cols / 32)
 	payload := make([]byte, blocks*34)
 	scales := []float32{0.5, 0.25, 1, 2}
-	for b := uint64(0); b < blocks; b++ {
+	for b := range blocks {
 		binary.LittleEndian.PutUint16(payload[b*34:], f16bits(scales[b]))
-		for i := uint64(0); i < 32; i++ {
+		for i := range uint64(32) {
 			payload[b*34+2+i] = byte(int8(int64(b)*32 + int64(i) - 64)) // distinct values
 		}
 	}
@@ -162,7 +162,7 @@ func TestParseGGUFAndTranscodeQ8_0(t *testing.T) {
 		t.Fatalf("mcf payload size = %d want %d", len(mcfPayload), wantSize)
 	}
 	// Region 1: f16 scales at the start.
-	for b := uint64(0); b < blocks; b++ {
+	for b := range blocks {
 		gotScale := binary.LittleEndian.Uint16(mcfPayload[b*2:])
 		if gotScale != f16bits(scales[b]) {
 			t.Fatalf("block %d scale bits = %x want %x", b, gotScale, f16bits(scales[b]))
@@ -170,8 +170,8 @@ func TestParseGGUFAndTranscodeQ8_0(t *testing.T) {
 	}
 	// Region 2: data after align64(scales).
 	dataOff := (blocks*2 + 63) &^ 63
-	for b := uint64(0); b < blocks; b++ {
-		for i := uint64(0); i < 32; i++ {
+	for b := range blocks {
+		for i := range uint64(32) {
 			want := payload[b*34+2+i]
 			got := mcfPayload[dataOff+b*32+i]
 			if got != want {

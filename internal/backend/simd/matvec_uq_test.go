@@ -20,8 +20,8 @@ func buildUQ4Payload(rows, cols int) (payload []byte, codebook []float32, scales
 	superCount := rows * superBlocksPerRow
 
 	codebook = make([]float32, superCount*cbElems)
-	for s := 0; s < superCount; s++ {
-		for i := 0; i < cbElems; i++ {
+	for s := range superCount {
+		for i := range cbElems {
 			codebook[s*cbElems+i] = float32(i)*0.125 - 1 // [-1, 0.875]
 		}
 	}
@@ -44,7 +44,7 @@ func uqReference(rows, cols int, codebook, scales []float32, indices []uint8, ro
 	blocksPerRow := (cols + 31) / 32
 	superBlocksPerRow := (blocksPerRow + 7) / 8
 	out := make([]float32, cols)
-	for c := 0; c < cols; c++ {
+	for c := range cols {
 		b := row*blocksPerRow + c/32
 		s := row*superBlocksPerRow + (c/32)/8
 		scale := mcf.FP16ToFloat32(mcf.Float32ToFP16(scales[b]))
@@ -61,10 +61,10 @@ func TestRowToQuantUQ4(t *testing.T) {
 
 	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeUQ4, Raw: payload}
 	row := make([]float32, cols)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		w.RowTo(row, r)
 		want := uqReference(rows, cols, codebook, scales, indices, r)
-		for c := 0; c < cols; c++ {
+		for c := range cols {
 			if math.Abs(float64(row[c]-want[c])) > 1e-6 {
 				t.Fatalf("row %d col %d: got %v want %v", r, c, row[c], want[c])
 			}
@@ -84,10 +84,10 @@ func TestMatVecUQ4(t *testing.T) {
 	MatVec(dst, &w, x)
 
 	// Reference: dequantized rows dotted with x.
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		want := uqReference(rows, cols, codebook, scales, indices, r)
 		var sum float32
-		for c := 0; c < cols; c++ {
+		for c := range cols {
 			sum += want[c] * x[c]
 		}
 		if math.Abs(float64(dst[r]-sum)) > 1e-4*math.Max(1, math.Abs(float64(sum))) {

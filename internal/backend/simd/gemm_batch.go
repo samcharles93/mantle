@@ -197,9 +197,9 @@ func packBTileWT(dst []float32, w *Mat, k0, kMax, j0, jMax int) {
 	}
 
 	if w.Data != nil {
-		for jj := 0; jj < width; jj++ {
+		for jj := range width {
 			src := (j0+jj)*w.Stride + k0
-			for kk := 0; kk < kInner; kk++ {
+			for kk := range kInner {
 				dst[kk*width+jj] = w.Data[src+kk]
 			}
 		}
@@ -212,9 +212,9 @@ func packBTileWT(dst []float32, w *Mat, k0, kMax, j0, jMax int) {
 	} else if w.DType != mcf.DTypeBF16 {
 		panic("gemm: GemmParWT supports f32/f16/bf16 weights only")
 	}
-	for jj := 0; jj < width; jj++ {
+	for jj := range width {
 		src := ((j0+jj)*w.Stride + k0) * 2
-		for kk := 0; kk < kInner; kk++ {
+		for kk := range kInner {
 			off := src + kk*2
 			u := uint16(w.Raw[off]) | uint16(w.Raw[off+1])<<8
 			dst[kk*width+jj] = decode(u)

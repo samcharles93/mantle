@@ -3,6 +3,7 @@ package simd
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/samcharles93/mantle/internal/model"
@@ -79,8 +80,8 @@ func buildLayerLoadConfigs(cfg *model.HFConfig, spec *model.ArchSpec, blockCount
 }
 
 func lastIndexOfLayerType(layerTypes []string, want string) int {
-	for i := len(layerTypes) - 1; i >= 0; i-- {
-		if layerTypes[i] == want {
+	for i, layerType := range slices.Backward(layerTypes) {
+		if layerType == want {
 			return i
 		}
 	}

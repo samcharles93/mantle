@@ -314,8 +314,8 @@ func (v *VisionTower) Encode(pixelValues []float32, grids [][3]int) ([][][]float
 		idx := 0
 		for bh := 0; bh < gh/m; bh++ {
 			for bw := 0; bw < gw/m; bw++ {
-				for mh := 0; mh < m; mh++ {
-					for mw := 0; mw < m; mw++ {
+				for mh := range m {
+					for mw := range m {
 						hpos[idx] = bh*m + mh
 						wpos[idx] = bw*m + mw
 						idx++
@@ -462,10 +462,10 @@ func (v *VisionTower) attnLayer(l *visionLayer, h []float32, cosT, sinT []float3
 		scores = scores[:length*length]
 		for hi := range heads {
 			kvh := hi / groups
-			for qi := 0; qi < length; qi++ {
+			for qi := range length {
 				qBase := (f.start+qi)*heads*headDim + hi*headDim
 				row := scores[qi*length : (qi+1)*length]
-				for ki := 0; ki < length; ki++ {
+				for ki := range length {
 					kBase := (f.start+ki)*kvHeads*headDim + kvh*headDim
 					var dot float32
 					for d := range headDim {
@@ -475,7 +475,7 @@ func (v *VisionTower) attnLayer(l *visionLayer, h []float32, cosT, sinT []float3
 				}
 				core.Softmax(row)
 				outBase := (f.start+qi)*heads*headDim + hi*headDim
-				for ki := 0; ki < length; ki++ {
+				for ki := range length {
 					vBase := (f.start+ki)*kvHeads*headDim + kvh*headDim
 					w := row[ki]
 					for d := range headDim {
@@ -536,15 +536,15 @@ func (v *VisionTower) convLayer(l *visionLayer, h []float32, frames []visionFram
 		// depthwise conv2d with zero padding
 		for c := range C {
 			kc := l.ConvKernel[c*kSize*kSize:]
-			for y := 0; y < H; y++ {
-				for x := 0; x < W; x++ {
+			for y := range H {
+				for x := range W {
 					var acc float32
-					for ky := 0; ky < kSize; ky++ {
+					for ky := range kSize {
 						iy := y + ky - pad
 						if iy < 0 || iy >= H {
 							continue
 						}
-						for kx := 0; kx < kSize; kx++ {
+						for kx := range kSize {
 							ix := x + kx - pad
 							if ix < 0 || ix >= W {
 								continue
@@ -618,7 +618,7 @@ func applyAxialRoPE(x []float32, cosT, sinT []float32, n, heads, headDim int) {
 		sin := sinT[p*headDim : (p+1)*headDim]
 		for hi := range heads {
 			base := p*heads*headDim + hi*headDim
-			for d := 0; d < half; d++ {
+			for d := range half {
 				x1 := x[base+d]
 				x2 := x[base+half+d]
 				x[base+d] = x1*cos[d] - x2*sin[d]

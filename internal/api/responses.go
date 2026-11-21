@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -138,8 +139,8 @@ func (s *Server) resolvePreviousInputItems(responseID string) ([]ResponseItem, e
 	}
 
 	merged := make([]ResponseItem, 0, len(chain)*2)
-	for i := len(chain) - 1; i >= 0; i-- {
-		rec := chain[i]
+	for _, rec := range slices.Backward(chain) {
+
 		merged = append(merged, rec.InputItems...)
 		merged = append(merged, rec.Response.Output...)
 	}

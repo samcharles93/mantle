@@ -3,6 +3,7 @@ package mcf
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 )
 
@@ -276,7 +277,7 @@ func EncodeUQTensor(src []float32, rows, cols, bits int, codebooks [][]float32) 
 		copy(cb[sb*uint64(levels):(sb+1)*uint64(levels)], sortedLevels)
 	}
 
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		blockBase := uint64(r) * layout.BlocksPerRow
 		superBase := uint64(r) * layout.SuperBlocksPerRow
 		for b := uint64(0); b < layout.BlocksPerRow; b++ {
@@ -345,7 +346,7 @@ func deriveUQCodebook(vals []float32, levels int) []float32 {
 	}
 	sums := make([]float64, levels)
 	counts := make([]int, levels)
-	for iter := 0; iter < 12; iter++ {
+	for range 12 {
 		for i := range sums {
 			sums[i] = 0
 			counts[i] = 0
@@ -374,7 +375,7 @@ func absF32(v float32) float32 {
 }
 
 func sortF32(v []float32) {
-	sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })
+	slices.Sort(v)
 }
 
 // nearestLevel returns the index of the sorted level nearest to t.

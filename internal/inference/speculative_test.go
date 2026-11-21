@@ -208,7 +208,7 @@ func TestSpeculativeStopsOnStopTokenMidBlock(t *testing.T) {
 	// The greedy chain from prompt [1,2]: compute the token at generated
 	// position 3 and use it as the stop token.
 	tok := specNext(16, 2)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		tok = specNext(16, tok)
 	}
 	stop := []int{tok}

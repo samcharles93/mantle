@@ -199,13 +199,11 @@ func TestCachedEngineProviderLoadsOncePerModel(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := provider.WithEngine(context.Background(), "/models/a.mcf", func(inference.Engine, inference.GenDefaults) error { return nil }); err != nil {
 				t.Errorf("WithEngine: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := loads.Load(); got != 1 {

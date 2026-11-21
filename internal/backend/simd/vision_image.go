@@ -134,16 +134,12 @@ func computeResizeAxis(I, O int) resizeAxisCoeffs {
 	xmin := make([]int, O)
 	xsize := make([]int, O)
 	wtMax := 0.0
-	for o := 0; o < O; o++ {
+	for o := range O {
 		center := r * (float64(o) + 0.5)
-		xm := int64(center - support + 0.5) // C++ int64 cast truncates toward zero
-		if xm < 0 {
-			xm = 0
-		}
-		xs := int64(center + support + 0.5)
-		if xs > int64(I) {
-			xs = int64(I)
-		}
+		xm := max(
+			// C++ int64 cast truncates toward zero
+			int64(center-support+0.5), 0)
+		xs := min(int64(center+support+0.5), int64(I))
 		xs -= xm
 		if xs < 0 {
 			xs = 0
@@ -213,11 +209,11 @@ func resizeAxisUint8(x []uint8, O int, c resizeAxisCoeffs) []uint8 {
 	out := make([]uint8, O)
 	half := int32(1) << (c.p - 1)
 	maxInterp := len(c.q) / O
-	for o := 0; o < O; o++ {
+	for o := range O {
 		acc := half
 		base := o * maxInterp
 		xm := c.xmin[o]
-		for j := 0; j < maxInterp; j++ {
+		for j := range maxInterp {
 			q := c.q[base+j]
 			if q == 0 {
 				continue
@@ -228,13 +224,7 @@ func resizeAxisUint8(x []uint8, O int, c resizeAxisCoeffs) []uint8 {
 			}
 			acc += int32(x[i]) * q
 		}
-		v := acc >> c.p
-		if v < 0 {
-			v = 0
-		}
-		if v > 255 {
-			v = 255
-		}
+		v := min(max(acc>>c.p, 0), 255)
 		out[o] = uint8(v)
 	}
 	return out
@@ -249,8 +239,8 @@ func resizeBicubicUInt8(pix []uint8, h, w, H, W int) []uint8 {
 	// horizontal pass: (C, h, w) -> (C, h, W)
 	cw := computeResizeAxis(w, W)
 	mid := make([]uint8, C*h*W)
-	for c := 0; c < C; c++ {
-		for y := 0; y < h; y++ {
+	for c := range C {
+		for y := range h {
 			row := pix[c*h*w+y*w : c*h*w+(y+1)*w]
 			out := resizeAxisUint8(row, W, cw)
 			copy(mid[c*h*W+y*W:c*h*W+(y+1)*W], out)
@@ -259,14 +249,14 @@ func resizeBicubicUInt8(pix []uint8, h, w, H, W int) []uint8 {
 	// vertical pass: (C, h, W) -> (C, H, W)
 	ch := computeResizeAxis(h, H)
 	out := make([]uint8, C*H*W)
-	for c := 0; c < C; c++ {
-		for x := 0; x < W; x++ {
+	for c := range C {
+		for x := range W {
 			col := make([]uint8, h)
-			for y := 0; y < h; y++ {
+			for y := range h {
 				col[y] = mid[c*h*W+y*W+x]
 			}
 			res := resizeAxisUint8(col, H, ch)
-			for y := 0; y < H; y++ {
+			for y := range H {
 				out[c*H*W+y*W+x] = res[y]
 			}
 		}
@@ -307,7 +297,7 @@ func writePatch(dst []float32, frame func(t int) []uint8, h, w int, cfg *core.Vi
 	px := (bw*merge + mw) * patch
 	mean, std, rescale := cfg.ImageMean, cfg.ImageStd, cfg.RescaleFactor
 	off := 0
-	for c := 0; c < C; c++ {
+	for c := range C {
 		m, s := 0.5, 0.5
 		if len(mean) > c {
 			m = mean[c]
@@ -317,8 +307,8 @@ func writePatch(dst []float32, frame func(t int) []uint8, h, w int, cfg *core.Vi
 		}
 		for t := 0; t < cfg.TemporalPatch; t++ {
 			pix := frame(t)
-			for pi := 0; pi < patch; pi++ {
-				for pj := 0; pj < patch; pj++ {
+			for pi := range patch {
+				for pj := range patch {
 					v := float64(pix[c*h*w+(py+pi)*w+(px+pj)]) * rescale
 					dst[off] = float32((v - m) / s)
 					off++
@@ -368,7 +358,7 @@ func ProcessVideoFrames(frames [][]byte, cfg *core.VisionConfig) (pixelValues []
 	}
 	// pad odd frame count by repeating the last frame
 	if pad := -len(pixs) % temporal; pad != 0 {
-		for i := 0; i < pad; i++ {
+		for range pad {
 			pixs = append(pixs, pixs[len(pixs)-1])
 		}
 	}
@@ -380,7 +370,7 @@ func ProcessVideoFrames(frames [][]byte, cfg *core.VisionConfig) (pixelValues []
 	grid = [3]int{gridT, gh, gw}
 	patchDim := cfg.PatchDim()
 	out := make([]float32, gridT*gh*gw*patchDim)
-	for s := 0; s < gridT; s++ {
+	for s := range gridT {
 		for bi := 0; bi < (gh/merge)*(gw/merge); bi++ {
 			for wi := 0; wi < merge*merge; wi++ {
 				row := (s*gh*gw + bi*merge*merge + wi) * patchDim

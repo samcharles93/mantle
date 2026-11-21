@@ -207,13 +207,13 @@ func matVecRangeQuantCached(dst []float32, w *Mat, x []float32, rs, re int, qx *
 // exactly blocks*32 elements and out exactly blocks elements.
 func dotBlocksInt8Int16(q []int8, x []int16, out []int32, blocks int) {
 	if !cpu.HasAVX2 {
-		for b := 0; b < blocks; b++ {
+		for b := range blocks {
 			base := b * 32
 			out[b] = dotInt8Int16Scalar(q[base:base+32], x[base:base+32], 32)
 		}
 		return
 	}
-	for b := 0; b < blocks; b++ {
+	for b := range blocks {
 		base := b * 32
 		vq0 := archsimd.LoadInt8x16(q[base:]).ExtendToInt16()
 		vq1 := archsimd.LoadInt8x16(q[base+16:]).ExtendToInt16()

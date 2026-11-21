@@ -235,7 +235,7 @@ func (g *ggufReader) skipValue(vt uint32) error {
 			return err
 		}
 		if et == ggufValString {
-			for i := uint64(0); i < n; i++ {
+			for range n {
 				if _, err := g.str(); err != nil {
 					return err
 				}
@@ -336,7 +336,7 @@ func ParseGGUF(r io.ReaderAt, size int64) (*GGUFFile, error) {
 	}
 	meta := make(map[string]any, nKV)
 	alignment := uint64(32)
-	for i := uint64(0); i < nKV; i++ {
+	for range nKV {
 		key, err := g.str()
 		if err != nil {
 			return nil, err
@@ -379,7 +379,7 @@ func ParseGGUF(r io.ReaderAt, size int64) (*GGUFFile, error) {
 		return nil, fmt.Errorf("%w: tensor count out of bounds", ErrGGUF)
 	}
 	tensors := make([]GGUFTensor, 0, nTensors)
-	for i := uint64(0); i < nTensors; i++ {
+	for range nTensors {
 		name, err := g.str()
 		if err != nil {
 			return nil, err
@@ -535,7 +535,7 @@ func TranscodeGGUFQuant(t GGUFTensor, payload []byte) (TensorDType, []uint64, []
 	if !ok {
 		return 0, nil, nil, fmt.Errorf("%w: overflow", ErrGGUF)
 	}
-	for b := uint64(0); b < totalBlocks; b++ {
+	for b := range totalBlocks {
 		src := b * q8BlockBytes
 		copy(out[b*2:], payload[src:src+2])                                   // f16 scale, unchanged
 		copy(out[dataOff+b*QuantBlockSize:], payload[src+2:src+q8BlockBytes]) // int8 data

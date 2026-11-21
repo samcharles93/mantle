@@ -22,12 +22,12 @@ func TestSplitFusedGateUp(t *testing.T) {
 		f32.Data[i] = float32(i)
 	}
 	gate, up := splitFusedGateUp(&f32)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		g := make([]float32, cols)
 		u := make([]float32, cols)
 		gate.RowTo(g, i)
 		up.RowTo(u, i)
-		for c := 0; c < cols; c++ {
+		for c := range cols {
 			if g[c] != float32((i*cols + c)) {
 				t.Fatalf("gate row %d col %d = %v, want %v", i, c, g[c], float32(i*cols+c))
 			}
