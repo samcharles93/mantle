@@ -537,6 +537,75 @@ func matVecRangeBF16Scalar(dst []float32, w *Mat, x []float32, rs, re int) {
 	}
 }
 
+// matVecBF16x8 sets out[k] to the product of x with the bf16 row starting at
+// raw[k*stride], for the eight rows k = 0..7; len(x) must be a multiple of 8.
+// Each row keeps one accumulator, fed in element order, and sumLanes8 adds its
+// lanes in the order the scalar horizontal sum uses, so every result has the
+// bits the one-, two- and four-row paths of matVecRangeBF16SIMD give the same
+// row. x is loaded once per chunk for all eight rows.
+func matVecBF16x8(out *[8]float32, raw []uint16, stride int, x []float32) {
+	c := len(x)
+	r0 := raw[0*stride : 0*stride+c]
+	r1 := raw[1*stride : 1*stride+c]
+	r2 := raw[2*stride : 2*stride+c]
+	r3 := raw[3*stride : 3*stride+c]
+	r4 := raw[4*stride : 4*stride+c]
+	r5 := raw[5*stride : 5*stride+c]
+	r6 := raw[6*stride : 6*stride+c]
+	r7 := raw[7*stride : 7*stride+c]
+	zero := archsimd.LoadFloat32x8Array(&zeroFloat32s)
+	a0, a1, a2, a3 := zero, zero, zero, zero
+	a4, a5, a6, a7 := zero, zero, zero, zero
+	widen := func(row []uint16, j int) archsimd.Float32x8 {
+		return archsimd.LoadUint16x8Array((*[8]uint16)(row[j : j+8])).ExtendToUint32().ShiftAllLeft(16).BitsToFloat32()
+	}
+	for j := 0; j+8 <= c; j += 8 {
+		vx := archsimd.LoadFloat32x8Array((*[8]float32)(x[j : j+8]))
+		a0 = widen(r0, j).MulAdd(vx, a0)
+		a1 = widen(r1, j).MulAdd(vx, a1)
+		a2 = widen(r2, j).MulAdd(vx, a2)
+		a3 = widen(r3, j).MulAdd(vx, a3)
+		a4 = widen(r4, j).MulAdd(vx, a4)
+		a5 = widen(r5, j).MulAdd(vx, a5)
+		a6 = widen(r6, j).MulAdd(vx, a6)
+		a7 = widen(r7, j).MulAdd(vx, a7)
+	}
+	// The scalar paths start their sums at 0 and add the horizontal sum.
+	zero.Add(sumLanes8(a0, a1, a2, a3, a4, a5, a6, a7)).StoreArray(out)
+}
+
+// sumLanes8 returns the vector whose lane k is v_k's eight lanes added left to
+// right, ((v_k[0]+v_k[1])+v_k[2])+...+v_k[7], as an 8x8 transpose followed by
+// seven vector adds.
+func sumLanes8(v0, v1, v2, v3, v4, v5, v6, v7 archsimd.Float32x8) archsimd.Float32x8 {
+	u0, u1, u2, u3 := v0.ToBits(), v1.ToBits(), v2.ToBits(), v3.ToBits()
+	u4, u5, u6, u7 := v4.ToBits(), v5.ToBits(), v6.ToBits(), v7.ToBits()
+	a0, a1 := u0.InterleaveLoGrouped(u1), u0.InterleaveHiGrouped(u1)
+	a2, a3 := u2.InterleaveLoGrouped(u3), u2.InterleaveHiGrouped(u3)
+	a4, a5 := u4.InterleaveLoGrouped(u5), u4.InterleaveHiGrouped(u5)
+	a6, a7 := u6.InterleaveLoGrouped(u7), u6.InterleaveHiGrouped(u7)
+	lo64 := func(x, y archsimd.Uint32x8) archsimd.Uint32x8 {
+		return x.ReshapeToUint64s().InterleaveLoGrouped(y.ReshapeToUint64s()).ReshapeToUint32s()
+	}
+	hi64 := func(x, y archsimd.Uint32x8) archsimd.Uint32x8 {
+		return x.ReshapeToUint64s().InterleaveHiGrouped(y.ReshapeToUint64s()).ReshapeToUint32s()
+	}
+	// b_k holds element k (low half) and k+4 (high half) of v0..v3; b_{k+4}
+	// the same for v4..v7.
+	b0, b1 := lo64(a0, a2), hi64(a0, a2)
+	b2, b3 := lo64(a1, a3), hi64(a1, a3)
+	b4, b5 := lo64(a4, a6), hi64(a4, a6)
+	b6, b7 := lo64(a5, a7), hi64(a5, a7)
+	s := b0.SetHi(b4.GetLo()).BitsToFloat32()
+	s = s.Add(b1.SetHi(b5.GetLo()).BitsToFloat32())
+	s = s.Add(b2.SetHi(b6.GetLo()).BitsToFloat32())
+	s = s.Add(b3.SetHi(b7.GetLo()).BitsToFloat32())
+	s = s.Add(b4.SetLo(b0.GetHi()).BitsToFloat32())
+	s = s.Add(b5.SetLo(b1.GetHi()).BitsToFloat32())
+	s = s.Add(b6.SetLo(b2.GetHi()).BitsToFloat32())
+	return s.Add(b7.SetLo(b3.GetHi()).BitsToFloat32())
+}
+
 // matVecRangeBF16SIMD computes matvec for BF16 using AVX2 SIMD.
 // Uses a single accumulator to minimize register pressure.
 func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
@@ -544,6 +613,14 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 	if u16raw, ok := instance.RawUint16LE(raw); ok {
 		c := w.C
 		i := rs
+
+		// Eight rows at a time while whole 8-element chunks cover the row.
+		if c%8 == 0 && re-rs >= 8 {
+			for ; i+8 <= re; i += 8 {
+				matVecBF16x8((*[8]float32)(dst[i:i+8]), u16raw[i*w.Stride:], w.Stride, x[:c])
+			}
+			endAVX()
+		}
 
 		// Process 4 rows at once for better ILP and latency hiding
 		for ; i+3 < re; i += 4 {
@@ -639,6 +716,7 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 			acc1.StoreArray(&tmp1)
 			acc2.StoreArray(&tmp2)
 			acc3.StoreArray(&tmp3)
+			endAVX()
 			var sum0 float32
 			var sum1 float32
 			var sum2 float32
@@ -713,6 +791,7 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 			var tmp1 [8]float32
 			acc0.StoreArray(&tmp0)
 			acc1.StoreArray(&tmp1)
+			endAVX()
 			var sum0 float32
 			var sum1 float32
 			sum0 += tmp0[0] + tmp0[1] + tmp0[2] + tmp0[3] + tmp0[4] + tmp0[5] + tmp0[6] + tmp0[7]
@@ -744,6 +823,7 @@ func matVecRangeBF16SIMD(dst []float32, w *Mat, x []float32, rs, re int) {
 
 			var tmp [8]float32
 			acc.StoreArray(&tmp)
+			endAVX()
 			var sum float32
 			sum += tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 

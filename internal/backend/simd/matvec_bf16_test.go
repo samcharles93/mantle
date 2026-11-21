@@ -2,6 +2,7 @@ package simd
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"math/rand"
 	"testing"
@@ -52,6 +53,46 @@ func TestMatVecBF16MatchesScalar(t *testing.T) {
 	}
 }
 
+// TestMatVecBF16GroupsMatchSingleRows pins the eight-row kernel to the
+// one-row path bit for bit, over ranges that leave four-, two- and one-row
+// tails and widths that do or do not split into 8-element chunks.
+func TestMatVecBF16GroupsMatchSingleRows(t *testing.T) {
+	if !cpu.HasAVX2 {
+		t.Skip("needs AVX2")
+	}
+	rng := rand.New(rand.NewSource(3))
+	for _, tc := range []struct{ rows, cols, rs, re int }{
+		{67, 2048, 0, 67}, {40, 2048, 3, 37}, {16, 7680, 0, 16}, {23, 1000, 0, 23}, {13, 12, 0, 13},
+	} {
+		t.Run(fmt.Sprintf("%dx%d/%d-%d", tc.rows, tc.cols, tc.rs, tc.re), func(t *testing.T) {
+			raw := makeBF16MatrixRaw(tc.rows, tc.cols, rng)
+			// Rows of zeros and of negative products exercise signed zeros.
+			for i := range tc.cols * 2 {
+				raw[5*tc.cols*2+i] = 0
+			}
+			mat, err := NewMatFromRaw(tc.rows, tc.cols, mcf.DTypeBF16, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			x := make([]float32, tc.cols)
+			for i := range x {
+				x[i] = (rng.Float32() - 0.5) * 2
+			}
+			got := make([]float32, tc.rows)
+			want := make([]float32, tc.rows)
+			matVecRangeBF16SIMD(got, &mat, x, tc.rs, tc.re)
+			for r := tc.rs; r < tc.re; r++ {
+				matVecRangeBF16SIMD(want, &mat, x, r, r+1)
+			}
+			for r := tc.rs; r < tc.re; r++ {
+				if math.Float32bits(got[r]) != math.Float32bits(want[r]) {
+					t.Fatalf("row %d = %g (%#x), single-row path %g (%#x)", r, got[r], math.Float32bits(got[r]), want[r], math.Float32bits(want[r]))
+				}
+			}
+		})
+	}
+}
+
 func makeBF16MatrixRaw(rows, cols int, rng *rand.Rand) []byte {
 	raw := make([]byte, rows*cols*2)
 	for i := 0; i < rows*cols; i++ {
@@ -72,4 +113,44 @@ func abs32(v float32) float32 {
 		return -v
 	}
 	return v
+}
+
+// BenchmarkMatVecBF16Shapes measures the bf16 decode MatVec at the LFM3-1.7B
+// projection shapes: pool is the public entry point at the worker pool's
+// width, core is the kernel over every row on the calling goroutine (pin it
+// with taskset to pick a core type).
+func BenchmarkMatVecBF16Shapes(b *testing.B) {
+	if !cpu.HasAVX2 {
+		b.Skip("needs AVX2")
+	}
+	rng := rand.New(rand.NewSource(1))
+	for _, shape := range lfm3QuantShapes {
+		rows, cols := shape.rows, shape.cols
+		mat, err := NewMatFromRaw(rows, cols, mcf.DTypeBF16, makeBF16MatrixRaw(rows, cols, rng))
+		if err != nil {
+			b.Fatal(err)
+		}
+		x := make([]float32, cols)
+		for i := range x {
+			x[i] = rng.Float32() - 0.5
+		}
+		dst := make([]float32, rows)
+		wBytes := rows * cols * 2
+		b.Run(shape.name+"/pool", func(b *testing.B) {
+			iters := 0
+			for b.Loop() {
+				MatVec(dst, &mat, x)
+				iters++
+			}
+			reportGEMMRates(b, iters, rows, cols, 1, wBytes, b.Elapsed())
+		})
+		b.Run(shape.name+"/core", func(b *testing.B) {
+			iters := 0
+			for b.Loop() {
+				matVecRangeBF16(dst, &mat, x, 0, rows)
+				iters++
+			}
+			reportGEMMRates(b, iters, rows, cols, 1, wBytes, b.Elapsed())
+		})
+	}
 }
