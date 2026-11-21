@@ -564,15 +564,30 @@ func (p *batchPrefillChunk) gemmRows(dst, src []float32, w *Mat) {
 	projectRows(dst, w, src, p.n)
 }
 
+// gemmRowsQuant is gemmRows reusing pre-quantised activation rows qr when w
+// takes MatMatQuant, avoiding redundant quantisation across projections that
+// share the same input block.
+func (p *batchPrefillChunk) gemmRowsQuant(dst, src []float32, w *Mat, qr *quantRows) {
+	projectRowsWithQuant(dst, w, src, p.n, qr)
+}
+
 // projectRows computes dst[n, w.R] = src[n, w.C] * wᵀ for contiguous row
 // blocks, picking the small-batch BF16 kernel, the cached int8 quant kernel,
 // the packed GEMM, or one matvec per row for weights none of those take.
 func projectRows(dst []float32, w *Mat, src []float32, n int) {
+	projectRowsWithQuant(dst, w, src, n, nil)
+}
+
+func projectRowsWithQuant(dst []float32, w *Mat, src []float32, n int, qr *quantRows) {
 	switch {
 	case useSmallBatchBF16(w, n):
 		MatMatBF16(dst, w, src, n)
 	case useBatchQuant(w, n):
-		MatMatQuant(dst, w, src, n)
+		if qr != nil {
+			matMatQuantWithRows(dst, w, qr, n)
+		} else {
+			MatMatQuant(dst, w, src, n)
+		}
 	case n > 1 && supportedGemmWeight(w):
 		rows := Mat{R: n, C: w.R, Stride: w.R, DType: mcf.DTypeF32, Data: dst[:n*w.R]}
 		block := Mat{R: n, C: w.C, Stride: w.C, DType: mcf.DTypeF32, Data: src[:n*w.C]}

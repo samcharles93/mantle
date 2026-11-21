@@ -44,9 +44,12 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 	qDim := p.qDim
 	kvStride := p.kvStride
 
-	p.gemmRows(p.q, p.norm, layer.Wq)
-	p.gemmRows(p.k, p.norm, layer.Wk)
-	p.gemmRows(p.v, p.norm, layer.Wv)
+	normQR := prepareBatchQuantRows(p.norm, n, p.hidden, layer.Wq, layer.Wk, layer.Wv, layer.AttnGate)
+	defer putQuantRows(normQR)
+
+	p.gemmRowsQuant(p.q, p.norm, layer.Wq, normQR)
+	p.gemmRowsQuant(p.k, p.norm, layer.Wk, normQR)
+	p.gemmRowsQuant(p.v, p.norm, layer.Wv, normQR)
 
 	for r := range n {
 		if len(layer.AttnQNorm) > 0 {
@@ -160,7 +163,7 @@ func (p *batchPrefillChunk) attentionBlock(layer *Layer) {
 	// gate is per element, matching applyAttnOutputGate in attn.go.
 	if layer.AttnGate != nil {
 		gateR := layer.AttnGate.R
-		p.gemmRows(p.attnGate, p.norm, layer.AttnGate)
+		p.gemmRowsQuant(p.attnGate, p.norm, layer.AttnGate, normQR)
 		if gateR == nHead && nHead != qDim {
 			for r := range n {
 				row := p.attn[r*qDim : (r+1)*qDim]
@@ -228,8 +231,10 @@ func addScaled(dst, src []float32, scale float32) {
 // in p.proj.
 func (p *batchPrefillChunk) ffnBlock(layer *Layer) {
 	ffn := p.ffn
-	p.gemmRows(p.up, p.norm, layer.FfnUp)
-	p.gemmRows(p.gate, p.norm, layer.FfnGate)
+	normQR := prepareBatchQuantRows(p.norm, p.n, p.hidden, layer.FfnUp, layer.FfnGate)
+	p.gemmRowsQuant(p.up, p.norm, layer.FfnUp, normQR)
+	p.gemmRowsQuant(p.gate, p.norm, layer.FfnGate, normQR)
+	putQuantRows(normQR)
 	for r := range p.n {
 		activateFFNRow(
 			p.act[r*ffn:(r+1)*ffn],

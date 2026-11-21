@@ -235,8 +235,10 @@ func (d *DSparkDraft) injectLayer(layer *Layer, fused []float32, n, pos int) {
 	keys, vals := d.keys[:n*stride], d.vals[:n*stride]
 	applyRoPE, invFreq, attnScale := batchLayerRoPE(m, layer)
 
-	projectRows(keys, layer.Wk, fused, n)
-	projectRows(vals, layer.Wv, fused, n)
+	qr := prepareBatchQuantRows(fused, n, layer.Wk.C, layer.Wk, layer.Wv)
+	projectRowsWithQuant(keys, layer.Wk, fused, n, qr)
+	projectRowsWithQuant(vals, layer.Wv, fused, n, qr)
+	putQuantRows(qr)
 	cache := &layer.AttnCache
 	for r := range n {
 		k := keys[r*stride : (r+1)*stride]
