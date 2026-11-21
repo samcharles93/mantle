@@ -99,7 +99,7 @@ func TestBatchedPrefillRealHybridMCF(t *testing.T) {
 	// prefill must serve the per-token decode path exactly as the sequential
 	// prefill's host state does. Compare 8 greedy tokens.
 	tokG, tokW := amG, amW
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		lg, err := batched.ForwardToken(tokG)
 		if err != nil {
 			t.Fatal(err)

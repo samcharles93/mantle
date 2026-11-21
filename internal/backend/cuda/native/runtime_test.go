@@ -302,7 +302,7 @@ func TestSoftmaxRowsF32(t *testing.T) {
 		hostSlice[i] = float32((i%cols)-3) * 0.5
 		ref[i] = hostSlice[i]
 	}
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		softmaxRef(ref[r*cols : (r+1)*cols])
 	}
 
@@ -359,7 +359,7 @@ func TestQuantMatVecQ4F32(t *testing.T) {
 	totalBlocks := rows * blocksPerRow
 	qData := make([]byte, totalBlocks*16)
 	qDecoded := make([]int8, totalBlocks*32)
-	for b := 0; b < totalBlocks; b++ {
+	for b := range totalBlocks {
 		var block [32]int8
 		for i := range 32 {
 			v := int8((i+b)%15 - 7)
@@ -452,7 +452,7 @@ func TestQuantMatVecK4F32(t *testing.T) {
 	totalSuper := rows * superBlocksPerRow
 	qData := make([]byte, totalBlocks*16)
 	qDecoded := make([]int8, totalBlocks*32)
-	for b := 0; b < totalBlocks; b++ {
+	for b := range totalBlocks {
 		var block [32]int8
 		for i := range 32 {
 			v := int8((i+b)%13 - 6)
@@ -554,7 +554,7 @@ func TestDequantizeQ4ToF16(t *testing.T) {
 		scalesRaw[i] = 0x3c00 // 1.0
 	}
 	ref := make([]float32, rows*cols)
-	for b := 0; b < totalBlocks; b++ {
+	for b := range totalBlocks {
 		var block [32]int8
 		for i := range 32 {
 			v := int8((i+b)%15 - 7)
@@ -642,7 +642,7 @@ func TestDequantizeK4ToF16(t *testing.T) {
 		subRaw[i] = 32 // factor 1.0
 	}
 	ref := make([]float32, rows*cols)
-	for b := 0; b < totalBlocks; b++ {
+	for b := range totalBlocks {
 		var block [32]int8
 		for i := range 32 {
 			v := int8((i+b)%13 - 6)
@@ -718,8 +718,8 @@ func allocPinnedF32(t *testing.T, n int) (HostBuffer, []float32) {
 
 func fillColMajor(dst []float32, rows, cols int, scale float32) {
 	idx := 0
-	for c := 0; c < cols; c++ {
-		for r := 0; r < rows; r++ {
+	for c := range cols {
+		for r := range rows {
 			dst[idx] = (float32(r+1) + float32(c+1)) * scale
 			idx++
 		}
@@ -727,10 +727,10 @@ func fillColMajor(dst []float32, rows, cols int, scale float32) {
 }
 
 func refGemmColMajor(dst, a, b []float32, m, n, k int) {
-	for col := 0; col < n; col++ {
-		for row := 0; row < m; row++ {
+	for col := range n {
+		for row := range m {
 			var sum float32
-			for i := 0; i < k; i++ {
+			for i := range k {
 				av := a[row+i*m]
 				bv := b[i+col*k]
 				sum += av * bv
@@ -741,9 +741,9 @@ func refGemmColMajor(dst, a, b []float32, m, n, k int) {
 }
 
 func refGemvColMajor(dst, a, x []float32, m, n int) {
-	for row := 0; row < m; row++ {
+	for row := range m {
 		var sum float32
-		for col := 0; col < n; col++ {
+		for col := range n {
 			sum += a[row+col*m] * x[col]
 		}
 		dst[row] = sum

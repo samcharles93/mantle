@@ -30,7 +30,6 @@ func TestMambaBlockParity(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			runMambaBlockParity(t, tc.quant)
 		})
@@ -321,7 +320,7 @@ func quantMatVecRef(dst []float32, w *model.Mat, x []float32) {
 func mambaDepthwiseConvRef(out, in []float32, kernel *model.Mat, bias []float32, state []float32) {
 	kernelLen := kernel.C
 	channels := kernel.R
-	for c := 0; c < channels; c++ {
+	for c := range channels {
 		row := kernel.Data[c*kernelLen : (c+1)*kernelLen]
 		sum := float32(0)
 		if len(bias) == channels {
@@ -438,7 +437,7 @@ func buildK4Payload(rows, cols int, scale float32, qvals []int8) []byte {
 
 	superScales := make([]byte, totalSuper*2)
 	f16 := model.Float32ToFloat16(scale)
-	for i := 0; i < totalSuper; i++ {
+	for i := range totalSuper {
 		superScales[i*2] = byte(f16)
 		superScales[i*2+1] = byte(f16 >> 8)
 	}
@@ -455,7 +454,7 @@ func buildK4Payload(rows, cols int, scale float32, qvals []int8) []byte {
 	data := make([]byte, totalBlocks*16)
 	padded := make([]int8, totalBlocks*32)
 	copy(padded, qvals)
-	for block := 0; block < totalBlocks; block++ {
+	for block := range totalBlocks {
 		start := block * 32
 		packQ4Block(data[block*16:(block+1)*16], padded[start:start+32])
 	}
@@ -472,7 +471,7 @@ func align64(buf []byte) []byte {
 }
 
 func packQ4Block(dst []byte, values []int8) {
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		lo := encodeQ4Nibble(values[2*i])
 		hi := encodeQ4Nibble(values[2*i+1])
 		dst[i] = lo | (hi << 4)

@@ -496,11 +496,11 @@ func (gr *GraphRuntime) computeOutput(
 // parseLayerIndex extracts a layer index from a node name like "layer3.ffn".
 // Falls back to defaultIdx when parsing fails.
 func parseLayerIndex(name string, defaultIdx int) int {
-	idx := strings.Index(name, "layer")
-	if idx < 0 {
+	_, after, ok := strings.Cut(name, "layer")
+	if !ok {
 		return defaultIdx
 	}
-	rest := name[idx+5:]
+	rest := after
 	end := 0
 	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
 		end++

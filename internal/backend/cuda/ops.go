@@ -3619,7 +3619,7 @@ func (o *Ops) DeltaNetBlock(dl *model.DeltaNetLayer, x, out []float32, cfg model
 		return fail(fmt.Errorf("cuda: deltanet recurrent failed (hk=%d, hv=%d, nv=%d, nk=%d, gs=%d): %w", hk, hv, nv, nk, groupSize, err))
 	}
 
-	for h := 0; h < nv; h++ {
+	for h := range nv {
 		yHead := native.DeviceBufferFromRaw(unsafe.Add(yDelta.Ptr(), h*hv*4))
 		zHead := native.DeviceBufferFromRaw(unsafe.Add(zDev.Ptr(), h*hv*4))
 		if err := native.RMSNormGatedF32(yHead, yHead, zHead, normDev, hv, cfg.RMSEpsilon, true, o.stream); err != nil {
@@ -3859,7 +3859,7 @@ func (o *Ops) MoEBlock(ml *model.MoELayer, x, out []float32, cfg model.MoEConfig
 		return fail(fmt.Errorf("cuda: moe weights download failed: %w", err))
 	}
 
-	for j := 0; j < topK; j++ {
+	for j := range topK {
 		expertID := int(hostIdx[j])
 		if expertID < 0 || expertID >= numActualExperts {
 			continue

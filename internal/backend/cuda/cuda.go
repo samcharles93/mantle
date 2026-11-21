@@ -408,13 +408,6 @@ func (r *cudaRuntime) emitPerfSummary(graphStats GraphCacheStats, graphCacheLimi
 	fmt.Fprintf(os.Stderr, "================================\n")
 }
 
-func max(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func logUMCapabilities() {
 	concurrent, err1 := native.DeviceGetAttribute(native.DevAttrConcurrentManagedAccess, 0)
 	pageable, err2 := native.DeviceGetAttribute(native.DevAttrPageableMemoryAccess, 0)

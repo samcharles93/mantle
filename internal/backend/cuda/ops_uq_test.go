@@ -50,9 +50,9 @@ func TestUQDequantToF16(t *testing.T) {
 	}
 
 	row := make([]float32, cols)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		w.RowTo(row, r)
-		for c := 0; c < cols; c++ {
+		for c := range cols {
 			got := mcf.FP16ToFloat32(f16[r*cols+c])
 			want := row[c]
 			// f16 storage rounds the decoded value; allow 1 ulp-ish slack.

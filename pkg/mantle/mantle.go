@@ -261,14 +261,3 @@ func (e *Engine) SectionBytes(section mcf.SectionType) []byte {
 	}
 	return nil
 }
-
-// --- helpers ---
-
-//go:fix inline
-func boolPtr(b bool) *bool { return new(b) }
-
-//go:fix inline
-func strPtr(s string) *string { return new(s) }
-
-//go:fix inline
-func intPtr(i int) *int { return new(i) }

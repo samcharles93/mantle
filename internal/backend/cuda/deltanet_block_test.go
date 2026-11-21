@@ -30,7 +30,6 @@ func TestDeltaNetBlockParity(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			runDeltaNetBlockParity(t, tc.quant)
 		})

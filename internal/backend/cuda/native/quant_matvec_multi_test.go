@@ -282,7 +282,7 @@ func benchmarkQuantMatVec(b *testing.B, legacy bool, nSegs int) {
 	f := makeQMVFixture(b, segRows[0], cols)
 	segs := make([]QuantMatVecSegment, nSegs)
 	ys := make([]DeviceBuffer, nSegs)
-	for i := 0; i < nSegs; i++ {
+	for i := range nSegs {
 		rows := segRows[i]
 		var qBuf, sBuf DeviceBuffer
 		var err error

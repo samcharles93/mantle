@@ -58,22 +58,22 @@ func TestFusedFFNCUDA(t *testing.T) {
 	ffnGate := core.NewMat(ffnDim, embDim)
 	ffnDown := core.NewMat(embDim, ffnDim)
 
-	for i := 0; i < ffnDim*embDim; i++ {
+	for i := range ffnDim * embDim {
 		ffnUp.Data[i] = float32(i+1) / 100.0
 		ffnGate.Data[i] = float32(i+1) / 110.0
 	}
-	for i := 0; i < embDim*ffnDim; i++ {
+	for i := range embDim * ffnDim {
 		ffnDown.Data[i] = float32(i+1) / 120.0
 	}
 
 	// Embedding and output matrices.
 	embeddings := core.NewMat(vocabSize, embDim)
-	for i := 0; i < vocabSize*embDim; i++ {
+	for i := range vocabSize * embDim {
 		embeddings.Data[i] = float32(i+1) / 10.0
 	}
 
 	output := core.NewMat(vocabSize, embDim)
-	for i := 0; i < vocabSize*embDim; i++ {
+	for i := range vocabSize * embDim {
 		output.Data[i] = float32(i+1) / 100.0
 	}
 

@@ -140,7 +140,7 @@ func TestAttentionPrefillMatchesPerRow(t *testing.T) {
 		{64, 8, 8, 100, 20, 40, 40, 0},  // sliding window on a ring shorter than the chunk
 		{64, 8, 2, 33, 7, 64, 16, 30},   // window inside a larger cache, softcap
 		{256, 4, 1, 12, 3, 32, 0, 0},
-		{512, 8, 1, 20, 4, 64, 0, 0},    // Gemma-4 global full attention (headDim=512)
+		{512, 8, 1, 20, 4, 64, 0, 0}, // Gemma-4 global full attention (headDim=512)
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("hd%d_h%d_kv%d_n%d_start%d_cache%d_w%d", c.headDim, c.nHead, c.kvHeads, c.n, c.startPos, c.cacheLen, c.window), func(t *testing.T) {

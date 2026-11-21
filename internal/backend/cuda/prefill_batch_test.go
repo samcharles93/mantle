@@ -106,9 +106,9 @@ func batchTestMatQ8(r, c int, seed uint32) *core.Mat {
 	totalBlocks := r * bpr
 	scales := make([]byte, totalBlocks*2)
 	quant := make([]byte, totalBlocks*32)
-	for b := 0; b < totalBlocks; b++ {
+	for b := range totalBlocks {
 		maxAbs := float32(0)
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			idx := b*32 + i
 			v := float32(0)
 			if idx < r*c {
@@ -125,7 +125,7 @@ func batchTestMatQ8(r, c int, seed uint32) *core.Mat {
 		u := core.Float32ToFloat16(scale)
 		scales[b*2] = byte(u)
 		scales[b*2+1] = byte(u >> 8)
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			idx := b*32 + i
 			v := float32(0)
 			if idx < r*c {
@@ -792,7 +792,7 @@ func TestBatchedPrefillParityHybrid(t *testing.T) {
 			}
 			tokG := batchArgmax(got)
 			tokW := tokG
-			for i := 0; i < 4; i++ {
+			for i := range 4 {
 				lg, err := gr.ForwardToken(tokG)
 				if err != nil {
 					t.Fatalf("batched ForwardToken: %v", err)
@@ -861,7 +861,7 @@ func TestBatchedPrefillParityQ8(t *testing.T) {
 	}
 	tokG := batchArgmax(got)
 	tokW := tokG
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		lg, err := grBatched.ForwardToken(tokG)
 		if err != nil {
 			t.Fatalf("batched ForwardToken: %v", err)

@@ -150,7 +150,7 @@ func BenchmarkCopyCostH2DSyncBusyLayer(b *testing.B) {
 	defer func() { _ = dst.Free() }()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for k := 0; k < kernels; k++ {
+		for range kernels {
 			if err := RoundBF16InPlaceF32(dst, 256*1024/8, stream); err != nil {
 				b.Fatal(err)
 			}
@@ -175,7 +175,7 @@ func BenchmarkCopyCostD2HSyncBusyLayer(b *testing.B) {
 	defer func() { _ = work.Free() }()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for k := 0; k < kernels; k++ {
+		for range kernels {
 			if err := RoundBF16InPlaceF32(work, 256*1024/8, stream); err != nil {
 				b.Fatal(err)
 			}

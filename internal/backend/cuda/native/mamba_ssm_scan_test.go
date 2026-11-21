@@ -10,18 +10,18 @@ import (
 )
 
 func mambaScanRef(out, state, x, dt, b, c, aLog, dVec []float32, headCount, headDim, dState, groupSize int) {
-	for h := 0; h < headCount; h++ {
+	for h := range headCount {
 		group := h / groupSize
 		a := -float32(math.Exp(float64(aLog[h])))
 		dtH := dt[h]
 		dA := float32(math.Exp(float64(a * dtH)))
 		bGroup := b[group*dState : (group+1)*dState]
 		cGroup := c[group*dState : (group+1)*dState]
-		for p := 0; p < headDim; p++ {
+		for p := range headDim {
 			xhp := x[h*headDim+p]
 			stateBase := (h*headDim + p) * dState
 			var sum float32
-			for n := 0; n < dState; n++ {
+			for n := range dState {
 				idx := stateBase + n
 				state[idx] = state[idx]*dA + dtH*bGroup[n]*xhp
 				sum += cGroup[n] * state[idx]

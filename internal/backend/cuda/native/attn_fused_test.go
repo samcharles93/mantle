@@ -13,9 +13,9 @@ func applyRoPEScalarRef(x []float32, nHead, headDim, pos int, invFreq []float32,
 	if attnScale == 0 {
 		attnScale = 1
 	}
-	for h := 0; h < nHead; h++ {
+	for h := range nHead {
 		base := h * headDim
-		for i := 0; i < half; i++ {
+		for i := range half {
 			angle := float64(pos) * float64(invFreq[i])
 			c := float32(math.Cos(angle)) * attnScale
 			s := float32(math.Sin(angle)) * attnScale
@@ -228,8 +228,8 @@ func TestStoreKVF16Row(t *testing.T) {
 		t.Fatalf("sync: %v", err)
 	}
 
-	for row := 0; row < cacheLen; row++ {
-		for c := 0; c < kvStride; c++ {
+	for row := range cacheLen {
+		for c := range kvStride {
 			got := hostCache[row*kvStride+c]
 			if row != cachePos {
 				if got != 0xBEEF {
@@ -378,16 +378,16 @@ func TestStoreKVQ8RowBroadcast(t *testing.T) {
 	}
 
 	// Sentinel rows untouched.
-	for r := 0; r < cacheLen; r++ {
+	for r := range cacheLen {
 		if r == cachePos {
 			continue
 		}
-		for c := 0; c < kvStride; c++ {
+		for c := range kvStride {
 			if qHost[r*kvStride+c] != 99 {
 				t.Fatalf("q sentinel overwritten at row=%d col=%d", r, c)
 			}
 		}
-		for b := 0; b < blocksPerRow; b++ {
+		for b := range blocksPerRow {
 			if sHost[r*blocksPerRow+b] != -7.0 {
 				t.Fatalf("scale sentinel overwritten at row=%d block=%d", r, b)
 			}
@@ -395,7 +395,7 @@ func TestStoreKVQ8RowBroadcast(t *testing.T) {
 	}
 
 	// Target row scales: all blocks must equal wantScale.
-	for b := 0; b < blocksPerRow; b++ {
+	for b := range blocksPerRow {
 		got := sHost[cachePos*blocksPerRow+b]
 		if !approxEqual(got, wantScale, 1e-6) {
 			t.Fatalf("scale[%d]=%v want %v", b, got, wantScale)
@@ -405,7 +405,7 @@ func TestStoreKVQ8RowBroadcast(t *testing.T) {
 	// Dequantize row and compare with source within abs tolerance of one
 	// quant step (scale).
 	tol := wantScale * 1.1
-	for c := 0; c < kvStride; c++ {
+	for c := range kvStride {
 		got := float32(qHost[cachePos*kvStride+c]) * wantScale
 		if !approxEqual(got, srcSlice[c], tol) {
 			t.Fatalf("col %d: got %v want %v (tol=%v)", c, got, srcSlice[c], tol)

@@ -183,7 +183,7 @@ func TestComputeEmbed(t *testing.T) {
 	if len(out) != embDim {
 		t.Fatalf("expected len %d, got %d", embDim, len(out))
 	}
-	for j := 0; j < embDim; j++ {
+	for j := range embDim {
 		want := float32(3*embDim + j)
 		if out[j] != want {
 			t.Errorf("embed[%d] = %f, want %f", j, out[j], want)
@@ -244,7 +244,7 @@ func TestGraphComputeNoDevice(t *testing.T) {
 	if len(out) != embDim {
 		t.Fatalf("expected len %d, got %d", embDim, len(out))
 	}
-	for j := 0; j < embDim; j++ {
+	for j := range embDim {
 		want := float32(tokenID*embDim+j+1) / 10.0
 		if out[j] != want {
 			t.Errorf("embed[%d] = %f, want %f", j, out[j], want)
