@@ -20,9 +20,8 @@ type quantRows struct {
 	q8 []int8 // [n, blocks*32]
 	// q8Pair is q8 with each block in pair order (16 even elements, then 16
 	// odd), matching packed 4-bit weights decoded by decodePacked4Row. It is
-	// filled only for packed weights.
+	// filled only for packed weights and is empty otherwise.
 	q8Pair []int8
-	q16    []int16   // one row of quantizeVecBlocksInto's widened output, unused
 	scales []float32 // [n, blocks]
 	// pairScales[(r/2)*blocks*4 + b*4 : +4] is {xs[r][b], xs[r+1][b],
 	// xs[r][b], xs[r+1][b]} for each even r with r+1 < n.
@@ -32,42 +31,63 @@ type quantRows struct {
 
 var quantRowsPool = sync.Pool{New: func() any { return new(quantRows) }}
 
-// quantRowsTask is a range of activation rows to quantise on a pool worker.
+// quantRowsTask is a range of activation rows to quantise, rs even so that
+// every row pair inside [rs, re) is whole and its pairScales entry is filled
+// by the same task.
 type quantRowsTask struct {
 	x      []float32
 	c      int
-	blocks int
-	q8     []int8
-	scales []float32
+	qr     *quantRows
 	rs, re int
 }
 
-// quantizeRowsInto fills q8 and scales for n activation rows, spreading the rows
-// over the worker pool so the caller does not serialise the whole chunk before
-// the matmul dispatch. Falls back to the serial loop when a pool is
-// unavailable, and produces the same bytes either way: each row is quantised by
-// the same function with a private int16 scratch.
-func quantizeRowsInto(x []float32, n, c, blocks int, q8 []int8, q16 []int16, scales []float32) {
+// run quantises rows [rs, re) and fills pairScales for the pairs they hold.
+func (t *quantRowsTask) run() {
+	qr, blocks := t.qr, t.qr.blocks
 	rowLen := blocks * 32
+	for r := t.rs; r < t.re; r++ {
+		var q8Pair []int8
+		if len(qr.q8Pair) > 0 {
+			q8Pair = qr.q8Pair[r*rowLen : (r+1)*rowLen]
+		}
+		quantizeActivationBlocks(t.x[r*t.c:(r+1)*t.c], blocks, qr.scales[r*blocks:(r+1)*blocks],
+			qr.q8[r*rowLen:(r+1)*rowLen], nil, nil, q8Pair)
+	}
+	for r := t.rs; r+1 < t.re; r += 2 {
+		xs0 := qr.scales[r*blocks : (r+1)*blocks]
+		xs1 := qr.scales[(r+1)*blocks : (r+2)*blocks]
+		out := qr.pairScales[(r/2)*blocks*4 : (r/2+1)*blocks*4]
+		for b := range blocks {
+			out[4*b], out[4*b+1], out[4*b+2], out[4*b+3] = xs0[b], xs1[b], xs0[b], xs1[b]
+		}
+	}
+}
+
+// quantizeRows fills qr for n activation rows, spreading row pairs over the
+// worker pool so the caller does not serialise the whole chunk before the
+// matmul dispatch. Each row is quantised by the same function whichever task
+// takes it, so the bytes do not depend on the split.
+func quantizeRows(qr *quantRows, x []float32, n, c int) {
+	pairs := (n + 1) / 2
 	pool := getMatVecPool()
 	workers := 0
-	if pool != nil && pool.size > 1 && n > 1 {
-		workers = min(pool.size, n)
+	if pool != nil && pool.size > 1 {
+		workers = min(pool.size, pairs)
 	}
 	if workers < 2 {
-		for r := range n {
-			quantizeVecBlocksInto(x[r*c:(r+1)*c], blocks,
-				q8[r*rowLen:(r+1)*rowLen], q16, scales[r*blocks:(r+1)*blocks])
-		}
+		t := quantRowsTask{x: x, c: c, qr: qr, rs: 0, re: n}
+		t.run()
 		return
 	}
+	tasks := make([]quantRowsTask, workers)
 	done := <-pool.doneSlots
 	for i := range workers {
-		rs := i * n / workers
-		re := (i + 1) * n / workers
-		pool.tasks <- matVecTask{qrows: &quantRowsTask{
-			x: x, c: c, blocks: blocks, q8: q8, scales: scales, rs: rs, re: re,
-		}, done: done}
+		tasks[i] = quantRowsTask{
+			x: x, c: c, qr: qr,
+			rs: 2 * (i * pairs / workers),
+			re: min(n, 2*((i+1)*pairs/workers)),
+		}
+		pool.tasks <- matVecTask{qrows: &tasks[i], done: done}
 	}
 	for range workers {
 		<-done
@@ -80,30 +100,14 @@ func getQuantRows(x []float32, n, c int, pair bool) *quantRows {
 	blocks := (c + 31) / 32
 	qr.blocks = blocks
 	qr.q8 = ensureInt8Slice(qr.q8, n*blocks*32)
-	qr.q16 = ensureInt16Slice(qr.q16, blocks*32)
 	qr.scales = ensureFloat32Slice(qr.scales, n*blocks)
-	quantizeRowsInto(x, n, c, blocks, qr.q8, qr.q16, qr.scales)
+	qr.pairScales = ensureFloat32Slice(qr.pairScales, (n/2)*blocks*4)
 	if pair {
 		qr.q8Pair = ensureInt8Slice(qr.q8Pair, n*blocks*32)
-		for blk := range n * blocks {
-			src := qr.q8[blk*32 : blk*32+32]
-			dst := qr.q8Pair[blk*32 : blk*32+32]
-			for i := range 16 {
-				dst[i] = src[2*i]
-				dst[16+i] = src[2*i+1]
-			}
-		}
+	} else {
+		qr.q8Pair = qr.q8Pair[:0] // keep the buffer for the next packed call
 	}
-	pairs := n / 2
-	qr.pairScales = ensureFloat32Slice(qr.pairScales, pairs*blocks*4)
-	for p := range pairs {
-		xs0 := qr.scales[2*p*blocks : (2*p+1)*blocks]
-		xs1 := qr.scales[(2*p+1)*blocks : (2*p+2)*blocks]
-		out := qr.pairScales[p*blocks*4 : (p+1)*blocks*4]
-		for b := range blocks {
-			out[4*b], out[4*b+1], out[4*b+2], out[4*b+3] = xs0[b], xs1[b], xs0[b], xs1[b]
-		}
-	}
+	quantizeRows(qr, x, n, c)
 	return qr
 }
 

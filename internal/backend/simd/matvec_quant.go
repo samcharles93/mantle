@@ -1,7 +1,6 @@
 package simd
 
 import (
-	"math"
 	"simd/archsimd"
 	"sync"
 
@@ -40,15 +39,7 @@ func getQuantVec(blocks int) *QuantVec {
 
 // fillQuantVec quantizes x into qx, which must come from getQuantVec(blocks).
 func fillQuantVec(qx *QuantVec, x []float32, blocks int) {
-	quantizeVecBlocksInto(x, blocks, qx.Q, qx.Q16, qx.Scales)
-	for b := range blocks {
-		src := qx.Q16[b*32 : b*32+32]
-		dst := qx.Q16Pair[b*32 : b*32+32]
-		for i := range 16 {
-			dst[i] = src[2*i]
-			dst[16+i] = src[2*i+1]
-		}
-	}
+	quantizeActivationBlocks(x, blocks, qx.Scales, qx.Q, qx.Q16, qx.Q16Pair, nil)
 }
 
 func putQuantVec(qx *QuantVec) {
@@ -666,59 +657,6 @@ func dotInt8Int16SIMD(q []int8, x []int16, n int) int32 {
 		sum += int32(q[i]) * int32(x[i])
 	}
 	return sum
-}
-
-func quantizeVecBlocksInto(x []float32, blocks int, qx []int8, qx16 []int16, scales []float32) {
-	if blocks <= 0 {
-		return
-	}
-	for i := range qx {
-		qx[i] = 0
-	}
-	for i := range qx16 {
-		qx16[i] = 0
-	}
-	for i := range scales {
-		scales[i] = 0
-	}
-	for b := range blocks {
-		base := b * 32
-		maxAbs := float32(0)
-		for i := range 32 {
-			idx := base + i
-			if idx >= len(x) {
-				continue
-			}
-			v := x[idx]
-			if v < 0 {
-				v = -v
-			}
-			if v > maxAbs {
-				maxAbs = v
-			}
-		}
-		if maxAbs == 0 {
-			continue
-		}
-		scale := maxAbs / 127.0
-		scales[b] = scale
-		inv := float32(1.0) / scale
-		for i := range 32 {
-			idx := base + i
-			if idx >= len(x) {
-				continue
-			}
-			v := x[idx]
-			q := int32(math.Round(float64(v * inv)))
-			if q > 127 {
-				q = 127
-			} else if q < -127 {
-				q = -127
-			}
-			qx[base+i] = int8(q)
-			qx16[base+i] = int16(int8(q))
-		}
-	}
 }
 
 // matVecRangeRowDecode is the uncached path for quant dtypes without a raw

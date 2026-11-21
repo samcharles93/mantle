@@ -183,3 +183,18 @@ func BenchmarkReadBandwidth(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkPrepareQuantVec measures the activation quantisation a quantised
+// MatVec performs before its dispatch, at the LFM3-1.7B input widths: the
+// hidden size (every projection but one) and the FFN width (ffn_down).
+func BenchmarkPrepareQuantVec(b *testing.B) {
+	for _, cols := range []int{2048, 7680} {
+		x := quantTestActivations(1, cols)
+		b.Run(fmt.Sprintf("cols=%d", cols), func(b *testing.B) {
+			b.SetBytes(int64(4 * cols))
+			for b.Loop() {
+				ReleaseQuantVec(PrepareQuantVec(x))
+			}
+		})
+	}
+}

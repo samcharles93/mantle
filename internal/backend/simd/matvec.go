@@ -28,7 +28,7 @@ type matVecTask struct {
 	// runs that range for the query position using its own scores buffer.
 	attn *attnTask
 	// qrows, when set, selects a range of activation rows to quantise for
-	// MatMatQuant, using the worker's own int16 scratch.
+	// MatMatQuant.
 	qrows *quantRowsTask
 	// mv, when set, selects a MatVec: the worker claims row tiles from the
 	// shared job until none remain.
@@ -77,7 +77,6 @@ type matVecWorker struct {
 	qbuf   []int8
 	scales []float32
 	scores []float32          // attention score scratch, one row at a time
-	q16    []int16            // activation quantisation scratch, one row at a time
 	quant  quantKernelScratch // MatMatQuant buffers
 	mu     sync.Mutex
 }
@@ -177,7 +176,7 @@ func newMatVecPool() *matVecPool {
 				if task.attn != nil {
 					w.runAttnRows(task.attn)
 				} else if task.qrows != nil {
-					w.runQuantRows(task.qrows)
+					task.qrows.run()
 				} else if task.qj != nil {
 					task.qj.run(w)
 				} else if task.mv != nil {
@@ -1196,20 +1195,4 @@ func attendRowHeads(ctx *AttnContext, tasks []attnTask) bool {
 	}
 	pool.doneSlots <- done
 	return true
-}
-
-// runQuantRows quantises a range of activation rows. quantizeVecBlocksInto
-// zeroes and fills qx16 per row, so the worker's own buffer keeps the result
-// identical to running the rows serially.
-func (w *matVecWorker) runQuantRows(t *quantRowsTask) {
-	need := t.blocks * 32
-	if len(w.q16) < need {
-		w.q16 = make([]int16, need)
-	}
-	qx16 := w.q16[:need]
-	rowLen := t.blocks * 32
-	for r := t.rs; r < t.re; r++ {
-		quantizeVecBlocksInto(t.x[r*t.c:(r+1)*t.c], t.blocks,
-			t.q8[r*rowLen:(r+1)*rowLen], qx16, t.scales[r*t.blocks:(r+1)*t.blocks])
-	}
 }
