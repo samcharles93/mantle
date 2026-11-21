@@ -4,6 +4,7 @@ import (
 	"runtime"
 	"simd/archsimd"
 	"sync"
+	"sync/atomic"
 
 	instance "github.com/samcharles93/mantle/internal/backend/core"
 	"github.com/samcharles93/mantle/pkg/mcf"
@@ -29,6 +30,46 @@ type matVecTask struct {
 	// qrows, when set, selects a range of activation rows to quantise for
 	// MatMatQuant, using the worker's own int16 scratch.
 	qrows *quantRowsTask
+	// mv, when set, selects a MatVec: the worker claims row tiles from the
+	// shared job until none remain.
+	mv *matVecJob
+}
+
+// matVecJob is one MatVec call shared by every worker task. Workers claim
+// tiles of rows from next until none remain, so the faster cores of a hybrid
+// CPU take more rows than an equal static split would give them; each row's
+// result does not depend on which worker or tile computes it.
+type matVecJob struct {
+	dst  []float32
+	w    *Mat
+	x    []float32
+	qx   *QuantVec
+	tile int
+	next atomic.Int64
+}
+
+func (j *matVecJob) run(worker *matVecWorker) {
+	for {
+		rs := int(j.next.Add(int64(j.tile))) - j.tile
+		if rs >= j.w.R {
+			return
+		}
+		matVecRangeWithWorker(j.dst, j.w, j.x, rs, min(rs+j.tile, j.w.R), j.qx, worker)
+	}
+}
+
+// matVecMinTileRows is the smallest MatVec tile. Below it the atomic claims
+// cost more than the imbalance they remove: a 512-row matrix split into 8-row
+// tiles ran 7% slower than one tile per worker.
+const matVecMinTileRows = 32
+
+// matVecTileRows sizes MatVec tiles at about four per worker, at least
+// matVecMinTileRows and rounded up to a multiple of packed4GroupRows so the
+// grouped packed path sees whole groups.
+func matVecTileRows(rows, workers int) int {
+	tile := (rows + 4*workers - 1) / (4 * workers)
+	tile = (tile + packed4GroupRows - 1) / packed4GroupRows * packed4GroupRows
+	return max(matVecMinTileRows, tile)
 }
 
 type matVecWorker struct {
@@ -139,6 +180,8 @@ func newMatVecPool() *matVecPool {
 					w.runQuantRows(task.qrows)
 				} else if task.qj != nil {
 					task.qj.run(w)
+				} else if task.mv != nil {
+					task.mv.run(w)
 				} else if task.n > 0 {
 					matMatRangeBF16(task.dst, task.w, task.x, task.xp, task.n, task.rs, task.re)
 				} else {
@@ -206,29 +249,13 @@ func matVecWithQuant(dst []float32, w *Mat, x []float32, qx *QuantVec) {
 		return
 	}
 
-	chunk := (w.R + workers - 1) / workers
+	job := &matVecJob{dst: dst, w: w, x: x, qx: localQx, tile: matVecTileRows(w.R, workers)}
+	workers = min(workers, (w.R+job.tile-1)/job.tile)
 	done := <-pool.doneSlots
-
-	activeWorkers := 0
-	for i := range workers {
-		rs := i * chunk
-		re := min(rs+chunk, w.R)
-		if rs >= re {
-			break
-		}
-		activeWorkers++
-		pool.tasks <- matVecTask{
-			dst:  dst,
-			w:    w,
-			x:    x,
-			rs:   rs,
-			re:   re,
-			done: done,
-			qx:   localQx,
-		}
+	for range workers {
+		pool.tasks <- matVecTask{mv: job, done: done}
 	}
-
-	for i := 0; i < activeWorkers; i++ {
+	for range workers {
 		<-done
 	}
 	pool.doneSlots <- done
