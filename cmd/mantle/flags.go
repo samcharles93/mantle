@@ -60,7 +60,7 @@ func commonModelFlags() []cli.Flag {
 		&cli.BoolFlag{
 			Name:        "no-quant-cache",
 			Category:    "Model Configuration",
-			Usage:       "CPU backend: also keep q8/k6/k3/k2 (and non-4-bit gq) weights packed instead of expanding them to int8 at load (less RAM, much slower); 4-bit weights always stay packed",
+			Usage:       "CPU backend: keep q8/k6/k3/k2 (and non-4-bit gq) weights packed instead of expanding to int8 at load, and skip 4-bit prefill repacking (less RAM, slower)",
 			Sources:     cli.EnvVars("MANTLE_NO_QUANT_CACHE"),
 			Destination: &noQuantCache,
 		},

@@ -26,6 +26,11 @@ type Mat struct {
 	// Quant holds an optional pre-unpacked quant cache for q*/k* weights.
 	// When present, MatVec can skip per-call bit unpacking.
 	Quant *QuantCache
+
+	// Packed4x8 holds an optional load-time 8-row interleaved unsigned 4-bit
+	// repack for CPU AVX2 batched GEMM (q4/k4/gq*4). Built only on CPU loads
+	// when quant caching is enabled; leaves Raw untouched.
+	Packed4x8 *Packed4x8
 }
 
 // NewMat allocates a new matrix with the given number of rows and columns.

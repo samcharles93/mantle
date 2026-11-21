@@ -39,7 +39,7 @@ func getQuantVec(blocks int) *QuantVec {
 
 // fillQuantVec quantizes x into qx, which must come from getQuantVec(blocks).
 func fillQuantVec(qx *QuantVec, x []float32, blocks int) {
-	quantizeActivationBlocks(x, blocks, qx.Scales, qx.Q, qx.Q16, qx.Q16Pair, nil)
+	quantizeActivationBlocks(x, blocks, qx.Scales, qx.Q, nil, qx.Q16, qx.Q16Pair, nil, nil)
 }
 
 func putQuantVec(qx *QuantVec) {
@@ -79,6 +79,36 @@ func ensureInt16Slice(dst []int16, n int) []int16 {
 	}
 	if cap(dst) < n {
 		return make([]int16, n)
+	}
+	return dst[:n]
+}
+
+func ensureUint8Slice(dst []uint8, n int) []uint8 {
+	if n <= 0 {
+		return dst[:0]
+	}
+	if cap(dst) < n {
+		return make([]uint8, n)
+	}
+	return dst[:n]
+}
+
+func ensureInt32Slice(dst []int32, n int) []int32 {
+	if n <= 0 {
+		return dst[:0]
+	}
+	if cap(dst) < n {
+		return make([]int32, n)
+	}
+	return dst[:n]
+}
+
+func ensureUint32Slice(dst []uint32, n int) []uint32 {
+	if n <= 0 {
+		return dst[:0]
+	}
+	if cap(dst) < n {
+		return make([]uint32, n)
 	}
 	return dst[:n]
 }

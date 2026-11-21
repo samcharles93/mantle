@@ -108,7 +108,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 	emb := opts.SharedEmbeddings
 	if emb == nil {
 		var err error
-		if emb, err = loadMat(src, names.Embedding); err != nil {
+		if emb, err = loadMatWithRepack(src, names.Embedding, false); err != nil {
 			return nil, err
 		}
 	}
@@ -122,7 +122,7 @@ func loadModelFromSource(cfg *model.HFConfig, spec *model.ArchSpec, src tensorSo
 		if names.OutputCandidates != nil {
 			candidates = names.OutputCandidates()
 		}
-		if output, _, err = loadMatCandidates(src, candidates); err != nil {
+		if output, _, err = loadMatCandidatesWithRepack(src, candidates, false); err != nil {
 			return nil, err
 		}
 		if output == nil {
@@ -974,6 +974,10 @@ func loadAttentionQAndGate(src tensorSource, cfg *model.HFConfig, qName string, 
 // bf16ToF32 and fp16ToF32 are defined in dtype.go.
 
 func loadMat(src tensorSource, name string) (*core.Mat, error) {
+	return loadMatWithRepack(src, name, true)
+}
+
+func loadMatWithRepack(src tensorSource, name string, allowRepack bool) (*core.Mat, error) {
 	payload, err := src.ReadTensor(name)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
@@ -1024,6 +1028,12 @@ func loadMat(src tensorSource, name string) (*core.Mat, error) {
 					return nil, fmt.Errorf("%s: quant cache: %w", name, err)
 				}
 				m.Quant = cache
+			} else if allowRepack && packed4x8WantedForLoad(payload.DType, r, c) {
+				repacked, err := BuildPacked4x8(&m)
+				if err != nil {
+					return nil, fmt.Errorf("%s: repack4x8: %w", name, err)
+				}
+				m.Packed4x8 = repacked
 			}
 			return &m, nil
 		}
@@ -1070,12 +1080,12 @@ func loadConvKernel(src tensorSource, name string) (*core.Mat, error) {
 	return &core.Mat{R: out, C: k, Stride: k, Data: data}, nil
 }
 
-func loadMatCandidates(src tensorSource, candidates []string) (*core.Mat, string, error) {
+func loadMatCandidatesWithRepack(src tensorSource, candidates []string, allowRepack bool) (*core.Mat, string, error) {
 	for _, name := range candidates {
 		if name == "" {
 			continue
 		}
-		m, err := loadMat(src, name)
+		m, err := loadMatWithRepack(src, name, allowRepack)
 		if err == nil {
 			return m, name, nil
 		}

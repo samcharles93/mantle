@@ -64,6 +64,12 @@ func BenchmarkMatMatQuantShapes(b *testing.B) {
 	for _, shape := range lfm3QuantShapes {
 		rows, cols := shape.rows, shape.cols
 		w := packed4Mat(b, mcf.DTypeK4, rows, cols)
+		repacked := w
+		p4, err := BuildPacked4x8(&repacked)
+		if err != nil {
+			b.Fatal(err)
+		}
+		repacked.Packed4x8 = p4
 		cached := w
 		qc, err := instance.BuildQuantCache(&cached)
 		if err != nil {
@@ -85,12 +91,20 @@ func BenchmarkMatMatQuantShapes(b *testing.B) {
 				}
 				reportGEMMRates(b, iters, rows, cols, n, wBytes, b.Elapsed())
 			})
+			b.Run(prefix+"/pool_repacked", func(b *testing.B) {
+				iters := 0
+				for b.Loop() {
+					MatMatQuant(dst, &repacked, x, n)
+					iters++
+				}
+				reportGEMMRates(b, iters, rows, cols, n, wBytes, b.Elapsed())
+			})
 			for _, mode := range []struct {
 				name string
 				w    *Mat
-			}{{"core", &w}, {"core_cached", &cached}} {
+			}{{"core", &w}, {"core_repacked", &repacked}, {"core_cached", &cached}} {
 				b.Run(prefix+"/"+mode.name, func(b *testing.B) {
-					qr := getQuantRows(x, n, cols, batchWeightsPacked(mode.w))
+					qr := getQuantRowsForWeight(x, n, mode.w)
 					defer putQuantRows(qr)
 					worker := &matVecWorker{}
 					iters := 0
@@ -104,6 +118,11 @@ func BenchmarkMatMatQuantShapes(b *testing.B) {
 			b.Run(prefix+"/quantise", func(b *testing.B) {
 				for b.Loop() {
 					putQuantRows(getQuantRows(x, n, cols, true))
+				}
+			})
+			b.Run(prefix+"/quantise_repacked", func(b *testing.B) {
+				for b.Loop() {
+					putQuantRows(getQuantRowsForWeight(x, n, &repacked))
 				}
 			})
 			if n <= 8 {

@@ -304,18 +304,21 @@ func matVecPacked4x8(out *[packed4GroupRows]float32, data []byte, xPair []int16,
 	endAVX()
 }
 
-// decodePacked4Row expands blocks packed 4-bit blocks into dst (blocks*32
-// int8 codes), each block in pair order: its 16 even elements, then its 16
-// odd ones.
-func decodePacked4Row(dst []int8, data []byte, blocks int) {
+// decodePacked4RowUnsigned expands blocks packed 4-bit blocks into dst
+// (blocks*32 uint8 codes in [0, 15], equal to signed_code + 8), each block in
+// pair order: its 16 even elements, then its 16 odd ones. In 4-bit two's
+// complement, (nibble ^ 8) maps [-8, 7] directly to [0, 15], letting the
+// batched kernel run unsigned*signed VPMADDUBSW without Abs or MulSign and
+// recover the exact signed dot by subtracting 8*sum(x) per block.
+func decodePacked4RowUnsigned(dst []uint8, data []byte, blocks int) {
 	mask := archsimd.BroadcastUint8x16(0x0F)
-	eight := archsimd.BroadcastInt8x16(8)
-	var zero archsimd.Int8x32
+	eight := archsimd.BroadcastUint8x16(8)
+	var zero archsimd.Uint8x32
 	for b := range blocks {
 		v := archsimd.LoadUint8x16(data[b*16:])
-		even := v.And(mask).BitsToInt8().Xor(eight).Sub(eight)
-		odd := v.ReshapeToUint16s().ShiftAllRight(4).ReshapeToUint8s().And(mask).BitsToInt8().Xor(eight).Sub(eight)
-		zero.SetLo(even).SetHi(odd).StoreArray((*[32]int8)(dst[b*32 : b*32+32]))
+		even := v.And(mask).Xor(eight)
+		odd := v.ReshapeToUint16s().ShiftAllRight(4).ReshapeToUint8s().And(mask).Xor(eight)
+		zero.SetLo(even).SetHi(odd).StoreArray((*[32]uint8)(dst[b*32 : b*32+32]))
 	}
 	endAVX() // packed4RowScales, scalar float maths, follows every call
 }
