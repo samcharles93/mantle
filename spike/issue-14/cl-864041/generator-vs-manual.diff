@@ -1,0 +1,179 @@
+75,76c75
+< 	{zcase: Zvex_i_rm_r, zoffset: 0, args: argList{Yu8, Yml, Yrl}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yi8, Yml, Yrl}},
+---
+> 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yu8, Yml, Yrl}},
+124,125c123
+< 	{zcase: Zvex_i_rm_r, zoffset: 0, args: argList{Yu8, Yxm, Yxr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yi8, Yxm, Yxr}},
+---
+> 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yu8, Yxm, Yxr}},
+319,322c317,318
+< 	{zcase: Zvex_i_r_rm, zoffset: 0, args: argList{Yu8, Yxr, Yxm}},
+< 	{zcase: Zvex_i_r_rm, zoffset: 2, args: argList{Yi8, Yxr, Yxm}},
+< 	{zcase: Zvex_i_r_rm, zoffset: 0, args: argList{Yu8, Yyr, Yxm}},
+< 	{zcase: Zvex_i_r_rm, zoffset: 2, args: argList{Yi8, Yyr, Yxm}},
+---
+> 	{zcase: Zvex_i_r_rm, zoffset: 2, args: argList{Yu8, Yxr, Yxm}},
+> 	{zcase: Zvex_i_r_rm, zoffset: 2, args: argList{Yu8, Yyr, Yxm}},
+386,387c382
+< 	{zcase: Zvex_i_r_rm, zoffset: 0, args: argList{Yu8, Yyr, Yxm}},
+< 	{zcase: Zvex_i_r_rm, zoffset: 2, args: argList{Yi8, Yyr, Yxm}},
+---
+> 	{zcase: Zvex_i_r_rm, zoffset: 2, args: argList{Yu8, Yyr, Yxm}},
+403,404c398
+< 	{zcase: Zvex_i_r_rm, zoffset: 0, args: argList{Yu8, Yxr, Yml}},
+< 	{zcase: Zvex_i_r_rm, zoffset: 2, args: argList{Yi8, Yxr, Yml}},
+---
+> 	{zcase: Zvex_i_r_rm, zoffset: 2, args: argList{Yu8, Yxr, Yml}},
+717,720c711,712
+< 	{zcase: Zvex_i_rm_r, zoffset: 0, args: argList{Yu8, Yxm, Yxr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yi8, Yxm, Yxr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 0, args: argList{Yu8, Yym, Yyr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yi8, Yym, Yyr}},
+---
+> 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yu8, Yxm, Yxr}},
+> 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yu8, Yym, Yyr}},
+749,761d740
+< var _yvpermq = []ytab{
+< 	{zcase: Zvex_i_rm_r, zoffset: 0, args: argList{Yu8, Yym, Yyr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yi8, Yym, Yyr}},
+< 	{zcase: Zevex_i_rm_r, zoffset: 0, args: argList{Yu8, YymEvex, YyrEvex}},
+< 	{zcase: Zevex_i_rm_k_r, zoffset: 3, args: argList{Yu8, YymEvex, Yknot0, YyrEvex}},
+< 	{zcase: Zevex_i_rm_r, zoffset: 0, args: argList{Yu8, Yzm, Yzr}},
+< 	{zcase: Zevex_i_rm_k_r, zoffset: 3, args: argList{Yu8, Yzm, Yknot0, Yzr}},
+< 	{zcase: Zevex_rm_v_r, zoffset: 0, args: argList{YymEvex, YyrEvex, YyrEvex}},
+< 	{zcase: Zevex_rm_v_k_r, zoffset: 3, args: argList{YymEvex, YyrEvex, Yknot0, YyrEvex}},
+< 	{zcase: Zevex_rm_v_r, zoffset: 0, args: argList{Yzm, Yzr, Yzr}},
+< 	{zcase: Zevex_rm_v_k_r, zoffset: 3, args: argList{Yzm, Yzr, Yknot0, Yzr}},
+< }
+< 
+763,766c742,743
+< 	{zcase: Zvex_i_r_rm, zoffset: 0, args: argList{Yu8, Yxr, Yml}},
+< 	{zcase: Zvex_i_r_rm, zoffset: 2, args: argList{Yi8, Yxr, Yml}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 0, args: argList{Yu8, Yxr, Yrl}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yi8, Yxr, Yrl}},
+---
+> 	{zcase: Zvex_i_r_rm, zoffset: 2, args: argList{Yu8, Yxr, Yml}},
+> 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yu8, Yxr, Yrl}},
+767a745,747
+> }
+> 
+> var _yvpextrw_c5 = []ytab{
+837,840c817,818
+< 	{zcase: Zvex_i_rm_r, zoffset: 0, args: argList{Yu8, Yxm, Yxr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yi8, Yxm, Yxr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 0, args: argList{Yu8, Yym, Yyr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yi8, Yym, Yyr}},
+---
+> 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yu8, Yxm, Yxr}},
+> 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yu8, Yym, Yyr}},
+850,853c828,829
+< 	{zcase: Zvex_i_rm_vo, zoffset: 0, args: argList{Yu8, Yxr, Yxr}},
+< 	{zcase: Zvex_i_rm_vo, zoffset: 3, args: argList{Yi8, Yxr, Yxr}},
+< 	{zcase: Zvex_i_rm_vo, zoffset: 0, args: argList{Yu8, Yyr, Yyr}},
+< 	{zcase: Zvex_i_rm_vo, zoffset: 3, args: argList{Yi8, Yyr, Yyr}},
+---
+> 	{zcase: Zvex_i_rm_vo, zoffset: 3, args: argList{Yu8, Yxr, Yxr}},
+> 	{zcase: Zvex_i_rm_vo, zoffset: 3, args: argList{Yu8, Yyr, Yyr}},
+871,874c847,848
+< 	{zcase: Zvex_i_rm_vo, zoffset: 0, args: argList{Yu8, Yxr, Yxr}},
+< 	{zcase: Zvex_i_rm_vo, zoffset: 3, args: argList{Yi8, Yxr, Yxr}},
+< 	{zcase: Zvex_i_rm_vo, zoffset: 0, args: argList{Yu8, Yyr, Yyr}},
+< 	{zcase: Zvex_i_rm_vo, zoffset: 3, args: argList{Yi8, Yyr, Yyr}},
+---
+> 	{zcase: Zvex_i_rm_vo, zoffset: 3, args: argList{Yu8, Yxr, Yxr}},
+> 	{zcase: Zvex_i_rm_vo, zoffset: 3, args: argList{Yu8, Yyr, Yyr}},
+905,908c879,880
+< 	{zcase: Zvex_i_rm_r, zoffset: 0, args: argList{Yu8, Yxm, Yxr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yi8, Yxm, Yxr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 0, args: argList{Yu8, Yym, Yyr}},
+< 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yi8, Yym, Yyr}},
+---
+> 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yu8, Yxm, Yxr}},
+> 	{zcase: Zvex_i_rm_r, zoffset: 2, args: argList{Yu8, Yym, Yyr}},
+919a892,903
+> var _yvsha512msg1 = []ytab{
+> 	{zcase: Zvex_rm_v_r, zoffset: 2, args: argList{Yxr, Yyr}},
+> }
+> 
+> var _yvsha512msg2 = []ytab{
+> 	{zcase: Zvex_rm_v_r, zoffset: 2, args: argList{Yyr, Yyr}},
+> }
+> 
+> var _yvsha512rnds2 = []ytab{
+> 	{zcase: Zvex_rm_v_r, zoffset: 2, args: argList{Yxr, Yyr, Yyr}},
+> }
+> 
+3055a3040,3055
+> 	{as: AVPDPBSSD, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vexF2 | vex0F38 | vexW0, 0x50,
+> 		avxEscape | vex256 | vexF2 | vex0F38 | vexW0, 0x50,
+> 	}},
+> 	{as: AVPDPBSSDS, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vexF2 | vex0F38 | vexW0, 0x51,
+> 		avxEscape | vex256 | vexF2 | vex0F38 | vexW0, 0x51,
+> 	}},
+> 	{as: AVPDPBSUD, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vexF3 | vex0F38 | vexW0, 0x50,
+> 		avxEscape | vex256 | vexF3 | vex0F38 | vexW0, 0x50,
+> 	}},
+> 	{as: AVPDPBSUDS, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vexF3 | vex0F38 | vexW0, 0x51,
+> 		avxEscape | vex256 | vexF3 | vex0F38 | vexW0, 0x51,
+> 	}},
+3069a3070,3077
+> 	{as: AVPDPBUUD, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vex0F38 | vexW0, 0x50,
+> 		avxEscape | vex256 | vex0F38 | vexW0, 0x50,
+> 	}},
+> 	{as: AVPDPBUUDS, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vex0F38 | vexW0, 0x51,
+> 		avxEscape | vex256 | vex0F38 | vexW0, 0x51,
+> 	}},
+3083a3092,3115
+> 	{as: AVPDPWSUD, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vexF3 | vex0F38 | vexW0, 0xD2,
+> 		avxEscape | vex256 | vexF3 | vex0F38 | vexW0, 0xD2,
+> 	}},
+> 	{as: AVPDPWSUDS, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vexF3 | vex0F38 | vexW0, 0xD3,
+> 		avxEscape | vex256 | vexF3 | vex0F38 | vexW0, 0xD3,
+> 	}},
+> 	{as: AVPDPWUSD, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vex66 | vex0F38 | vexW0, 0xD2,
+> 		avxEscape | vex256 | vex66 | vex0F38 | vexW0, 0xD2,
+> 	}},
+> 	{as: AVPDPWUSDS, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vex66 | vex0F38 | vexW0, 0xD3,
+> 		avxEscape | vex256 | vex66 | vex0F38 | vexW0, 0xD3,
+> 	}},
+> 	{as: AVPDPWUUD, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vex0F38 | vexW0, 0xD2,
+> 		avxEscape | vex256 | vex0F38 | vexW0, 0xD2,
+> 	}},
+> 	{as: AVPDPWUUDS, ytab: _yvaddsubpd, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex128 | vex0F38 | vexW0, 0xD3,
+> 		avxEscape | vex256 | vex0F38 | vexW0, 0xD3,
+> 	}},
+3154c3186
+< 	{as: AVPERMPD, ytab: _yvpermq, prefix: Pavx, op: opBytes{
+---
+> 	{as: AVPERMPD, ytab: _yvpermpd, prefix: Pavx, op: opBytes{
+3166c3198
+< 	{as: AVPERMQ, ytab: _yvpermq, prefix: Pavx, op: opBytes{
+---
+> 	{as: AVPERMQ, ytab: _yvpermpd, prefix: Pavx, op: opBytes{
+3243a3276,3277
+> 	}},
+> 	{as: AVPEXTRW_C5, ytab: _yvpextrw_c5, prefix: Pavx, op: opBytes{
+4493a4528,4536
+> 	}},
+> 	{as: AVSHA512MSG1, ytab: _yvsha512msg1, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex256 | vexF2 | vex0F38 | vexW0, 0xCC,
+> 	}},
+> 	{as: AVSHA512MSG2, ytab: _yvsha512msg2, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex256 | vexF2 | vex0F38 | vexW0, 0xCD,
+> 	}},
+> 	{as: AVSHA512RNDS2, ytab: _yvsha512rnds2, prefix: Pavx, op: opBytes{
+> 		avxEscape | vex256 | vexF2 | vex0F38 | vexW0, 0xCB,

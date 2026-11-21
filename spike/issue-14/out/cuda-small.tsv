@@ -1,0 +1,5 @@
+label	mode	size_bytes	pp_tps	tg_tps	peak_vram_mib	peak_rss_kb
+Qwen3-0.6B.k4	quant	421187456	422.00	61.68	1266	1058000
+Qwen3-0.6B.k4	quant	421187456	566.47	66.28	1266	1163916
+Qwen3-0.6B.k4	dequant	421187456	920.31	53.72	1564	1182884
+Qwen3-0.6B.k4	dequant	421187456	947.33	55.01	1562	1177356

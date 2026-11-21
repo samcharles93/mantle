@@ -1,0 +1,7 @@
+=== quantize q4 ===
+rc=0 Elapsed (wall clock) time (h:mm:ss or m:ss): 0:38.97 User time (seconds): 29.30 Maximum resident set size (kbytes): 3537268 size=990963312
+=== quantize k4 ===
+rc=0 Elapsed (wall clock) time (h:mm:ss or m:ss): 1:36.02 User time (seconds): 88.40 Maximum resident set size (kbytes): 3555040 size=950453616
+=== quantize q8 ===
+rc=0 Elapsed (wall clock) time (h:mm:ss or m:ss): 0:26.77 User time (seconds): 23.88 Maximum resident set size (kbytes): 3572492 size=1855170160
+=== quantize uq4 ===

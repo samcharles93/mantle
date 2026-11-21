@@ -1,0 +1,22 @@
+=== repeat 1/3 23:09:15 load=12.15 9.30 8.15 ===
+LFM3-1.7B.q8 rep=1 gen=10.22 pp=20.99 rss=4251112kB
+LFM3-1.7B.k4 rep=1 gen=11.26 pp=37.39 rss=3370784kB
+LFM3-1.7B.q4 rep=1 gen=10.82 pp=36.81 rss=3407772kB
+LFM3-1.7B rep=1 gen=7.73 pp=12.60 rss=3653992kB
+LFM3-1.7B-Q8_0 rep=1 pp=76.81 tg=11.53 rss=1890604kB
+LFM3-1.7B-Q4_K_M rep=1 pp=126.85 tg=16.34 rss=1855284kB
+=== repeat 2/3 23:12:12 load=13.91 11.03 8.99 ===
+LFM3-1.7B.q8 rep=1 gen=9.33 pp=31.95 rss=4250764kB
+LFM3-1.7B.k4 rep=1 gen=9.52 pp=34.69 rss=3361464kB
+LFM3-1.7B.q4 rep=1 gen=9.56 pp=32.73 rss=3408956kB
+LFM3-1.7B rep=1 gen=6.81 pp=10.83 rss=3643256kB
+LFM3-1.7B-Q8_0 rep=1 pp=68.94 tg=10.87 rss=1890136kB
+LFM3-1.7B-Q4_K_M rep=1 pp=125.90 tg=14.90 rss=1854688kB
+=== repeat 3/3 23:15:27 load=15.65 12.81 10.06 ===
+LFM3-1.7B.q8 rep=1 gen=9.12 pp=31.69 rss=4264824kB
+LFM3-1.7B.k4 rep=1 gen=9.10 pp=32.14 rss=3372116kB
+LFM3-1.7B.q4 rep=1 gen=10.01 pp=32.98 rss=3407280kB
+LFM3-1.7B rep=1 gen=6.69 pp=11.17 rss=3654604kB
+LFM3-1.7B-Q8_0 rep=1 pp=71.70 tg=11.19 rss=1889532kB
+LFM3-1.7B-Q4_K_M rep=1 pp=119.22 tg=16.37 rss=1854344kB
+done: /work/wt/mantle-quant14/spike/issue-14/scripts/../out
