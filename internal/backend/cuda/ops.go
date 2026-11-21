@@ -2364,13 +2364,21 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	intermF16Bytes := int64(interm) * 2
 	outBytes := int64(downW.rows) * 4
 
+	// A BF16 weight needs a BF16 input (see the down projection). When x is
+	// device resident (a device-side norm leaves the host copy stale), take it
+	// as F32 and convert it on device rather than upload the host slice.
 	xInputType := upW.dtype
-	devInput, usedDeviceInput, err := o.deviceInputForVector(x[:], upW.dtype, len(x))
+	devDType := upW.dtype
+	if upW.dtype == native.BlasBF16 {
+		devDType = native.BlasF32
+	}
+	devInput, usedDeviceInput, err := o.deviceInputForVector(x[:], devDType, len(x))
 	if err != nil {
 		o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn device input prepare failed: %w", err))
 		return false
 	}
-	if usedDeviceInput {
+	convertInput := usedDeviceInput && upW.dtype == native.BlasBF16
+	if usedDeviceInput && !convertInput {
 		xInputType = devInput.dtype
 	}
 	hostXBytes := int(xBytes)
@@ -2394,9 +2402,15 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 	// Capture xDev only after ensureDeviceVecs has run: o.xDev may be
 	// unallocated until the first ensure call resizes it.
 	xInput := o.xDev
-	if usedDeviceInput {
+	switch {
+	case convertInput:
+		if err := native.ConvertF32ToBF16(devInput.buf, o.xDev, len(x), o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn f32->bf16 input convert failed (n=%d): %w", len(x), err))
+			return false
+		}
+	case usedDeviceInput:
 		xInput = devInput.buf
-	} else {
+	default:
 		if err := fillXBuffer(o.xHost, upW.dtype, x[:]); err != nil {
 			return false
 		}
@@ -2438,12 +2452,20 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 		}
 	}
 
+	// cuBLAS GemmEx needs the activation in the weight's type: a BF16 weight
+	// with an F32 input is CUBLAS_STATUS_NOT_SUPPORTED. The conversion rounds
+	// to nearest even, as fillXBuffer does for the host-input matvec path.
 	downInput := o.aDev
 	downInputType := downW.dtype
-	if downW.dtype == native.BlasBF16 || downW.dtype == native.BlasF32 {
+	switch downW.dtype {
+	case native.BlasF32:
 		downInput = o.yDev
-		downInputType = native.BlasF32
-	} else {
+	case native.BlasBF16:
+		if err := native.ConvertF32ToBF16(o.yDev, o.aDev, interm, o.stream); err != nil {
+			o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn f32->bf16 projection convert failed (n=%d): %w", interm, err))
+			return false
+		}
+	default:
 		if err := native.ConvertF32ToF16(o.yDev, o.aDev, interm, o.stream); err != nil {
 			o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn f32->f16 projection convert failed (n=%d): %w", interm, err))
 			return false
@@ -2458,15 +2480,14 @@ func (o *Ops) FFNBlock(layer *model.Layer, x []float32, out []float32) bool {
 			o.recordFastPathErrorLocked(fmt.Errorf("cuda: ffn down round failed (n=%d): %w", downW.rows, err))
 			return false
 		}
-		o.setLastResult(o.zDev, out, downW.rows)
-		runtime.KeepAlive(x)
-		runtime.KeepAlive(out)
-		return true
 	}
-	if err := o.waitForResult(o.yHost.Ptr(), o.zDev, outBytes); err != nil {
-		return false
-	}
-	copy(out[:downW.rows], unsafe.Slice((*float32)(o.yHost.Ptr()), downW.rows))
+	// Publish the result on device, as quantFFNBlock does: the residual add
+	// or the next norm consumes it there, and FlushBlockResult makes it host
+	// visible when a host reader needs it. Copying it to out without
+	// publishing would leave lastResult describing whatever out held before.
+	o.setLastResult(o.zDev, out, downW.rows)
+	runtime.KeepAlive(x)
+	runtime.KeepAlive(out)
 	return true
 }
 
