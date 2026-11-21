@@ -1,6 +1,8 @@
 package simd
 
 import (
+	"fmt"
+	"math"
 	"math/rand/v2"
 	"testing"
 
@@ -117,6 +119,101 @@ func TestMatVecPacked4MatchesCached(t *testing.T) {
 				t.Fatalf("%#x row %d: packed %v, cached %v", dt, r, packed[r], cached[r])
 			}
 		}
+	}
+}
+
+// TestMatVecRangePacked4GroupsMatchCached runs matVecRangePacked4 over whole
+// row ranges, so the eight-row grouped path and the per-row tail both run (a
+// pooled MatVec gives each worker too few rows to reach a group in small
+// tests), and requires every output to carry the int8-cache kernel's bits.
+func TestMatVecRangePacked4GroupsMatchCached(t *testing.T) {
+	cases := []struct{ rows, cols, rs, re int }{
+		{67, 330, 0, 67},  // eight groups and a 3-row tail; a partial last block
+		{40, 2048, 5, 37}, // groups starting off a multiple of eight
+		{16, 7680, 0, 16}, // 240 blocks: the widest LFM3 row
+		{12, 8224, 0, 12}, // 257 blocks: past the grouped path's limit
+	}
+	for _, dt := range packed4DTypes(t) {
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("%#x_%dx%d_%d-%d", dt, tc.rows, tc.cols, tc.rs, tc.re), func(t *testing.T) {
+				w := packed4Mat(t, dt, tc.rows, tc.cols)
+				x := make([]float32, tc.cols)
+				rng := rand.New(rand.NewPCG(54, uint64(tc.cols)))
+				for i := range x {
+					x[i] = float32(rng.NormFloat64())
+				}
+				clear(x[32:64]) // a zero activation block
+				qx := PrepareQuantVec(x)
+				defer ReleaseQuantVec(qx)
+
+				got := make([]float32, tc.rows)
+				matVecRangePacked4(got, &w, tc.rs, tc.re, qx)
+
+				qc, err := instance.BuildQuantCache(&w)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wc := w
+				wc.Quant = qc
+				want := make([]float32, tc.rows)
+				matVecRangeQuantCached(want, &wc, x, tc.rs, tc.re, qx)
+
+				for r := tc.rs; r < tc.re; r++ {
+					if math.Float32bits(got[r]) != math.Float32bits(want[r]) {
+						t.Fatalf("row %d: packed %v, cached %v", r, got[r], want[r])
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestMatVecRangePacked4ZeroScalesMatchCached gives the grouped k path zero
+// superblock scales (an all-zero row) and zero sub-scales (zero blocks), where
+// the vector scale path may produce -0 instead of +0, and requires the outputs
+// to keep the int8-cache kernel's bits.
+func TestMatVecRangePacked4ZeroScalesMatchCached(t *testing.T) {
+	const rows, cols = 24, 2048
+	rng := rand.New(rand.NewPCG(55, 56))
+	src := make([]float32, rows*cols)
+	for i := range src {
+		src[i] = float32(rng.NormFloat64() * 0.02)
+	}
+	clear(src[3*cols : 4*cols])            // row 3: every scale zero
+	clear(src[5*cols+256 : 5*cols+512])    // row 5: one whole superblock zero
+	clear(src[9*cols+64 : 9*cols+96])      // row 9: a single zero block
+	for i := 11 * cols; i < 12*cols; i++ { // row 11: negative-only weights
+		src[i] = -float32(math.Abs(float64(src[i])))
+	}
+	payload, err := mcf.EncodeKTensor(src, rows, cols, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := Mat{R: rows, C: cols, Stride: cols, DType: mcf.DTypeK4, Raw: payload}
+	x := make([]float32, cols)
+	for i := range x {
+		x[i] = float32(rng.NormFloat64())
+	}
+	qx := PrepareQuantVec(x)
+	defer ReleaseQuantVec(qx)
+	got := make([]float32, rows)
+	matVecRangePacked4(got, &w, 0, rows, qx)
+
+	qc, err := instance.BuildQuantCache(&w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wc := w
+	wc.Quant = qc
+	want := make([]float32, rows)
+	matVecRangeQuantCached(want, &wc, x, 0, rows, qx)
+	for r := range rows {
+		if math.Float32bits(got[r]) != math.Float32bits(want[r]) {
+			t.Fatalf("row %d: packed %v (%#x), cached %v (%#x)", r, got[r], math.Float32bits(got[r]), want[r], math.Float32bits(want[r]))
+		}
+	}
+	if got[3] != 0 {
+		t.Fatalf("all-zero row gave %v", got[3])
 	}
 }
 
