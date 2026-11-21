@@ -7,6 +7,16 @@ import (
 	"simd/archsimd"
 )
 
+// endAVX clears the upper halves of the YMM registers (VZEROUPPER) where a
+// kernel's 256-bit work hands over to scalar float code. Go encodes scalar
+// float32 maths and moves of 128-bit values as legacy SSE, and on Golden Cove
+// cores every such instruction issued while the upper halves are dirty takes a
+// microcode assist of roughly 150-300 cycles (perf event
+// cpu_core/assists.sse_avx_mix). Skylake and Gracemont cores take no assist,
+// but VZEROUPPER is not free on Gracemont, so call this once per kernel call
+// or row, never per block.
+func endAVX() { archsimd.ClearAVXUpperBits() }
+
 // addSIMD adds src to dst element-wise using AVX2 SIMD.
 func addSIMD(dst, src []float32) {
 	i := 0

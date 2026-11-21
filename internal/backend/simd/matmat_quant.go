@@ -109,6 +109,13 @@ func getQuantRows(x []float32, n, c int, pair bool) *quantRows {
 
 func putQuantRows(qr *quantRows) { quantRowsPool.Put(qr) }
 
+// zeroFloat32s seeds the quantDot accumulators with VEX loads. The zero value
+// of a Float32x4 compiles to a legacy-SSE move of X15, which takes an assist on
+// Golden Cove once the kernel's 256-bit constants are live. quantDot2x4 loads
+// its two accumulators from different halves so the compiler cannot merge the
+// loads into one plus a (legacy-SSE) register copy.
+var zeroFloat32s [8]float32
+
 // useBatchQuant reports whether dst = x * wᵀ for n activation rows can run
 // through MatMatQuant. It needs, on an AVX2 host, either the int8 cache
 // matVecRangeQuantCached uses or a packed 4-bit payload (which
@@ -280,9 +287,7 @@ func matMatRangeQuant(dst []float32, w *Mat, qr *quantRows, n, rs, re int, worke
 			xPairs01 := qr.pairScales[(r/2)*bpr*4 : (r/2+1)*bpr*4]
 			xPairs23 := qr.pairScales[(r/2+1)*bpr*4 : (r/2+2)*bpr*4]
 			var out01, out23 [4]float32
-			sum01, sum23 := quantDot2x4(w0, w1, x0, x1, x2, x3, wPairs, xPairs01, xPairs23)
-			sum01.StoreArray(&out01)
-			sum23.StoreArray(&out23)
+			quantDot2x4(w0, w1, x0, x1, x2, x3, wPairs, xPairs01, xPairs23, &out01, &out23)
 			dst[r*ld+i], dst[(r+1)*ld+i] = out01[0], out01[1]
 			dst[r*ld+i+1], dst[(r+1)*ld+i+1] = out01[2], out01[3]
 			dst[(r+2)*ld+i], dst[(r+3)*ld+i] = out23[0], out23[1]
@@ -293,7 +298,7 @@ func matMatRangeQuant(dst []float32, w *Mat, qr *quantRows, n, rs, re int, worke
 			x1 := act[(r+1)*c : (r+2)*c]
 			xPairs := qr.pairScales[(r/2)*bpr*4 : (r/2+1)*bpr*4]
 			var out [4]float32
-			quantDot2x2(w0, w1, x0, x1, wPairs, xPairs).StoreArray(&out)
+			quantDot2x2(w0, w1, x0, x1, wPairs, xPairs, &out)
 			dst[r*ld+i], dst[(r+1)*ld+i] = out[0], out[1]
 			dst[r*ld+i+1], dst[(r+1)*ld+i+1] = out[2], out[3]
 			r += 2
@@ -313,20 +318,25 @@ func matMatRangeQuant(dst []float32, w *Mat, qr *quantRows, n, rs, re int, worke
 
 // quantDotRow is the single-output form of quantDot2x2: weight row wrow with
 // block scales ws against activation row r, in the scalar order of
-// matVecRangeQuantCached.
+// matVecRangeQuantCached. Every block dot is computed before the scalar fold,
+// so the 256-bit work ends once per row (see endAVX) rather than once per block.
 func quantDotRow(wrow []int8, ws []float32, act []int8, qr *quantRows, r int) float32 {
 	bpr := len(ws)
 	c := bpr * 32
 	x := act[r*c : (r+1)*c]
 	xs := qr.scales[r*bpr : (r+1)*bpr]
 	ones := archsimd.BroadcastInt16x16(1)
-	var sum float32
+	var dots [quantMaxBlocksPerRow]int32
 	for b := range bpr {
 		w := archsimd.LoadInt8x32Array((*[32]int8)(wrow[b*32 : b*32+32]))
 		v := archsimd.LoadInt8x32Array((*[32]int8)(x[b*32 : b*32+32]))
 		var tmp [8]int32
 		blockDotInt8(w.Abs().ToBits(), v.MulSign(w), ones).StoreArray(&tmp)
-		dot := tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
+		dots[b] = tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
+	}
+	endAVX()
+	var sum float32
+	for b, dot := range dots[:bpr] {
 		sum += float32(dot) * (ws[b] * xs[b])
 	}
 	return sum
@@ -340,7 +350,7 @@ func blockDotInt8(absW archsimd.Uint8x32, signedX archsimd.Int8x32, ones archsim
 	return absW.DotProductPairsSaturated(signedX).DotProductPairs(ones)
 }
 
-// quantDot2x2 returns the four outputs {w0·x0, w0·x1, w1·x0, w1·x1} of two
+// quantDot2x2 stores in out the four outputs {w0·x0, w0·x1, w1·x0, w1·x1} of two
 // int8 weight rows against two quantised activation rows. Per block, each
 // loaded vector feeds two products and a horizontal-add tree across the four
 // pairs yields one vector of exact block dots, which a Float32x4 lane per
@@ -348,10 +358,16 @@ func blockDotInt8(absW archsimd.Uint8x32, signedX archsimd.Int8x32, ones archsim
 // rounded operations, in the same block order, as matVecRangeQuantCached.
 //
 // wPairs and xPairs hold the matching block scales interleaved four wide.
-func quantDot2x2(w0, w1, x0, x1 []int8, wPairs, xPairs []float32) archsimd.Float32x4 {
+//
+// No Float32x4 crosses the function boundary: the sum starts from a vector
+// load and leaves through a vector store, then endAVX runs. Go zeroes, spills
+// and returns 128-bit values with legacy-SSE moves, and each one issued after
+// the 256-bit loop would take an assist on Golden Cove, as would the caller's
+// scalar stores of the outputs.
+func quantDot2x2(w0, w1, x0, x1 []int8, wPairs, xPairs []float32, out *[4]float32) {
 	blocks := len(wPairs) / 4
 	ones := archsimd.BroadcastInt16x16(1)
-	var sum archsimd.Float32x4
+	sum := archsimd.LoadFloat32x4Array((*[4]float32)(zeroFloat32s[:4]))
 	for b := range blocks {
 		off := b * 32
 		wa := archsimd.LoadInt8x32Array((*[32]int8)(w0[off : off+32]))
@@ -371,17 +387,20 @@ func quantDot2x2(w0, w1, x0, x1 []int8, wPairs, xPairs []float32) archsimd.Float
 		xs := archsimd.LoadFloat32x4Array((*[4]float32)(xPairs[4*b : 4*b+4]))
 		sum = sum.Add(dots.Mul(ws.Mul(xs)))
 	}
-	return sum
+	sum.StoreArray(out)
+	endAVX()
 }
 
 // quantDot2x4 is quantDot2x2 for activation rows x0..x3 at once: each weight
-// block is loaded and its absolute value taken once for four rows. The two
-// results hold {w0·x0, w0·x1, w1·x0, w1·x1} and the same for x2, x3; the two
-// trees run one after the other so the live vectors fit in 16 registers.
-func quantDot2x4(w0, w1, x0, x1, x2, x3 []int8, wPairs, xPairs01, xPairs23 []float32) (archsimd.Float32x4, archsimd.Float32x4) {
+// block is loaded and its absolute value taken once for four rows. out01 gets
+// {w0·x0, w0·x1, w1·x0, w1·x1} and out23 the same for x2, x3; the two trees
+// run one after the other so the live vectors fit in 16 registers. Its
+// boundary follows quantDot2x2's rules.
+func quantDot2x4(w0, w1, x0, x1, x2, x3 []int8, wPairs, xPairs01, xPairs23 []float32, out01, out23 *[4]float32) {
 	blocks := len(wPairs) / 4
 	ones := archsimd.BroadcastInt16x16(1)
-	var sum01, sum23 archsimd.Float32x4
+	sum01 := archsimd.LoadFloat32x4Array((*[4]float32)(zeroFloat32s[:4]))
+	sum23 := archsimd.LoadFloat32x4Array((*[4]float32)(zeroFloat32s[4:]))
 	for b := range blocks {
 		off := b * 32
 		wa := archsimd.LoadInt8x32Array((*[32]int8)(w0[off : off+32]))
@@ -410,5 +429,7 @@ func quantDot2x4(w0, w1, x0, x1, x2, x3 []int8, wPairs, xPairs01, xPairs23 []flo
 		xs = archsimd.LoadFloat32x4Array((*[4]float32)(xPairs23[4*b : 4*b+4]))
 		sum23 = sum23.Add(h.GetLo().Add(h.GetHi()).ConvertToFloat32().Mul(ws.Mul(xs)))
 	}
-	return sum01, sum23
+	sum01.StoreArray(out01)
+	sum23.StoreArray(out23)
+	endAVX()
 }

@@ -30,6 +30,9 @@ func dotBlocksPacked4Int16(data []byte, xPair []int16, out []int32, blocks int) 
 		dotBlocksPacked4Int16Scalar(data, xPair, out, blocks)
 		return
 	}
+	// tmp is zeroed here, before any 256-bit work: zeroing it in the tail loop
+	// would be a legacy-SSE store with the upper halves dirty (see endAVX).
+	var tmp [8]int32
 	mask := archsimd.BroadcastUint8x16(0x0F)
 	eight := archsimd.BroadcastInt8x16(8)
 	blockDot := func(b int) archsimd.Int32x8 {
@@ -50,10 +53,10 @@ func dotBlocksPacked4Int16(data []byte, xPair []int16, out []int32, blocks int) 
 		h.GetLo().Add(h.GetHi()).StoreArray((*[4]int32)(out[b : b+4]))
 	}
 	for ; b < blocks; b++ {
-		var tmp [8]int32
 		blockDot(b).StoreArray(&tmp)
 		out[b] = tmp[0] + tmp[1] + tmp[2] + tmp[3] + tmp[4] + tmp[5] + tmp[6] + tmp[7]
 	}
+	endAVX() // the caller folds out with scalar float maths
 }
 
 func dotBlocksPacked4Int16Scalar(data []byte, xPair []int16, out []int32, blocks int) {
@@ -154,4 +157,5 @@ func decodePacked4Row(dst []int8, data []byte, blocks int) {
 		odd := v.ReshapeToUint16s().ShiftAllRight(4).ReshapeToUint8s().And(mask).BitsToInt8().Xor(eight).Sub(eight)
 		zero.SetLo(even).SetHi(odd).StoreArray((*[32]int8)(dst[b*32 : b*32+32]))
 	}
+	endAVX() // packed4RowScales, scalar float maths, follows every call
 }
